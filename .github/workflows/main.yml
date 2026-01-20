@@ -1,0 +1,23 @@
+name: Stock Update Bot
+
+on:
+  schedule:
+    - cron: '*/30 0-7 * * 1-5' # 평일 09:00 ~ 16:00 (30분 간격)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 notion-client
+      - name: Run Script
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_stock.py
