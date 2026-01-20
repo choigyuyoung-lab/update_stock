@@ -2,20 +2,28 @@ name: Stock Update Bot
 
 on:
   schedule:
-    - cron: '*/30 0-7 * * 1-5' # 평일 09:00 ~ 16:00 (30분 간격)
-  workflow_dispatch:
+    # 평일(월-금) 한국 시간 09:00 ~ 16:00 사이 30분 간격 실행 (UTC 00:00 ~ 07:00)
+    - cron: '*/30 0-7 * * 1-5'
+  workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 notion-client
+        run: |
+          python -m pip install --upgrade pip
+          # 공식 notion-client의 안정적인 버전을 명시하여 설치합니다.
+          pip install requests beautifulsoup4 notion-client==2.2.1
+
       - name: Run Script
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
