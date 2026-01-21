@@ -16,26 +16,10 @@ notion = Client(auth=NOTION_TOKEN)
 KRX_PRICE = None
 KRX_FUND = None
 
-def get_latest_business_day():
-    """가장 최근 영업일 찾기"""
-    kst = timezone(timedelta(hours=9))
-    date = datetime.now(kst)
-    for _ in range(7):
-        date_str = date.strftime("%Y%m%d")
-        try:
-            # 장이 열렸는지 시가총액 데이터로 가볍게 체크
-            check = stock.get_market_cap(date_str, market="KOSPI")
-            if not check.empty:
-                return date_str
-        except:
-            pass
-        date -= timedelta(days=1)
-    return datetime.now(kst).strftime("%Y%m%d")
-
 def load_krx_data():
-    """한국 주식 데이터 로드 (실패 시 하루 전 데이터 사용)"""
+    """PER/PBR 데이터가 있는 날짜를 찾을 때까지 과거로 탐색"""
     global KRX_PRICE, KRX_FUND
-    print("📥 한국 주식 데이터(KRX) 다운로드 중...")
+    print("📥 한국 주식 데이터(KRX) 로드 시작...")
     
     try:
         # 1. 가격 정보 (FDR)
@@ -44,30 +28,41 @@ def load_krx_data():
         KRX_PRICE.set_index('Code', inplace=True)
         print("✅ 가격 데이터 로드 완료")
 
-        # 2. 재무 지표 (Pykrx) - [핵심 수정: 재시도 로직 추가]
-        target_date = get_latest_business_day()
-        print(f"📥 재무 데이터 요청 (기준일: {target_date})...")
+        # 2. 재무 지표 (Pykrx) - [핵심: 유효한 데이터 찾을 때까지 루프]
+        kst = timezone(timedelta(hours=9))
+        target_date = datetime.now(kst)
         
-        try:
-            # 오늘 날짜 시도
-            KRX_FUND = stock.get_market_fundamental_by_ticker(date=target_date, market="ALL")
+        found = False
+        
+        # 최대 7일 전까지 뒤지면서 'PER' 컬럼이 있는 데이터를 찾음
+        for i in range(7):
+            date_str = target_date.strftime("%Y%m%d")
+            print(f"🔎 재무 데이터 탐색 중... ({date_str})")
             
-            # 데이터가 비어있거나 에러가 날 경우를 대비해 컬럼 체크
-            if KRX_FUND.empty or 'PER' not in KRX_FUND.columns:
-                raise ValueError("데이터 없음")
+            try:
+                df = stock.get_market_fundamental_by_ticker(date=date_str, market="ALL")
                 
-        except Exception as e:
-            # 실패 시 하루 전 날짜로 재시도
-            print(f"⚠️ 오늘({target_date}) 재무 데이터가 아직 없습니다. 하루 전 데이터로 시도합니다.")
-            yesterday = (datetime.strptime(target_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-            KRX_FUND = stock.get_market_fundamental_by_ticker(date=yesterday, market="ALL")
-            print(f"✅ 하루 전({yesterday}) 재무 데이터 로드 성공!")
+                # 데이터가 있고, 핵심 컬럼(PER)이 존재하는지 확인
+                if not df.empty and 'PER' in df.columns:
+                    KRX_FUND = df
+                    print(f"✅ {date_str}일자 유효한 재무 데이터 확보 완료! (총 {len(df)}개)")
+                    found = True
+                    break # 찾았으면 중단
+                else:
+                    print(f"⚠️ {date_str}일자 데이터는 비어있거나 지표가 없습니다.")
+            except Exception as e:
+                print(f"⚠️ {date_str}일자 조회 실패: {e}")
+            
+            # 하루 전으로 이동
+            target_date -= timedelta(days=1)
+            time.sleep(1) # 차단 방지용 살짝 대기
 
-        print(f"✅ 최종 재무 데이터 로드 완료 (총 {len(KRX_FUND)}개 종목)")
+        if not found:
+            print("🚨 최근 7일간 유효한 재무 데이터를 찾지 못했습니다. (재무 정보 업데이트 건너뜀)")
+            KRX_FUND = None
         
     except Exception as e:
         print(f"🚨 데이터 로드 중 치명적 오류: {e}")
-        # 실패해도 가격 업데이트는 되도록 None 처리
         if KRX_PRICE is None: KRX_PRICE = None
         KRX_FUND = None
 
@@ -82,7 +77,6 @@ def get_korean_stock_info(ticker):
     """메모리 캐시에서 조회"""
     global KRX_PRICE, KRX_FUND
     
-    # 가격 데이터조차 없으면 중단
     if KRX_PRICE is None: return None
     
     ticker_clean = str(ticker).strip().zfill(6)
@@ -97,12 +91,13 @@ def get_korean_stock_info(ticker):
         row = KRX_PRICE.loc[ticker_clean]
         info["price"] = safe_float(row.get('Close'))
     
-    # 2. 재무 (Pykrx) - 데이터가 있을 때만
+    # 2. 재무 (Pykrx)
     if KRX_FUND is not None and ticker_clean in KRX_FUND.index:
         row = KRX_FUND.loc[ticker_clean]
-        info["per"] = safe_float(row.get('PER'))
-        info["pbr"] = safe_float(row.get('PBR'))
-        info["eps"] = safe_float(row.get('EPS'))
+        # 컬럼 이름이 확실히 존재할 때만 가져옴
+        if 'PER' in row: info["per"] = safe_float(row['PER'])
+        if 'PBR' in row: info["pbr"] = safe_float(row['PBR'])
+        if 'EPS' in row: info["eps"] = safe_float(row['EPS'])
         
     return info
 
@@ -126,7 +121,7 @@ def main():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
     now_iso = now.isoformat() 
-    print(f"🚀 벌크 업데이트 (재시도 로직 포함) - KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🚀 벌크 업데이트 (스마트 탐색) 시작 - KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
     load_krx_data()
     
@@ -144,49 +139,4 @@ def main():
                 try:
                     props = page["properties"]
                     market_obj = props.get("Market", {}).get("select")
-                    market = market_obj.get("name", "") if market_obj else ""
-                    
-                    ticker_data = props.get("티커", {}).get("title", [])
-                    ticker = ticker_data[0].get("plain_text", "").strip() if ticker_data else ""
-                    
-                    if not market or not ticker: continue
-
-                    if market in ["KOSPI", "KOSDAQ"]:
-                        stock = get_korean_stock_info(ticker)
-                    else:
-                        stock = get_overseas_stock_info(ticker)
-
-                    if stock and stock["price"] is not None:
-                        upd = {
-                            "현재가": {"number": stock["price"]},
-                            "마지막 업데이트": {"date": {"start": now_iso}}
-                        }
-                        
-                        fields = {"PER": "per", "PBR": "pbr", "EPS": "eps", "52주 최고가": "high52w", "52주 최저가": "low52w"}
-                        for n_key, d_key in fields.items():
-                            val = safe_float(stock[d_key])
-                            if val is not None: upd[n_key] = {"number": val}
-
-                        notion.pages.update(page_id=page["id"], properties=upd)
-                        success += 1
-                        if success % 10 == 0: print(f"✅ {success}개 완료 (최근: {ticker})")
-                    else:
-                        fail += 1
-                    
-                    if market not in ["KOSPI", "KOSDAQ"]:
-                        time.sleep(0.3) 
-                        
-                except Exception as e:
-                    print(f"❌ {ticker} 에러: {e}")
-                    fail += 1
-                    continue
-            
-            has_more = response.get("has_more")
-            next_cursor = response.get("next_cursor")
-        except Exception as e:
-            print(f"🚨 노션 쿼리 오류: {e}"); break
-
-    print(f"✨ 최종 결과: 성공 {success} / 실패 {fail}")
-
-if __name__ == "__main__":
-    main()
+                    market = market
