@@ -11,18 +11,26 @@ DATABASE_ID = os.environ.get("DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 
 def safe_float(value):
-    """지저분한 값을 안전하게 숫자로 변환 (문자열, None 등 처리)"""
+    """지저분한 값을 안전하게 숫자로 변환"""
     try:
-        if value is None or value in ["", "-", "N/A"]: return None
+        if value is None or value in ["", "-", "N/A", "null"]: return None
         return float(str(value).replace(",", ""))
     except:
         return None
 
 def get_korean_stock_info(ticker):
-    """국내 주식: 네이버 모바일(Mobile) API 사용 (구조가 훨씬 단순하고 정확함)"""
-    # 이 주소는 네이버 증권 모바일 페이지에서 사용하는 경량화 API입니다.
+    """국내 주식: 네이버 모바일 API (티커 원본 사용 + 보안 헤더 적용)"""
+    
+    # [요청 반영] 0을 채워주는 zfill 기능을 삭제했습니다.
+    # 이제 노션에서 넘어온 ticker 값을 수정 없이 그대로 사용합니다.
+    
     url = f"https://m.stock.naver.com/api/stock/{ticker}/basic"
-    headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)'}
+    
+    # 네이버 차단 방지용 헤더 (필수)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+        'Referer': 'https://m.stock.naver.com/'
+    }
     
     info = {"price": None, "per": None, "pbr": None, "eps": None, "high52w": None, "low52w": None}
     
@@ -30,7 +38,6 @@ def get_korean_stock_info(ticker):
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
         
-        # 모바일 API는 데이터가 루트(root)에 직관적으로 들어있습니다.
         info["price"] = safe_float(data.get('closePrice'))
         info["per"] = safe_float(data.get('per'))
         info["pbr"] = safe_float(data.get('pbr'))
@@ -40,13 +47,12 @@ def get_korean_stock_info(ticker):
         
         return info
     except Exception as e:
-        # 에러 발생 시 로그만 남기고 None 반환 (프로그램 중단 방지)
-        # print(f"⚠️ 국내 종목({ticker}) 데이터 추출 실패: {e}") 
+        # print(f"⚠️ 국내 종목({ticker}) 실패: {e}") 
         return None
 
 def get_overseas_stock_info(ticker):
-    """해외 주식: 야후 파이낸스 사용 (기존에 잘 되던 방식 유지)"""
-    symbol = ticker.split('.')[0] # 접미사 제거
+    """해외 주식: 야후 파이낸스"""
+    symbol = ticker.split('.')[0]
     info = {"price": None, "per": None, "pbr": None, "eps": None, "high52w": None, "low52w": None}
     
     try:
@@ -66,7 +72,7 @@ def main():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
     now_iso = now.isoformat() 
-    print(f"🚀 모바일 API 기반 업데이트 시작 - KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🚀 업데이트 시작 (티커 원본 사용) - KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
     has_more, next_cursor, success, fail = True, None, 0, 0
 
@@ -89,7 +95,7 @@ def main():
                     
                     if not market or not ticker: continue
 
-                    # 시장 구분에 따른 함수 호출
+                    # 시장 구분에 따른 분기
                     if market in ["KOSPI", "KOSDAQ"]:
                         stock = get_korean_stock_info(ticker)
                     else:
@@ -100,7 +106,7 @@ def main():
                             "현재가": {"number": stock["price"]},
                             "마지막 업데이트": {"date": {"start": now_iso}}
                         }
-                        # 값이 있는 지표만 골라서 업데이트
+                        
                         fields = {"PER": "per", "PBR": "pbr", "EPS": "eps", "52주 최고가": "high52w", "52주 최저가": "low52w"}
                         for n_key, d_key in fields.items():
                             val = safe_float(stock[d_key])
@@ -112,7 +118,7 @@ def main():
                     else:
                         fail += 1
                     
-                    time.sleep(0.2) # 모바일 API는 가벼워서 속도를 조금 높여도 됩니다.
+                    time.sleep(0.3) 
                 except Exception as e:
                     print(f"❌ {ticker} 처리 중 오류: {e}")
                     fail += 1
