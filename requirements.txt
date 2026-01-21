@@ -1,3 +1,6 @@
 notion-client
 requests
 yfinance
+finance-datareader
+beautifulsoup4
+lxml
