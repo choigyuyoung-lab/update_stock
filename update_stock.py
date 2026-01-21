@@ -12,11 +12,11 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 
-# [설정 변경] 5분(300초) -> 10분(600초)으로 연장
-# 평균 6~7분이 걸리므로 넉넉하게 잡음
+# [안전장치] 10분(600초) 이상 돌면 자동 종료 (서버 멈춤 방지)
 MAX_RUNTIME_SEC = 600 
 
 def safe_float(value):
+    """지저분한 데이터를 숫자로 변환"""
     try:
         if value is None or str(value).strip() in ["", "-", "N/A", "nan"]: return None
         return float(str(value).replace(",", ""))
@@ -24,17 +24,27 @@ def safe_float(value):
         return None
 
 def get_stock_data_from_yahoo(ticker, market):
+    """야후 파이낸스에서 데이터 조회 (오타 자동 보정 포함)"""
     symbol = str(ticker).strip().upper()
     
-    # 한국 주식 티커 변환
+    # [핵심 기능] 티커/시장 불일치 자동 해결 로직
     if market == "KOSPI":
-        if not symbol.endswith(".KS"): symbol = f"{symbol}.KS"
+        # 코스피인데 .KS가 없으면 붙여줌
+        if not symbol.endswith(".KS"): 
+            symbol = f"{symbol}.KS"
     elif market == "KOSDAQ":
-        if not symbol.endswith(".KQ"): symbol = f"{symbol}.KQ"
+        # 코스닥인데 .KQ가 없으면 붙여줌
+        if not symbol.endswith(".KQ"): 
+            symbol = f"{symbol}.KQ"
+    else:
+        # 미국/해외 주식인데 실수로 한국 꼬리표(.KS, .K 등)를 붙였다면 제거
+        symbol = symbol.replace(".KS", "").replace(".KQ", "").replace(".K", "")
     
     try:
         stock = yf.Ticker(symbol)
         d = stock.info
+        
+        # 현재가 가져오기 (장중: currentPrice, 장마감: regularMarketPrice)
         price = d.get("currentPrice") or d.get("regularMarketPrice")
         
         if price is None: return None
@@ -51,13 +61,12 @@ def get_stock_data_from_yahoo(ticker, market):
         return None
 
 def main():
-    # [안전장치] 시작 시간 기록
     start_time = time.time()
     
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
     now_iso = now.isoformat() 
-    print(f"🚀 [안전 모드] 업데이트 시작 (제한시간 10분) - {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🚀 [24시간 모드] 주식 업데이트 시작 - {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
     has_more = True
     next_cursor = None
@@ -65,27 +74,25 @@ def main():
     fail = 0
     
     while has_more:
-        # [안전장치] 전체 시간 체크
-        elapsed_time = time.time() - start_time
-        if elapsed_time > MAX_RUNTIME_SEC:
-            print(f"\n⏰ [Time Over] 10분이 경과하여 강제 종료합니다. (성공: {success}건)")
+        # 전체 실행 시간 체크
+        if time.time() - start_time > MAX_RUNTIME_SEC:
+            print(f"\n⏰ 안전을 위해 10분이 경과하여 종료합니다. (성공: {success}건)")
             break
 
         try:
-            print(f"\n📡 노션 페이지 조회 중... (Cursor: {next_cursor})")
+            # 노션 데이터 가져오기 (로그 간소화)
             response = notion.databases.query(
                 **{"database_id": DATABASE_ID, "start_cursor": next_cursor}
             )
             pages = response.get("results", [])
             
             if not pages and success == 0 and fail == 0:
-                print("🚨 가져온 페이지가 0개입니다.")
+                print("🚨 노션에서 가져온 페이지가 없습니다.")
                 break
 
             for page in pages:
-                # [안전장치] 개별 종목 처리 전 시간 체크
+                # 개별 종목 처리 전 시간 체크
                 if time.time() - start_time > MAX_RUNTIME_SEC:
-                    print(f"⏰ [Time Over] 제한 시간이 되어 작업을 중단합니다.")
                     has_more = False 
                     break 
 
@@ -100,6 +107,7 @@ def main():
                     
                     if not market or not ticker: continue
                     
+                    # 데이터 조회 (오타 보정 적용됨)
                     data = get_stock_data_from_yahoo(ticker, market)
 
                     if data is not None:
@@ -124,9 +132,10 @@ def main():
                         success += 1
                         print(f"   => ✅ [{market}] {ticker} : {data['price']:,.0f}")
                     else:
-                        print(f"   => ❌ [{market}] {ticker} : 야후 검색 실패")
+                        print(f"   => ❌ [{market}] {ticker} : 검색 실패")
                         fail += 1
                     
+                    # 서버 부하 방지 딜레이
                     time.sleep(0.5) 
                         
                 except Exception as e:
@@ -135,7 +144,6 @@ def main():
                     continue
             
             if not has_more: break
-            
             has_more = response.get("has_more")
             next_cursor = response.get("next_cursor")
 
