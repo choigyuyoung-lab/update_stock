@@ -1,4 +1,3 @@
 notion-client==2.2.1
 yfinance
-finance-datareader
 requests
