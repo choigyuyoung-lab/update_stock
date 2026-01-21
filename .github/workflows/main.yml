@@ -4,7 +4,6 @@ name: Stock Price Update
 on:
   schedule:
     # 한국 시간(KST) 기준 월~금, 오전 9시부터 오후 4시까지 30분 간격 실행
-    # (UTC 기준 00:00 ~ 07:00)
     - cron: '*/30 0-7 * * 1-5'
   workflow_dispatch:
     # 수동 실행 버튼 활성화
@@ -18,25 +17,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 3. 파이썬 3.12 설치 (yfinance 최신 문법 지원을 위해 필수)
+      # 3. 파이썬 3.12 설치
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.12'
 
-      # 4. 라이브러리 설치 (버전 충돌 방지 및 고정 설치)
+      # 4. 필수 라이브러리 설치 (여기에 finance-datareader 추가됨!)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 기존 설치된 라이브러리와의 충돌을 방지하기 위해 명시적으로 설치
-          pip install notion-client==2.2.1 yfinance requests
+          # 한국 주식 데이터 수집을 위한 finance-datareader 및 관련 도구 추가 설치
+          pip install notion-client==2.2.1 yfinance requests finance-datareader beautifulsoup4 lxml
 
       # 5. 주식 업데이트 스크립트 실행
       - name: Run stock update script
         env:
-          # GitHub Secrets에 등록된 값을 환경 변수로 전달
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-          # [추가] 로그를 지연 없이 실시간으로 출력하게 하는 설정
+          # 로그를 실시간으로 출력 (버퍼링 끄기)
           PYTHONUNBUFFERED: '1'
         run: python update_stock.py
