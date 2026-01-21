@@ -21,18 +21,28 @@ def get_domestic_price(ticker):
     except:
         return None
 
-def get_overseas_price(ticker):
-    """해외 주식 API 호출 - 노션에 입력된 티커를 그대로 사용합니다."""
-    # 사용자 제안 반영: .K나 .O가 포함되어 있든 없든, 노션 값을 그대로 심볼로 사용
+def get_overseas_price(ticker, market):
+    """해외 주식 API 호출 - 시장별 특성에 맞춰 심볼 최적화"""
     symbol = ticker
     
+    # [지능형 심볼 처리]
+    # 1. 나스닥(NASDAQ) 종목인데 마침표(.)가 없다면 자동으로 .O를 붙여줍니다.
+    if market == "NASDAQ" and "." not in ticker:
+        symbol = f"{ticker}.O"
+    
+    # 2. 아멕스(AMEX) 종목인데 마침표(.)가 없다면 자동으로 .A를 붙여줍니다.
+    elif market == "AMEX" and "." not in ticker:
+        symbol = f"{ticker}.A"
+    
+    # 3. NYSE는 사용자님의 말씀대로 노션 값을 100% 신뢰하여 그대로 사용합니다.
+    # (이미 .K가 있든 없든 적힌 그대로 조회함)
+
     url = f"https://api.stock.naver.com/stock/{symbol}/basic"
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     try:
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
-        # 가격 정보 추출 (쉼표 제거 후 숫자로 변환)
         price_str = str(data['closePrice']).replace(",", "")
         return float(price_str)
     except Exception as e:
@@ -40,7 +50,7 @@ def get_overseas_price(ticker):
         return None
 
 def main():
-    # 2. 한국 시간대(KST) 및 ISO 포맷 설정
+    # 한국 시간대(KST) 설정 (노션 시간 오차 해결)
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
     now_iso = now.isoformat() 
@@ -54,7 +64,6 @@ def main():
 
     while has_more:
         try:
-            # 페이지네이션: 100개씩 끊어서 모든 데이터를 가져옵니다.
             response = notion.databases.query(
                 database_id=DATABASE_ID,
                 start_cursor=next_cursor
@@ -64,7 +73,6 @@ def main():
             for page in pages:
                 props = page["properties"]
                 
-                # Market 및 티커 정보 가져오기
                 market_data = props.get("Market", {}).get("select")
                 market = market_data.get("name") if market_data else ""
                 
@@ -72,12 +80,11 @@ def main():
                 raw_ticker = ticker_data[0].get("plain_text", "").strip() if ticker_data else ""
                 
                 if market and raw_ticker:
-                    # 국내 주식과 해외 주식 구분
                     if market in ["KOSPI", "KOSDAQ"]:
                         price = get_domestic_price(raw_ticker)
                     else:
-                        # 해외 주식은 시장 정보 대신 노션의 '티커' 값 자체를 전달
-                        price = get_overseas_price(raw_ticker)
+                        # 해외 주식은 티커와 시장 정보를 함께 전달하여 처리
+                        price = get_overseas_price(raw_ticker, market)
                     
                     if price is not None:
                         notion.pages.update(
@@ -91,7 +98,6 @@ def main():
                         if total_count % 10 == 0:
                             print(f"진행 중... {total_count}개 완료")
                     
-                    # API 속도 제한 준수
                     time.sleep(0.4) 
             
             has_more = response.get("has_more")
