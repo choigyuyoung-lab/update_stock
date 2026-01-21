@@ -32,6 +32,7 @@ def load_krx_data():
     print("📥 [진단] 한국 주식 데이터(KRX) 로드 시작...")
     
     try:
+        # 가격 데이터 (FDR)
         KRX_PRICE = fdr.StockListing('KRX')
         KRX_PRICE['Code'] = KRX_PRICE['Code'].astype(str)
         KRX_PRICE.set_index('Code', inplace=True)
@@ -41,7 +42,7 @@ def load_krx_data():
         target_date = datetime.now(kst)
         found = False
         
-        # 재무 데이터 찾기 루프
+        # 재무 데이터 찾기 루프 (7일간)
         for i in range(7):
             date_str = target_date.strftime("%Y%m%d")
             try:
@@ -76,9 +77,11 @@ def get_korean_stock_info(ticker):
 
     info = { "price": None, "per": None, "pbr": None, "eps": None, "high52w": None, "low52w": None }
     
+    # 가격 정보
     row = KRX_PRICE.loc[ticker_clean]
     info["price"] = safe_float(row.get('Close'))
     
+    # 재무 정보
     if KRX_FUND is not None and ticker_clean in KRX_FUND.index:
         row_f = KRX_FUND.loc[ticker_clean]
         if 'PER' in row_f: info["per"] = safe_float(row_f['PER'])
@@ -118,43 +121,4 @@ def main():
         try:
             print(f"\n📡 노션 페이지 가져오는 중... (Cursor: {next_cursor})")
             response = notion.databases.query(
-                **{"database_id": DATABASE_ID, "start_cursor": next_cursor}
-            )
-            pages = response.get("results", [])
-            page_count = len(pages)
-            total_pages += page_count
-            print(f"📄 이번 페이지 수: {page_count}개")
-
-            if total_pages == 0 and page_count == 0:
-                print("🚨 [중요] 노션에서 아무것도 가져오지 못했습니다! DATABASE_ID를 확인하거나 봇 초대를 확인하세요.")
-                break
-
-            for page in pages:
-                try:
-                    props = page["properties"]
-                    
-                    # 1. Market 확인
-                    market_obj = props.get("Market", {}).get("select")
-                    market = market_obj.get("name", "") if market_obj else ""
-                    
-                    # 2. 티커 확인
-                    ticker_data = props.get("티커", {}).get("title", [])
-                    ticker = ticker_data[0].get("plain_text", "").strip() if ticker_data else ""
-                    
-                    # [진단 로그 출력]
-                    print(f"🔍 검사 중: [{market}] {ticker}")
-
-                    if not market:
-                        print("   => ❌ Market 값이 비어있어 건너뜁니다.")
-                        continue
-                    if not ticker:
-                        print("   => ❌ 티커 값이 비어있어 건너뜁니다.")
-                        continue
-
-                    stock_info = None
-                    if market in ["KOSPI", "KOSDAQ"]:
-                        stock_info = get_korean_stock_info(ticker)
-                    else:
-                        stock_info = get_overseas_stock_info(ticker)
-
-                    if stock_info and stock
+                **{"database_id
