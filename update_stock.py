@@ -12,8 +12,8 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 
-# [안전장치] 10분(600초) 이상 돌면 자동 종료 (서버 멈춤 방지)
-MAX_RUNTIME_SEC = 600 
+# [안전장치] 20분(1200초) 이상 돌면 자동 종료 (서버 멈춤 방지)
+MAX_RUNTIME_SEC = 1200 
 
 def safe_float(value):
     """지저분한 데이터를 숫자로 변환"""
