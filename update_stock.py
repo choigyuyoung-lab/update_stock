@@ -1,70 +1,93 @@
 import os
-import requests
 import yfinance as yf
+import FinanceDataReader as fdr
 from notion_client import Client
 import time
 from datetime import datetime, timedelta, timezone
+import pandas as pd
 
 # 1. 환경 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 
-def safe_float(value):
-    """지저분한 값을 안전하게 숫자로 변환"""
+# 전역 변수: 한국 주식 전체 데이터를 담을 그릇
+KRX_DATA = None
+
+def load_krx_data():
+    """한국거래소(KRX) 전 종목 데이터를 단 1번만 가져와서 메모리에 저장"""
+    global KRX_DATA
+    print("📥 한국 주식 전 종목 데이터(KRX) 다운로드 중... (약 5~10초 소요)")
     try:
-        if value is None or value in ["", "-", "N/A", "null"]: return None
+        # KRX: 코스피, 코스닥, 코넥스 통합 조회 (가격, PER, PBR, EPS 등 포함됨)
+        df = fdr.StockListing('KRX')
+        
+        # 검색 속도를 높이기 위해 티커(Code)를 인덱스로 설정
+        df['Code'] = df['Code'].astype(str) # 코드를 문자로 변환
+        df.set_index('Code', inplace=True)
+        
+        KRX_DATA = df
+        print(f"✅ KRX 데이터 로드 완료! (총 {len(df)}개 종목)")
+    except Exception as e:
+        print(f"🚨 KRX 데이터 로드 실패: {e}")
+        KRX_DATA = None
+
+def safe_float(value):
+    try:
+        if value is None or str(value).strip() in ["", "-", "N/A", "nan"]: return None
         return float(str(value).replace(",", ""))
     except:
         return None
 
 def get_korean_stock_info(ticker):
-    """국내 주식: 네이버 모바일 API (티커 원본 사용 + 보안 헤더 적용)"""
+    """메모리에 저장된 KRX 데이터에서 조회 (네이버 접속 X)"""
+    global KRX_DATA
     
-    # [요청 반영] 0을 채워주는 zfill 기능을 삭제했습니다.
-    # 이제 노션에서 넘어온 ticker 값을 수정 없이 그대로 사용합니다.
+    # 1. 데이터가 없으면 실패
+    if KRX_DATA is None: return None
     
-    url = f"https://m.stock.naver.com/api/stock/{ticker}/basic"
+    # 2. 티커 포맷 통일 (005930 처럼 6자리 문자열로)
+    ticker_clean = str(ticker).strip().zfill(6)
     
-    # 네이버 차단 방지용 헤더 (필수)
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
-        'Referer': 'https://m.stock.naver.com/'
-    }
-    
-    info = {"price": None, "per": None, "pbr": None, "eps": None, "high52w": None, "low52w": None}
+    # 3. 데이터프레임에서 조회
+    if ticker_clean not in KRX_DATA.index:
+        return None
     
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
+        row = KRX_DATA.loc[ticker_clean]
         
-        info["price"] = safe_float(data.get('closePrice'))
-        info["per"] = safe_float(data.get('per'))
-        info["pbr"] = safe_float(data.get('pbr'))
-        info["eps"] = safe_float(data.get('eps'))
-        info["high52w"] = safe_float(data.get('high52wPrice'))
-        info["low52w"] = safe_float(data.get('low52wPrice'))
+        # KRX 데이터 컬럼 매핑 ('Close', 'PER', 'PBR', 'EPS' 등은 StockListing에서 제공)
+        # 52주 데이터는 KRX 리스트에 없을 수 있으므로 가격 위주로 처리하거나
+        # 필요시 별도 처리하지만, 일단 핵심 지표 위주로 가져옵니다.
         
+        info = {
+            "price": safe_float(row.get('Close')),
+            "per": safe_float(row.get('PER')),
+            "pbr": safe_float(row.get('PBR')),
+            "eps": safe_float(row.get('EPS')),
+            # KRX 리스트는 52주 데이터를 바로 주지 않을 수 있음 (None 처리)
+            "high52w": None, 
+            "low52w": None 
+        }
         return info
     except Exception as e:
-        # print(f"⚠️ 국내 종목({ticker}) 실패: {e}") 
+        print(f"⚠️ 매핑 에러 ({ticker_clean}): {e}")
         return None
 
 def get_overseas_stock_info(ticker):
-    """해외 주식: 야후 파이낸스"""
+    """해외 주식: 야후 파이낸스 (기존 유지)"""
     symbol = ticker.split('.')[0]
-    info = {"price": None, "per": None, "pbr": None, "eps": None, "high52w": None, "low52w": None}
-    
     try:
         stock = yf.Ticker(symbol)
         d = stock.info
-        info["price"] = d.get("currentPrice") or d.get("regularMarketPrice")
-        info["per"] = d.get("trailingPE")
-        info["pbr"] = d.get("priceToBook")
-        info["eps"] = d.get("trailingEps")
-        info["high52w"] = d.get("fiftyTwoWeekHigh")
-        info["low52w"] = d.get("fiftyTwoWeekLow")
-        return info
+        return {
+            "price": d.get("currentPrice") or d.get("regularMarketPrice"),
+            "per": d.get("trailingPE"),
+            "pbr": d.get("priceToBook"),
+            "eps": d.get("trailingEps"),
+            "high52w": d.get("fiftyTwoWeekHigh"),
+            "low52w": d.get("fiftyTwoWeekLow")
+        }
     except:
         return None
 
@@ -72,7 +95,10 @@ def main():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
     now_iso = now.isoformat() 
-    print(f"🚀 업데이트 시작 (티커 원본 사용) - KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🚀 벌크(Bulk) 업데이트 시작 - KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # [핵심] 프로그램 시작 시 딱 한 번 한국 주식 전체를 가져옴
+    load_krx_data()
     
     has_more, next_cursor, success, fail = True, None, 0, 0
 
@@ -116,11 +142,15 @@ def main():
                         success += 1
                         if success % 10 == 0: print(f"✅ {success}개 완료 (최근: {ticker})")
                     else:
+                        # 한국 주식인데 실패했다면 티커 문제일 가능성이 높음
                         fail += 1
                     
-                    time.sleep(0.3) 
+                    # 한국 주식은 API 호출을 안하므로 딜레이가 거의 필요 없음
+                    if market not in ["KOSPI", "KOSDAQ"]:
+                        time.sleep(0.3) 
+                        
                 except Exception as e:
-                    print(f"❌ {ticker} 처리 중 오류: {e}")
+                    print(f"❌ {ticker} 에러: {e}")
                     fail += 1
                     continue
             
