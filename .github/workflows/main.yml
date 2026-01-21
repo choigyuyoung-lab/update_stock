@@ -2,16 +2,16 @@ name: Stock Price Update
 
 on:
   schedule:
-    # [변경] 매 시간 정각에 실행 (30분 간격 -> 1시간 간격)
-    # 한도 초과 방지를 위한 안전 조치
-    - cron: '0 0-7 * * 1-5'
+    # [최종 변경] 매 시간 정각마다 24시간 무한 실행
+    # (Public 저장소는 무제한 무료이므로 걱정 없음)
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
-    # [변경] GitHub 강제 종료 시간: 15분으로 넉넉하게 설정
+    # 넉넉하게 15분 설정
     timeout-minutes: 15
 
     steps:
