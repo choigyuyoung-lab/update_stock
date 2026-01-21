@@ -8,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 # 1. 환경 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID")
+# 클라이언트 초기화 방식 확인
 notion = Client(auth=NOTION_TOKEN)
 
 def safe_float(value):
-    """지저분한 값을 안전하게 숫자로 변환"""
     try:
         if value is None or value in ["", "-", "N/A"]: return None
         return float(str(value).replace(",", ""))
@@ -23,7 +23,6 @@ def get_korean_stock(ticker):
     url = f"https://api.stock.naver.com/stock/{ticker}/integration"
     headers = {'User-Agent': 'Mozilla/5.0'}
     info = {"price": None, "per": None, "pbr": None, "eps": None, "high52w": None, "low52w": None}
-    
     try:
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
@@ -43,10 +42,8 @@ def get_korean_stock(ticker):
 
 def get_overseas_stock(ticker):
     """해외 주식: 야후 파이낸스 사용"""
-    # 네이버용 접미사(.K, .O) 제거 후 순수 티커만 사용
     symbol = ticker.split('.')[0]
     info = {"price": None, "per": None, "pbr": None, "eps": None, "high52w": None, "low52w": None}
-    
     try:
         stock = yf.Ticker(symbol)
         d = stock.info
@@ -70,19 +67,27 @@ def main():
 
     while has_more:
         try:
-            response = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
+            # [수정 포인트] notion.databases.query 호출 구조 확인
+            response = notion.databases.query(
+                **{
+                    "database_id": DATABASE_ID,
+                    "start_cursor": next_cursor
+                }
+            )
             pages = response.get("results", [])
             
             for page in pages:
                 ticker = ""
                 try:
                     props = page["properties"]
-                    market = props.get("Market", {}).get("select", {}).get("name", "")
-                    ticker = props.get("티커", {}).get("title", [{}])[0].get("plain_text", "").strip()
+                    market_obj = props.get("Market", {}).get("select")
+                    market = market_obj.get("name", "") if market_obj else ""
+                    
+                    ticker_data = props.get("티커", {}).get("title", [])
+                    ticker = ticker_data[0].get("plain_text", "").strip() if ticker_data else ""
                     
                     if not market or not ticker: continue
 
-                    # 하이브리드 로직 분기
                     if market in ["KOSPI", "KOSDAQ"]:
                         stock = get_korean_stock(ticker)
                     else:
@@ -103,14 +108,15 @@ def main():
                     
                     time.sleep(0.4)
                 except Exception as e:
-                    print(f"❌ {ticker} 처리 중 오류: {e}")
+                    print(f"❌ {ticker} 처리 중 개별 오류: {e}")
                     fail += 1
                     continue
             
             has_more = response.get("has_more")
             next_cursor = response.get("next_cursor")
         except Exception as e:
-            print(f"🚨 노션 쿼리 오류: {e}"); break
+            print(f"🚨 노션 쿼리 오류: {e}")
+            break
 
     print(f"✨ 최종 결과: 성공 {success} / 실패 {fail}")
 
