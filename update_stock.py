@@ -1,6 +1,6 @@
 import os
 import warnings
-warnings.filterwarnings("ignore") # 경고 무시
+warnings.filterwarnings("ignore")
 
 import yfinance as yf
 from notion_client import Client
@@ -12,6 +12,10 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 
+# [설정 변경] 5분(300초) -> 10분(600초)으로 연장
+# 평균 6~7분이 걸리므로 넉넉하게 잡음
+MAX_RUNTIME_SEC = 600 
+
 def safe_float(value):
     try:
         if value is None or str(value).strip() in ["", "-", "N/A", "nan"]: return None
@@ -20,32 +24,21 @@ def safe_float(value):
         return None
 
 def get_stock_data_from_yahoo(ticker, market):
-    """
-    모든 주식(한국/미국/ETF)을 야후 파이낸스에서 조회
-    """
     symbol = str(ticker).strip().upper()
     
-    # [핵심] 한국 주식은 야후 양식에 맞게 꼬리표(.KS / .KQ) 부착
-    # 노션에 '005930'이라고 적혀있으면 -> '005930.KS'로 변환
+    # 한국 주식 티커 변환
     if market == "KOSPI":
-        if not symbol.endswith(".KS"):
-            symbol = f"{symbol}.KS"
+        if not symbol.endswith(".KS"): symbol = f"{symbol}.KS"
     elif market == "KOSDAQ":
-        if not symbol.endswith(".KQ"):
-            symbol = f"{symbol}.KQ"
+        if not symbol.endswith(".KQ"): symbol = f"{symbol}.KQ"
     
     try:
-        # 야후 파이낸스 접속
         stock = yf.Ticker(symbol)
         d = stock.info
-        
-        # 가격 정보 (현재가 or 정규장 종가)
         price = d.get("currentPrice") or d.get("regularMarketPrice")
         
-        if price is None:
-            return None
+        if price is None: return None
 
-        # 모든 데이터 리턴 (PER, PBR, 52주 등등)
         return {
             "price": price,
             "per": d.get("trailingPE"),
@@ -54,15 +47,17 @@ def get_stock_data_from_yahoo(ticker, market):
             "high52w": d.get("fiftyTwoWeekHigh"),
             "low52w": d.get("fiftyTwoWeekLow")
         }
-    except Exception as e:
-        # print(f"에러 상세: {e}")
+    except:
         return None
 
 def main():
+    # [안전장치] 시작 시간 기록
+    start_time = time.time()
+    
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
     now_iso = now.isoformat() 
-    print(f"🚀 [통합 모드] 야후 파이낸스 전체 업데이트 시작 - {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🚀 [안전 모드] 업데이트 시작 (제한시간 10분) - {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
     has_more = True
     next_cursor = None
@@ -70,6 +65,12 @@ def main():
     fail = 0
     
     while has_more:
+        # [안전장치] 전체 시간 체크
+        elapsed_time = time.time() - start_time
+        if elapsed_time > MAX_RUNTIME_SEC:
+            print(f"\n⏰ [Time Over] 10분이 경과하여 강제 종료합니다. (성공: {success}건)")
+            break
+
         try:
             print(f"\n📡 노션 페이지 조회 중... (Cursor: {next_cursor})")
             response = notion.databases.query(
@@ -82,30 +83,69 @@ def main():
                 break
 
             for page in pages:
+                # [안전장치] 개별 종목 처리 전 시간 체크
+                if time.time() - start_time > MAX_RUNTIME_SEC:
+                    print(f"⏰ [Time Over] 제한 시간이 되어 작업을 중단합니다.")
+                    has_more = False 
+                    break 
+
                 try:
                     props = page["properties"]
                     
-                    # 1. Market 확인
                     market_obj = props.get("Market", {}).get("select")
                     market = market_obj.get("name", "") if market_obj else ""
                     
-                    # 2. 티커 확인
                     ticker_data = props.get("티커", {}).get("title", [])
                     ticker = ticker_data[0].get("plain_text", "").strip() if ticker_data else ""
                     
                     if not market or not ticker: continue
                     
-                    # 3. 데이터 가져오기 (야후 단일 통일)
                     data = get_stock_data_from_yahoo(ticker, market)
 
                     if data is not None:
-                        # 4. 노션 업데이트
                         upd = {
                             "현재가": {"number": data["price"]},
                             "마지막 업데이트": {"date": {"start": now_iso}}
                         }
                         
-                        # 재무 지표 및 52주 데이터 일괄 업데이트
                         fields = {
-                            "PER": "per", 
-                            "PBR": "
+                            "PER": "per",
+                            "PBR": "pbr",
+                            "EPS": "eps",
+                            "52주 최고가": "high52w",
+                            "52주 최저가": "low52w"
+                        }
+                        
+                        for n_key, d_key in fields.items():
+                            val = safe_float(data[d_key])
+                            if val is not None: upd[n_key] = {"number": val}
+
+                        notion.pages.update(page_id=page["id"], properties=upd)
+                        success += 1
+                        print(f"   => ✅ [{market}] {ticker} : {data['price']:,.0f}")
+                    else:
+                        print(f"   => ❌ [{market}] {ticker} : 야후 검색 실패")
+                        fail += 1
+                    
+                    time.sleep(0.5) 
+                        
+                except Exception as e:
+                    print(f"   => 🚨 에러: {e}")
+                    fail += 1
+                    continue
+            
+            if not has_more: break
+            
+            has_more = response.get("has_more")
+            next_cursor = response.get("next_cursor")
+
+        except Exception as e:
+            print(f"🚨 노션 연결 오류: {e}")
+            break
+
+    print("\n---------------------------------------------------")
+    print(f"✨ 최종 결과: 성공 {success}건 / 실패 {fail}건")
+    print(f"⏱️ 총 소요 시간: {time.time() - start_time:.1f}초")
+
+if __name__ == "__main__":
+    main()
