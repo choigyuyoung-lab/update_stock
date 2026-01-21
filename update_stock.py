@@ -85,5 +85,14 @@ def get_korean_stock_info(ticker):
         "high52w": None, "low52w": None 
     }
     
-    # 1. 가격 (FDR)
-    if ticker_clean in KRX_PRICE.index
+    # 1. 가격 (FDR) - [수정됨] 여기에 콜론(:)을 추가했습니다.
+    if ticker_clean in KRX_PRICE.index:
+        row = KRX_PRICE.loc[ticker_clean]
+        info["price"] = safe_float(row.get('Close'))
+    
+    # 2. 재무 (Pykrx)
+    if KRX_FUND is not None and ticker_clean in KRX_FUND.index:
+        row = KRX_FUND.loc[ticker_clean]
+        if 'PER' in row: info["per"] = safe_float(row['PER'])
+        if 'PBR' in row: info["pbr"] = safe_float(row['PBR'])
+        if 'EPS' in row: info["eps"]
