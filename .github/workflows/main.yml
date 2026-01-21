@@ -1,25 +1,33 @@
 name: Stock Update Bot
+
 on:
   schedule:
-    # 평일(월-금) 한국 시간 09:00 ~ 16:00 사이 30분 간격 실행
+    # 평일(월-금) 한국 시간 09:00 ~ 16:30 사이 30분 간격 실행
+    # (UTC 00:00 ~ 07:30)
     - cron: '*/30 0-7 * * 1-5'
-  workflow_dispatch: # 수동 실행 버튼을 만들어줍니다
+  workflow_dispatch: # 수동 실행 버튼을 활성화합니다.
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 버전 2.2.1을 명시하는 이 부분이 핵심입니다!
+          # notion-client 2.2.1 버전을 명시하여 호환성을 유지합니다.
           pip install requests beautifulsoup4 notion-client==2.2.1
+
       - name: Run Script
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
+          # [추가 팁] 파이썬 출력을 버퍼링 없이 즉시 터미널에 보냅니다.
+          PYTHONUNBUFFERED: 1
         run: python update_stock.py
