@@ -37,4 +37,6 @@ jobs:
           # GitHub Secrets에 등록된 값을 환경 변수로 전달
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
+          # [추가] 로그를 지연 없이 실시간으로 출력하게 하는 설정
+          PYTHONUNBUFFERED: '1'
         run: python update_stock.py
