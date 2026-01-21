@@ -1,6 +1,4 @@
-notion-client
-requests
+notion-client==2.2.1
 yfinance
 finance-datareader
-beautifulsoup4
-lxml
+requests
