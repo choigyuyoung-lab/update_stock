@@ -1,33 +1,39 @@
-name: Stock Update Bot
+name: Stock Price Update
 
+# 1. 실행 조건 설정
 on:
   schedule:
-    # 평일(월-금) 한국 시간 09:00 ~ 16:30 사이 30분 간격 실행
-    # (UTC 00:00 ~ 07:30)
+    # 한국 시간(KST) 기준 월~금, 오전 9시부터 오후 4시까지 30분 간격 실행
+    # (UTC 기준 00:00 ~ 07:00)
     - cron: '*/30 0-7 * * 1-5'
-  workflow_dispatch: # 수동 실행 버튼을 활성화합니다.
+  workflow_dispatch:
+    # GitHub에서 버튼을 눌러 수동으로 즉시 실행 가능하게 함
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
 
+    steps:
+      # 2. 저장소의 코드를 가상 서버로 가져오기
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 3. 파이썬 환경 설치
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
+      # 4. 필요한 라이브러리 설치 (requirements.txt 읽기)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # notion-client 2.2.1 버전을 명시하여 호환성을 유지합니다.
-          pip install requests beautifulsoup4 notion-client==2.2.1
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run Script
+      # 5. 주식 업데이트 스크립트 실행
+      - name: Run stock update script
         env:
+          # GitHub Secrets에 등록한 토큰들을 환경 변수로 연결
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-          # [추가 팁] 파이썬 출력을 버퍼링 없이 즉시 터미널에 보냅니다.
-          PYTHONUNBUFFERED: 1
         run: python update_stock.py
