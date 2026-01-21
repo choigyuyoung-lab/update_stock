@@ -22,7 +22,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.12'
 
       # 4. 필요한 라이브러리 설치 (requirements.txt 읽기)
       - name: Install dependencies
