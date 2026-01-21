@@ -1,41 +1,37 @@
 name: Stock Price Update
 
-# 1. 실행 조건 설정
 on:
   schedule:
-    # 한국 시간(KST) 기준 월~금, 오전 9시부터 오후 4시까지 30분 간격 실행
+    # 한국 시간(KST) 평일 오전 9시 ~ 오후 4시 (30분 간격)
     - cron: '*/30 0-7 * * 1-5'
   workflow_dispatch:
-    # 수동 실행 버튼 활성화
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # 2. 코드 가져오기
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 3. 파이썬 3.12 설치
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.12'
 
-      # 4. 필수 라이브러리 설치 (setuptools 추가!)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # pkg_resources 에러 해결을 위해 setuptools 추가
-          pip install setuptools 
-          # 나머지 라이브러리 설치
-          pip install notion-client==2.2.1 yfinance requests finance-datareader pykrx beautifulsoup4 lxml
+          # notion-client: 노션 연동
+          # yfinance: 미국 주식 데이터
+          # finance-datareader: 한국 주식 전체 시세 (가장 빠름)
+          # requests: 통신용
+          pip install notion-client==2.2.1 yfinance requests finance-datareader
 
-      # 5. 주식 업데이트 스크립트 실행
       - name: Run stock update script
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
+          # 로그 실시간 출력 설정
           PYTHONUNBUFFERED: '1'
         run: python update_stock.py
