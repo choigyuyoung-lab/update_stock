@@ -1,35 +1,9 @@
-name: Optimized Dual Update System
-
-on:
-  schedule:
-    # 1. 주가 업데이트 (매시 0분, 30분에 실행)
-    - cron: '0,30 * * * *'
-    # 2. 재무 업데이트 (4시간마다 실행: 0시, 4시, 8시...)
-    - cron: '0 */4 * * *'
-  workflow_dispatch:
-
-jobs:
-  update_task:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas lxml html5lib beautifulsoup4
-      
-      # 조건부 실행: 30분 단위 스케줄이거나 수동 실행일 때 '주가' 업데이트
-      - name: Run Price Update
-        if: github.event.name == 'workflow_dispatch' || contains(github.event.schedule, '0,30 * * * *')
+- name: Run Price Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
         run: python update_price.py
 
-      # 조건부 실행: 4시간 단위 스케줄이거나 수동 실행일 때 '재무' 업데이트
       - name: Run Finance Update
         if: github.event_name == 'workflow_dispatch' || contains(github.event.schedule, '0 */4 * * *')
         env:
