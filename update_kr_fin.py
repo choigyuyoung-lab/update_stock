@@ -9,99 +9,102 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID") 
 notion = Client(auth=NOTION_TOKEN)
 
-def get_naver_api_data(ticker):
+def debug_naver_api(ticker):
     """
-    [블로그 가이드 반영] 네이버 증권 JSON API를 직접 호출하여
-    가장 정확한 EPS와 BPS 데이터를 가져옵니다.
+    API 응답의 원본 데이터를 출력하여 어디서 막히는지 확인합니다.
     """
+    print(f"\n🔍 [{ticker}] 탐색 시작...")
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     eps, bps = None, None
+    
     try:
-        # 네이버 모바일 통합 API 엔드포인트
         url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, headers=headers, timeout=10).json()
+        res = requests.get(url, headers=headers, timeout=10)
         
-        # JSON 결과 내의 totalInfos 리스트에서 EPS/BPS 탐색
-        items = res.get("result", {}).get("totalInfos", [])
+        if res.status_code != 200:
+            print(f"   ❌ API 연결 실패 (HTTP {res.status_code})")
+            return None, None
+
+        data = res.json()
+        items = data.get("result", {}).get("totalInfos", [])
+        
+        if not items:
+            print(f"   ❌ API 응답에 재무 정보(totalInfos)가 아예 없습니다.")
+            return None, None
+
         for item in items:
             key = item.get("key", "").upper()
-            val = item.get("value", "").replace(",", "").replace("원", "").strip()
+            val = str(item.get("value", "")).replace(",", "").replace("원", "").strip()
             
-            # 유효한 숫자인 경우만 float 변환 (마이너스 포함)
-            if "EPS" in key and val not in ["", "-", "N/A"]:
+            # 로그에 키와 값 표시
+            if "EPS" in key:
+                print(f"   -> API에서 찾은 EPS 키: '{item.get('key')}', 값: '{item.get('value')}'")
                 try: eps = float(val)
-                except: pass
-            if "BPS" in key and val not in ["", "-", "N/A"]:
+                except: print(f"      ⚠️ '{val}'을 숫자로 변환하지 못했습니다.")
+            
+            if "BPS" in key:
+                print(f"   -> API에서 찾은 BPS 키: '{item.get('key')}', 값: '{item.get('value')}'")
                 try: bps = float(val)
-                except: pass
+                except: print(f"      ⚠️ '{val}'을 숫자로 변환하지 못했습니다.")
+
     except Exception as e:
-        print(f"      ⚠️ {ticker} API 호출 중 오류: {e}")
+        print(f"   🚨 네트워크 또는 JSON 파싱 에러: {e}")
         
-    return {"eps": eps, "bps": bps}
+    return eps, bps
 
 def extract_ticker(props):
-    """노션 속성(제목 또는 텍스트)에서 티커 추출"""
+    """노션 속성 이름과 타입을 로그로 남깁니다."""
+    # 사용자님의 노션 컬럼명을 확인하기 위한 출력
+    print(f"   📊 노션 속성 목록: {list(props.keys())}")
+    
     for name in ["티커", "Ticker"]:
-        prop = props.get(name, {})
+        prop = props.get(name)
+        if not prop: continue
+        
+        p_type = prop.get("type")
         content = prop.get("title") or prop.get("rich_text")
         if content:
-            return content[0].get("plain_text", "").strip()
+            ticker = content[0].get("plain_text", "").strip()
+            print(f"   📌 추출된 티커: {ticker} (속성명: {name})")
+            return ticker
     return ""
 
 def main():
     kst = timezone(timedelta(hours=9))
-    print(f"🇰🇷 [한국 재무 업데이트] 시작 - {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🛠️ [디버깅 모드] 한국 재무 업데이트 분석 시작 - {datetime.now(kst)}")
     
-    success, fail, skip = 0, 0, 0
     next_cursor = None
-    
-    # [핵심] 100개 제한을 풀기 위한 무한 루프 페이지네이션
     while True:
-        response = notion.databases.query(
-            database_id=DATABASE_ID,
-            start_cursor=next_cursor
-        )
+        # 노션 페이지네이션 적용
+        response = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
         pages = response.get("results", [])
         
         for page in pages:
-            try:
-                props = page["properties"]
-                ticker = extract_ticker(props)
+            props = page["properties"]
+            ticker = extract_ticker(props)
+            
+            if len(ticker) == 6:
+                eps, bps = debug_naver_api(ticker)
                 
-                # 티커가 없거나 한국 주식(6자리)이 아니면 건너뜀
-                if not ticker or len(ticker) != 6:
-                    skip += 1
-                    continue
-
-                # API 데이터 호출
-                data = get_naver_api_data(ticker)
-                
-                # 데이터가 하나라도 있는 경우만 노션 업데이트
-                if data["eps"] is not None or data["bps"] is not None:
-                    upd_props = {}
-                    if data["eps"] is not None: upd_props["EPS"] = {"number": data["eps"]}
-                    if data["bps"] is not None: upd_props["BPS"] = {"number": data["bps"]}
-                    
-                    notion.pages.update(page_id=page["id"], properties=upd_props)
-                    success += 1
-                    print(f"   => ✅ {ticker} | EPS: {data['eps']} | BPS: {data['bps']}")
+                # 노션에 반영 시도 시 로그
+                if eps is not None or bps is not None:
+                    print(f"   ✅ 데이터 확보 성공! 노션 업데이트 시도...")
+                    try:
+                        upd = {}
+                        if eps is not None: upd["EPS"] = {"number": eps}
+                        if bps is not None: upd["BPS"] = {"number": bps}
+                        
+                        notion.pages.update(page_id=page["id"], properties=upd)
+                        print(f"      🚀 노션 업데이트 완료!")
+                    except Exception as e:
+                        print(f"      🚨 노션 업데이트 에러 (컬럼명이 'EPS', 'BPS'가 맞는지 확인): {e}")
                 else:
-                    print(f"   => ❌ {ticker} | 데이터 누락")
-                    fail += 1
-                
-                time.sleep(0.3) # API 호출 매너 딜레이
+                    print(f"   ❌ 최종 데이터 없음 (기록 스킵)")
+            
+            time.sleep(1) # 상세 로그 확인을 위해 천천히 진행
 
-            except Exception as e:
-                print(f"   => 🚨 {ticker} 처리 중 에러: {e}")
-                fail += 1
-                continue
-
-        # [핵심] 다음 페이지가 없으면 루프 탈출
-        if not response.get("has_more"):
-            break
+        if not response.get("has_more"): break
         next_cursor = response.get("next_cursor")
-
-    print(f"\n✨ 완료 | 성공: {success} | 실패: {fail} | 건너뜀: {skip}")
 
 if __name__ == "__main__":
     main()
