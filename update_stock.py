@@ -4,24 +4,29 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
-# [자가 치유] 실행 시 라이브러리 강제 재설치 (환경 꼬임 방지)
+# ---------------------------------------------------------
+# 🧹 [초강력 클리닝] 시작하자마자 무조건 재설치 (좀비 박멸)
+# ---------------------------------------------------------
+print("🚑 [시스템 초기화] 기존 라이브러리 제거 및 재설치 중...")
 try:
-    import notion_client
-    # 버전 확인 또는 특정 기능 테스트 시도
-    from notion_client import Client
-except (ImportError, AttributeError):
-    print("🚑 라이브러리 긴급 복구 중...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--force-reinstall", "notion-client>=2.0.0"])
-    import notion_client
-    from notion_client import Client
+    # 1. 꼬인 라이브러리들 강제 삭제
+    subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "notion", "notion-client"])
+    # 2. 최신 정품 라이브러리 강제 설치 (버전 2.2.1 고정)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "notion-client==2.2.1", "yfinance"])
+    print("✅ 라이브러리 재설치 완료! 이제 진짜 시작합니다.")
+except Exception as e:
+    print(f"⚠️ 설치 중 경고(무시 가능): {e}")
 
+# 이제서야 라이브러리를 불러옵니다 (깨끗한 상태)
+import notion_client
+from notion_client import Client
 import yfinance as yf
+# ---------------------------------------------------------
 
 # 1. 환경 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID")
-# 강제 재설치 후 클라이언트 초기화
-notion = notion_client.Client(auth=NOTION_TOKEN)
+notion = Client(auth=NOTION_TOKEN)
 
 # 안전장치
 MAX_RUNTIME_SEC = 1200 
@@ -79,71 +84,4 @@ def extract_value(prop):
     if p_type == "select": return prop.get("select", {}).get("name", "")
     if p_type in ["rich_text", "title"]:
         return prop.get(p_type, [{}])[0].get("plain_text", "") if prop.get(p_type) else ""
-    if p_type == "formula":
-        f = prop.get("formula", {})
-        return str(f.get("number") if f.get("type")=="number" else f.get("string", ""))
-    return ""
-
-def main():
-    start_time = time.time()
-    kst = timezone(timedelta(hours=9))
-    now_iso = datetime.now(kst).isoformat() 
-    print(f"🚀 [가격 업데이트(자가치유)] 시작 - {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    has_more = True
-    next_cursor = None
-    success = 0
-    fail = 0
-    
-    while has_more:
-        if time.time() - start_time > MAX_RUNTIME_SEC: break
-        try:
-            # 여기서 에러가 나면 notion-client 버전 문제임 -> 위에서 이미 해결함
-            response = notion.databases.query(
-                database_id=DATABASE_ID, 
-                start_cursor=next_cursor
-            )
-            pages = response.get("results", [])
-            if not pages: break
-
-            for page in pages:
-                if time.time() - start_time > MAX_RUNTIME_SEC: has_more=False; break 
-                try:
-                    props = page["properties"]
-                    ticker = extract_value(props.get("티커"))
-                    market = extract_value(props.get("Market"))
-                    
-                    if not ticker: continue
-                    
-                    data, mkt = get_smart_stock_data(ticker, market)
-                    if data:
-                        upd = {
-                            "현재가": {"number": data["price"]},
-                            "마지막 업데이트": {"date": {"start": now_iso}}
-                        }
-                        if data["high52w"]: upd["52주 최고가"] = {"number": data["high52w"]}
-                        if data["low52w"]: upd["52주 최저가"] = {"number": data["low52w"]}
-                        
-                        notion.pages.update(page_id=page["id"], properties=upd)
-                        success += 1
-                        print(f"   => ✅ [{mkt}] {ticker} : {data['price']:,.0f}")
-                    else:
-                        fail += 1
-                    time.sleep(0.5) 
-                except: fail += 1; continue
-            
-            if not has_more: break
-            has_more = response.get("has_more")
-            next_cursor = response.get("next_cursor")
-
-        except Exception as e:
-            print(f"🚨 치명적 오류: {e}")
-            # 디버깅을 위해 속성 출력
-            try: print(f"DEBUG: notion.databases attributes: {dir(notion.databases)}")
-            except: pass
-            break
-
-    print(f"\n✨ 완료: 성공 {success} / 실패 {fail}")
-
-if __name__ == "__main__":
-    main()
+    if p_type == "
