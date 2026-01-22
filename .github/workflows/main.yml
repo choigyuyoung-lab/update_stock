@@ -1,69 +1,22 @@
-name: Stock & Finance Full Update System
+name: Debug KR Finance Only
 
 on:
-  # 1. 30분마다 주가 업데이트 자동 실행
-  schedule:
-    - cron: '*/30 * * * *'
-  
-  # 2. 수동 실행 버튼 (테스트 및 재무정보 업데이트용)
-  workflow_dispatch:
+  workflow_dispatch: # 수동으로 버튼을 누를 때만 실행
 
 jobs:
-  # ---------------------------------------------------
-  # JOB 1: 주가 업데이트 (항상 먼저 실행)
-  # ---------------------------------------------------
-  update_prices:
+  debug_kr:
     runs-on: ubuntu-latest
-    timeout-minutes: 30 
-    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-
-    - name: Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install "notion-client==2.2.1" "yfinance>=0.2.31"
-
-    - name: Run Price Update Script
-      env:
-        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      run: python update_stock.py
-
-  # ---------------------------------------------------
-  # JOB 2: 한국 재무정보 업데이트 (JOB 1 완료 후 시작)
-  # ---------------------------------------------------
-  update_kr_finance:
-    runs-on: ubuntu-latest
-    # 가격 업데이트가 성공적으로 끝난 뒤에만 실행됩니다.
-    needs: update_prices 
-    timeout-minutes: 45
-    # 수동으로 [Run workflow] 버튼을 눌렀을 때만 작동합니다.
-    if: github.event_name == 'workflow_dispatch'
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-
-    - name: Install dependencies
-      # 블로그 가이드 방식(API 호출)과 Pandas 보조 방식을 위해 필요한 모든 라이브러리 설치
-      run: |
-        pip install --upgrade pip
-        pip install "notion-client==2.2.1" requests pandas lxml html5lib beautifulsoup4
-
-    - name: Run KR Finance Update Script
-      env:
-        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      run: python update_kr_fin.py
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install "notion-client==2.2.1" requests pandas lxml html5lib beautifulsoup4
+      - name: Run Debug Script
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_kr_fin.py
