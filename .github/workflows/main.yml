@@ -1,7 +1,7 @@
-name: US Finance Only Update System
+name: US Finance Detailed Logging
 
 on:
-  workflow_dispatch: # 수동 실행 버튼
+  workflow_dispatch:
 
 jobs:
   update_us_finance:
@@ -9,21 +9,16 @@ jobs:
     timeout-minutes: 50
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-
-    - name: Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install "notion-client==2.2.1" "yfinance>=0.2.31" pandas
-
-    - name: Run US Finance Update Script
-      env:
-        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      run: python update_us_fin.py
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" pandas
+      - name: Run US Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_us_fin.py
