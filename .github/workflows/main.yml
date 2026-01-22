@@ -14,7 +14,7 @@ jobs:
   # ---------------------------------------------------
   update_prices:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # 15분 넘으면 강제 종료 (안전장치)
+    timeout-minutes: 15
     
     steps:
     - name: Checkout code
@@ -26,8 +26,10 @@ jobs:
         python-version: '3.10'
 
     - name: Install libraries
-      # 가격 업데이트에는 pandas가 필요 없고 가벼운 yfinance만 있으면 됨
-      run: pip install notion-client yfinance
+      # [핵심] notion-client 2.0 이상 강제 설치
+      run: |
+        pip install --upgrade pip
+        pip install --upgrade "notion-client>=2.0.0" yfinance
 
     - name: Run Price Update
       env:
@@ -41,7 +43,7 @@ jobs:
   update_kr_finance:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # [중요] 30분마다 돌면 안 되니까, '수동 버튼' 눌렀을 때만 실행되게 설정
+    # 수동 버튼 눌렀을 때만 실행
     if: github.event_name == 'workflow_dispatch'
 
     steps:
@@ -54,9 +56,10 @@ jobs:
         python-version: '3.10'
 
     - name: Install libraries
+      # [핵심] 여기도 똑같이 notion-client 2.0 이상 강제 설치 + pandas
       run: |
         pip install --upgrade pip
-        pip install --upgrade notion-client>=2.0.0 pandas lxml html5lib
+        pip install --upgrade "notion-client>=2.0.0" pandas lxml html5lib
 
     - name: Run KR Finance Update
       env:
