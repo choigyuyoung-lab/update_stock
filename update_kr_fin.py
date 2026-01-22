@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import pandas as pd
 from datetime import datetime, timedelta, timezone
 from notion_client import Client
 
@@ -9,102 +10,116 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID") 
 notion = Client(auth=NOTION_TOKEN)
 
-def debug_naver_api(ticker):
+def get_kr_finance_data(ticker):
     """
-    API 응답의 원본 데이터를 출력하여 어디서 막히는지 확인합니다.
+    네이버 API(블로그 가이드 방식)와 웹 페이지 표 분석을 결합하여 
+    EPS, BPS를 누락 없이 가져옵니다.
     """
-    print(f"\n🔍 [{ticker}] 탐색 시작...")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': f'https://finance.naver.com/item/main.naver?code={ticker}'
+    }
     eps, bps = None, None
     
     try:
+        # [1단계] 네이버 모바일 통합 API 시도
         url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10).json()
         
-        if res.status_code != 200:
-            print(f"   ❌ API 연결 실패 (HTTP {res.status_code})")
-            return None, None
-
-        data = res.json()
-        items = data.get("result", {}).get("totalInfos", [])
-        
-        if not items:
-            print(f"   ❌ API 응답에 재무 정보(totalInfos)가 아예 없습니다.")
-            return None, None
-
+        items = res.get("result", {}).get("totalInfos", [])
         for item in items:
             key = item.get("key", "").upper()
             val = str(item.get("value", "")).replace(",", "").replace("원", "").strip()
             
-            # 로그에 키와 값 표시
-            if "EPS" in key:
-                print(f"   -> API에서 찾은 EPS 키: '{item.get('key')}', 값: '{item.get('value')}'")
+            if "EPS" in key and val not in ["", "-", "N/A"]:
                 try: eps = float(val)
-                except: print(f"      ⚠️ '{val}'을 숫자로 변환하지 못했습니다.")
-            
-            if "BPS" in key:
-                print(f"   -> API에서 찾은 BPS 키: '{item.get('key')}', 값: '{item.get('value')}'")
+                except: pass
+            if "BPS" in key and val not in ["", "-", "N/A"]:
                 try: bps = float(val)
-                except: print(f"      ⚠️ '{val}'을 숫자로 변환하지 못했습니다.")
+                except: pass
 
-    except Exception as e:
-        print(f"   🚨 네트워크 또는 JSON 파싱 에러: {e}")
+        # [2단계] API 데이터가 없을 경우 PC용 주요재무정보 표 분석 (대형주/지주사 대응)
+        if eps is None or bps is None:
+            pc_url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+            tables = pd.read_html(pc_url, encoding='cp949')
+            for table in tables:
+                if any("주요재무정보" in str(col) for col in table.columns):
+                    table.columns = table.columns.get_level_values(-1)
+                    table = table.set_index(table.columns[0])
+                    
+                    # 최근 결산 열(4번째 열)에서 데이터 추출
+                    if "EPS(원)" in table.index and eps is None:
+                        val = str(table.loc["EPS(원)"].iloc[3]).replace(",", "")
+                        if val.replace(".","").replace("-","").replace("nan","").isdigit(): eps = float(val)
+                    if "BPS(원)" in table.index and bps is None:
+                        val = str(table.loc["BPS(원)"].iloc[3]).replace(",", "")
+                        if val.replace(".","").replace("-","").replace("nan","").isdigit(): bps = float(val)
+                    break
+    except:
+        pass
         
     return eps, bps
 
 def extract_ticker(props):
-    """노션 속성 이름과 타입을 로그로 남깁니다."""
-    # 사용자님의 노션 컬럼명을 확인하기 위한 출력
-    print(f"   📊 노션 속성 목록: {list(props.keys())}")
-    
+    """노션에서 한국 주식 티커(6자리 숫자)를 추출합니다."""
     for name in ["티커", "Ticker"]:
-        prop = props.get(name)
-        if not prop: continue
-        
-        p_type = prop.get("type")
+        prop = props.get(name, {})
         content = prop.get("title") or prop.get("rich_text")
         if content:
             ticker = content[0].get("plain_text", "").strip()
-            print(f"   📌 추출된 티커: {ticker} (속성명: {name})")
-            return ticker
-    return ""
+            # 6자리 숫자 형식일 때만 한국 주식으로 간주
+            if ticker.isdigit() and len(ticker) == 6:
+                return ticker
+    return None
 
 def main():
     kst = timezone(timedelta(hours=9))
-    print(f"🛠️ [디버깅 모드] 한국 재무 업데이트 분석 시작 - {datetime.now(kst)}")
+    print(f"🇰🇷 [한국 재무 전용 업데이트] 시작 - {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
     
+    success, fail, skip = 0, 0, 0
     next_cursor = None
+    
+    # [핵심] 100개 제한 해제를 위한 페이지네이션 무한 루프
     while True:
-        # 노션 페이지네이션 적용
-        response = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
+        response = notion.databases.query(
+            database_id=DATABASE_ID,
+            start_cursor=next_cursor
+        )
         pages = response.get("results", [])
         
         for page in pages:
             props = page["properties"]
             ticker = extract_ticker(props)
             
-            if len(ticker) == 6:
-                eps, bps = debug_naver_api(ticker)
-                
-                # 노션에 반영 시도 시 로그
-                if eps is not None or bps is not None:
-                    print(f"   ✅ 데이터 확보 성공! 노션 업데이트 시도...")
-                    try:
-                        upd = {}
-                        if eps is not None: upd["EPS"] = {"number": eps}
-                        if bps is not None: upd["BPS"] = {"number": bps}
-                        
-                        notion.pages.update(page_id=page["id"], properties=upd)
-                        print(f"      🚀 노션 업데이트 완료!")
-                    except Exception as e:
-                        print(f"      🚨 노션 업데이트 에러 (컬럼명이 'EPS', 'BPS'가 맞는지 확인): {e}")
-                else:
-                    print(f"   ❌ 최종 데이터 없음 (기록 스킵)")
-            
-            time.sleep(1) # 상세 로그 확인을 위해 천천히 진행
+            # 한국 주식이 아니면 건너뜀
+            if not ticker:
+                skip += 1
+                continue
 
-        if not response.get("has_more"): break
+            # 데이터 수집 (API + HTML)
+            eps, bps = get_kr_finance_data(ticker)
+            
+            if eps is not None or bps is not None:
+                # 노션 속성 이름이 'EPS', 'BPS' (대문자)인지 확인 필수
+                upd = {}
+                if eps is not None: upd["EPS"] = {"number": eps}
+                if bps is not None: upd["BPS"] = {"number": bps}
+                
+                notion.pages.update(page_id=page["id"], properties=upd)
+                success += 1
+                print(f"   => ✅ {ticker} | EPS: {eps} | BPS: {bps}")
+            else:
+                print(f"   => ❌ {ticker} | 데이터 누락 (재확인 필요)")
+                fail += 1
+            
+            time.sleep(0.4) # 네이버 서버 부하 방지용 지연
+
+        # 다음 페이지가 없으면 루프 종료
+        if not response.get("has_more"):
+            break
         next_cursor = response.get("next_cursor")
+
+    print(f"\n✨ 완료 | 성공: {success} | 실패: {fail} | 건너뜀: {skip}")
 
 if __name__ == "__main__":
     main()
