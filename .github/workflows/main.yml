@@ -36,3 +36,24 @@ jobs:
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
           PYTHONUNBUFFERED: '1'
         run: python update_stock.py
+
+# ... 기존 update_stock 아래에 추가 ...
+
+  # [추가] 한국 주식 재무 정보 업데이트 (매주 토요일 아침 8시)
+  update_kr_finance:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    - name: Install dependencies
+      run: pip install notion-client
+    - name: Run KR Finance
+      env:
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
+      # 매주 토요일(6) 23시 UTC (= 한국 일요일 오전 8시) 
+      # 또는 원하시는 시간대로 설정 가능. 지금은 수동 실행도 가능하게 설정됨.
+      run: python update_kr_fin.py
