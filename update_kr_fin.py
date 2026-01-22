@@ -11,47 +11,52 @@ notion = Client(auth=NOTION_TOKEN)
 
 def get_naver_financials(ticker):
     """
-    [핵심] pandas를 이용해 네이버 금융 화면의 표를 직접 긁어옵니다.
+    [핵심] pandas를 이용해 네이버 금융 화면의 '투자지표' 표를 직접 읽어옵니다.
+    0104P0 같은 특수 코드도 네이버 메인 페이지에서 정확히 읽어올 수 있습니다.
     """
     try:
+        # 네이버 금융 메인 페이지 URL
         url = f"https://finance.naver.com/item/main.naver?code={ticker}"
         
-        # 1. 화면에 있는 모든 표를 가져옴
+        # lxml 엔진을 사용하여 표 읽기 (cp949 인코딩 필수)
         dfs = pd.read_html(url, encoding='cp949', header=0)
         
-        eps = None
-        bps = None
+        eps, bps = None, None
         
         for df in dfs:
+            # 데이터프레임을 문자열로 변환하여 검색
             df_str = df.to_string()
             
-            # 테이블 안에 EPS, BPS 정보가 있는지 확인
             if "EPS" in df_str or "BPS" in df_str:
                 try:
-                    # 표 구조에 따라 데이터 추출
+                    # 첫 번째 열을 인덱스로 설정 (EPS, BPS 행을 찾기 위함)
                     df = df.set_index(df.columns[0])
                     
+                    # EPS 추출
                     if "EPS" in df.index:
-                        val = str(df.loc["EPS"].iloc[0]).replace(",", "").split(" ")[0] 
-                        if val.replace("-","").isdigit(): eps = float(val)
+                        val = str(df.loc["EPS"].iloc[0]).replace(",", "").split(" ")[0]
+                        if val.replace("-","").replace(".","").isdigit(): 
+                            eps = float(val)
                             
+                    # BPS 추출
                     if "BPS" in df.index:
                         val = str(df.loc["BPS"].iloc[0]).replace(",", "").split(" ")[0]
-                        if val.replace("-","").isdigit(): bps = float(val)
+                        if val.replace("-","").replace(".","").isdigit(): 
+                            bps = float(val)
                 except:
                     continue
         
-        # 못 찾았으면 모바일 API 시도
-        if eps is None or bps is None:
+        # 만약 Pandas로 실패했다면 모바일 API로 2차 시도
+        if eps is None and bps is None:
             return get_financial_mobile(ticker)
 
         return {"eps": eps, "bps": bps}
 
-    except Exception as e:
+    except:
         return get_financial_mobile(ticker)
 
 def get_financial_mobile(ticker):
-    """예비용: 네이버 모바일 API"""
+    """예비용: 네이버 모바일 API (JSON 방식)"""
     import urllib.request
     import json
     try:
@@ -67,88 +72,77 @@ def get_financial_mobile(ticker):
             key = item.get("key", "").upper()
             val = str(item.get("value", "")).replace(",", "").replace("원", "")
             
-            if "EPS" in key and val.replace("-","").replace(".","").isdigit():
+            if "EPS" in key and val.replace("-","").replace(".","").replace(" ", "").replace("N/A","").isdigit():
                 eps = float(val)
-            if "BPS" in key and val.replace("-","").replace(".","").isdigit():
+            if "BPS" in key and val.replace("-","").replace(".","").replace(" ", "").replace("N/A","").isdigit():
                 bps = float(val)
                 
         return {"eps": eps, "bps": bps}
     except:
         return None
 
-def extract_ticker(props):
-    """티커 추출 (롤업/텍스트)"""
-    if props.get("티커", {}).get("type") == "rollup":
-        array = props.get("티커", {}).get("rollup", {}).get("array", [])
-        if array and array[0].get("type") in ["rich_text", "title"]:
-            return array[0].get(array[0].get("type"), [])[0].get("plain_text", "")
-    
-    ticker_data = props.get("티커", {}).get("title", []) or props.get("티커", {}).get("rich_text", [])
-    if ticker_data: return ticker_data[0].get("plain_text", "")
+def extract_value(prop):
+    """노션 속성값 안전 추출 (update_stock.py와 동일한 로직 적용)"""
+    if not prop: return ""
+    p_type = prop.get("type")
+    if p_type == "rollup":
+        array = prop.get("rollup", {}).get("array", [])
+        return extract_value(array[0]) if array else ""
+    if p_type == "select": return prop.get("select", {}).get("name", "")
+    if p_type in ["rich_text", "title"]:
+        text_list = prop.get(p_type, [])
+        return text_list[0].get("plain_text", "") if text_list else ""
     return ""
 
 def main():
     kst = timezone(timedelta(hours=9))
-    print(f"🇰🇷 [한국 재무정보(Pandas)] 업데이트 시작 - {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🇰🇷 [한국 재무정보] 업데이트 시작 - {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
     
-    has_more = True
-    next_cursor = None
-    success = 0
-    fail = 0
-    skip = 0
+    try:
+        # 데이터베이스 전체 쿼리
+        response = notion.databases.query(database_id=DATABASE_ID)
+        pages = response.get("results", [])
+    except Exception as e:
+        print(f"🚨 노션 연결 오류: {e}")
+        return
+
+    success, fail, skip = 0, 0, 0
     
-    while has_more:
+    for page in pages:
         try:
-            response = notion.databases.query(
-                database_id=DATABASE_ID,
-                start_cursor=next_cursor
-            )
-            pages = response.get("results", [])
-            if not pages: break
-
-            for page in pages:
-                try:
-                    props = page["properties"]
-                    ticker = extract_ticker(props).strip()
-                    
-                    # 한국 주식(숫자 6자리)만
-                    if not (ticker.isdigit() and len(ticker) == 6):
-                        skip += 1
-                        continue
-
-                    # 데이터 가져오기
-                    data = get_naver_financials(ticker)
-                    
-                    if data and (data["eps"] or data["bps"]):
-                        upd = {}
-                        if data["eps"]: upd["EPS"] = {"number": data["eps"]}
-                        if data["bps"]: upd["BPS"] = {"number": round(data["bps"])}
-                        
-                        if upd:
-                            notion.pages.update(page_id=page["id"], properties=upd)
-                            success += 1
-                            print(f"   => ✅ {ticker} : EPS {data['eps']} / BPS {data['bps']}")
-                        else:
-                             fail += 1
-                    else:
-                        print(f"   => ❌ {ticker} : 조회 실패")
-                        fail += 1
-                    
-                    time.sleep(0.2) 
-
-                except:
-                    fail += 1
-                    continue
+            props = page["properties"]
+            ticker = extract_value(props.get("티커")).strip()
             
-            if not has_more: break
-            has_more = response.get("has_more")
-            next_cursor = response.get("next_cursor")
+            # 한국 주식 판별 (6글자)
+            if len(ticker) != 6:
+                skip += 1
+                continue
 
-        except Exception as e:
-            print(f"🚨 오류: {e}")
-            break
+            # 데이터 조회
+            data = get_naver_financials(ticker)
+            
+            if data and (data["eps"] or data["bps"]):
+                upd = {}
+                if data["eps"]: upd["EPS"] = {"number": data["eps"]}
+                if data["bps"]: upd["BPS"] = {"number": data["bps"]}
+                
+                if upd:
+                    notion.pages.update(page_id=page["id"], properties=upd)
+                    success += 1
+                    print(f"   => ✅ {ticker} : EPS {data['eps']} / BPS {data['bps']}")
+                else:
+                    fail += 1
+            else:
+                fail += 1
+            
+            # 네이버 차단 방지를 위한 짧은 대기
+            time.sleep(0.3)
 
-    print(f"✨ 결과: 성공 {success} / 실패 {fail} / 건너뜀 {skip}")
+        except:
+            fail += 1
+            continue
+
+    print(f"\n✨ 완료: 성공 {success} / 실패 {fail} / 건너뜀(미국 등) {skip}")
 
 if __name__ == "__main__":
     main()
