@@ -2,9 +2,10 @@ name: Optimized Stock System
 
 on:
   schedule:
-    - cron: '0,30 * * * *'    # 30분마다 주가 실행
-    - cron: '0 */4 * * *'     # 4시간마다 재무 실행
-  workflow_dispatch:          # 수동 버튼
+    # 주석은 이렇게 위쪽에 작성하는 것이 안전합니다.
+    - cron: '0,30 * * * *'
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
 
 jobs:
   update_task:
@@ -14,22 +15,28 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas lxml html5lib beautifulsoup4
-      
+
       - name: Run Price Update
-        # 수동 실행이거나 30분 단위 스케줄일 때 실행
-        if: github.event_name == 'workflow_dispatch' || contains(github.event.schedule, '0,30 * * * *')
+        # contains 대신 == 를 사용하고, 주석 없는 순수 문자열만 비교합니다.
+        if: |
+          github.event_name == 'workflow_dispatch' || 
+          github.event.schedule == '0,30 * * * *' || 
+          github.event.schedule == '0 */4 * * *'
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
         run: python update_price.py
 
       - name: Run Finance Update
-        # 수동 실행이거나 4시간 단위 스케줄일 때 실행
-        if: github.event_name == 'workflow_dispatch' || contains(github.event.schedule, '0 */4 * * *')
+        # 재무 업데이트는 수동 실행이거나 4시간 크론일 때만 실행
+        if: |
+          github.event_name == 'workflow_dispatch' || 
+          github.event.schedule == '0 */4 * * *'
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
