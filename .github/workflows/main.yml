@@ -51,7 +51,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.10'
 
     - name: Install libraries
       # [수정됨] 판다스(pandas)와 표 읽기 도구(lxml, html5lib) 추가
