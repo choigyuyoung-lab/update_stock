@@ -9,69 +9,71 @@ from datetime import datetime, timedelta, timezone
 
 # 1. 환경 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-DATABASE_ID = os.environ.get("DATABASE_ID")
+DATABASE_ID = os.environ.get("DATABASE_ID") # [중요] 여기에 '관심주 DB'의 ID가 들어가야 합니다.
 notion = Client(auth=NOTION_TOKEN)
 
-# [안전장치] 20분(1200초) 설정 (종목이 늘어나도 넉넉함)
+# 안전장치: 20분
 MAX_RUNTIME_SEC = 1200 
 
 def safe_float(value):
-    """지저분한 데이터를 숫자로 변환"""
     try:
         if value is None or str(value).strip() in ["", "-", "N/A", "nan"]: return None
         return float(str(value).replace(",", ""))
     except:
         return None
 
-def extract_market_name(props):
+def extract_value_from_property(prop):
     """
-    [핵심 추가] Market 속성이 '선택'이든 '롤업'이든 상관없이 값을 추출하는 함수
+    [핵심 함수] 노션 속성이 롤업이든, 수식이든, 선택이든 상관없이
+    무조건 '문자열' 알맹이를 끄집어내는 만능 함수
     """
-    market_prop = props.get("Market", {})
-    prop_type = market_prop.get("type")
+    if not prop: return ""
     
-    market_name = ""
+    p_type = prop.get("type")
+    
+    # 1. 롤업 (Rollup) - 상장주식 DB에서 끌어온 값
+    if p_type == "rollup":
+        array = prop.get("rollup", {}).get("array", [])
+        if not array: return ""
+        # 롤업된 배열의 첫 번째 값 재귀 호출 (껍질 까기)
+        return extract_value_from_property(array[0])
 
-    # 1. 기존 방식 (선택/Select 인 경우)
-    if prop_type == "select":
-        market_name = market_prop.get("select", {}).get("name", "")
-        
-    # 2. 새로운 방식 (롤업/Rollup 인 경우) -> 이 부분이 추가되었습니다!
-    elif prop_type == "rollup":
-        # 롤업은 배열(Array) 형태입니다. 첫 번째 값을 가져옵니다.
-        rollup_array = market_prop.get("rollup", {}).get("array", [])
-        if rollup_array:
-            # 롤업된 원본 속성이 'Select'라고 가정
-            first_item = rollup_array[0]
-            if first_item.get("type") == "select":
-                market_name = first_item.get("select", {}).get("name", "")
-            # 롤업된 원본이 '수식'이나 '텍스트'일 수도 있으므로 대비
-            elif first_item.get("type") == "formula":
-                market_name = first_item.get("formula", {}).get("string", "")
-            elif first_item.get("type") == "rich_text":
-                text_list = first_item.get("rich_text", [])
-                if text_list:
-                    market_name = text_list[0].get("plain_text", "")
+    # 2. 선택 (Select)
+    if p_type == "select":
+        return prop.get("select", {}).get("name", "")
+    
+    # 3. 텍스트 (Rich Text) / 제목 (Title)
+    if p_type in ["rich_text", "title"]:
+        text_list = prop.get(p_type, [])
+        if text_list:
+            return text_list[0].get("plain_text", "")
+        return ""
 
-    return market_name
+    # 4. 수식 (Formula)
+    if p_type == "formula":
+        f_type = prop.get("formula", {}).get("type")
+        if f_type == "string":
+            return prop.get("formula", {}).get("string", "")
+        elif f_type == "number": # 숫자로 된 티커일 경우 대비
+            return str(prop.get("formula", {}).get("number", ""))
+
+    return ""
 
 def get_stock_data_from_yahoo(ticker, market):
-    """야후 파이낸스에서 데이터 조회 (오타 자동 보정 포함)"""
     symbol = str(ticker).strip().upper()
     
-    # [오타 보정]
-    if market == "KOSPI":
+    # [오타 보정 및 시장 매핑]
+    if "KOSPI" in market.upper(): 
         if not symbol.endswith(".KS"): symbol = f"{symbol}.KS"
-    elif market == "KOSDAQ":
+    elif "KOSDAQ" in market.upper(): 
         if not symbol.endswith(".KQ"): symbol = f"{symbol}.KQ"
     else:
-        # 미국/해외 주식은 꼬리표 제거
+        # 미국/해외: 꼬리표 제거
         symbol = symbol.replace(".KS", "").replace(".KQ", "").replace(".K", "")
     
     try:
         stock = yf.Ticker(symbol)
         d = stock.info
-        
         price = d.get("currentPrice") or d.get("regularMarketPrice")
         
         if price is None: return None
@@ -93,16 +95,17 @@ def main():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
     now_iso = now.isoformat() 
-    print(f"🚀 [롤업 호환 모드] 업데이트 시작 - {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🚀 [관심주 DB 전용] 업데이트 시작 - {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
     has_more = True
     next_cursor = None
     success = 0
     fail = 0
+    skip = 0
     
     while has_more:
         if time.time() - start_time > MAX_RUNTIME_SEC:
-            print(f"\n⏰ 20분이 경과하여 안전 종료합니다. (성공: {success}건)")
+            print(f"\n⏰ 20분 경과. 안전 종료.")
             break
 
         try:
@@ -112,26 +115,30 @@ def main():
             pages = response.get("results", [])
             
             if not pages and success == 0 and fail == 0:
-                print("🚨 가져온 페이지가 0개입니다.")
+                print("🚨 가져온 페이지가 0개입니다. (DB ID가 '관심주 DB'인지 확인하세요)")
                 break
 
             for page in pages:
                 if time.time() - start_time > MAX_RUNTIME_SEC:
-                    has_more = False 
-                    break 
+                    has_more = False; break 
 
                 try:
                     props = page["properties"]
                     
-                    # [수정됨] 이제 롤업이든 선택이든 다 읽을 수 있습니다.
-                    market = extract_market_name(props)
+                    # 1. Market 추출 (롤업 대응)
+                    market = extract_value_from_property(props.get("Market"))
                     
-                    ticker_data = props.get("티커", {}).get("title", [])
-                    ticker = ticker_data[0].get("plain_text", "").strip() if ticker_data else ""
+                    # 2. 티커 추출 (롤업 대응 - 혹시 티커도 롤업일 수 있으니)
+                    ticker = extract_value_from_property(props.get("티커"))
                     
-                    if not market or not ticker: continue
+                    # 데이터 검증 로그
+                    # print(f"🔍 검사: {ticker} ({market})") 
+
+                    if not market or not ticker:
+                        skip += 1
+                        continue
                     
-                    # 데이터 조회
+                    # 3. 야후 조회
                     data = get_stock_data_from_yahoo(ticker, market)
 
                     if data is not None:
@@ -140,14 +147,7 @@ def main():
                             "마지막 업데이트": {"date": {"start": now_iso}}
                         }
                         
-                        fields = {
-                            "PER": "per",
-                            "PBR": "pbr",
-                            "EPS": "eps",
-                            "52주 최고가": "high52w",
-                            "52주 최저가": "low52w"
-                        }
-                        
+                        fields = {"PER": "per", "PBR": "pbr", "EPS": "eps", "52주 최고가": "high52w", "52주 최저가": "low52w"}
                         for n_key, d_key in fields.items():
                             val = safe_float(data[d_key])
                             if val is not None: upd[n_key] = {"number": val}
@@ -162,6 +162,7 @@ def main():
                     time.sleep(0.5) 
                         
                 except Exception as e:
+                    # print(f"에러: {e}")
                     fail += 1
                     continue
             
@@ -174,7 +175,7 @@ def main():
             break
 
     print("\n---------------------------------------------------")
-    print(f"✨ 최종 결과: 성공 {success}건 / 실패 {fail}건")
+    print(f"✨ 결과: 성공 {success} / 실패 {fail} / 스킵 {skip}")
     print(f"⏱️ 총 소요 시간: {time.time() - start_time:.1f}초")
 
 if __name__ == "__main__":
