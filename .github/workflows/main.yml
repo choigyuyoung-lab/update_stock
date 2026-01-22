@@ -1,68 +1,24 @@
-name: Stock & Finance Update System
+name: Stock Update System
 
 on:
-  # 1. 30분마다 자동 실행 (가격 업데이트용)
   schedule:
     - cron: '*/30 * * * *'
-  
-  # 2. 수동 실행 버튼 (테스트용)
   workflow_dispatch:
 
 jobs:
-  # ---------------------------------------------------
-  # JOB 1: 가격 업데이트 (30분마다 + 수동)
-  # ---------------------------------------------------
-  update_prices:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-
-    - name: Install libraries
-      # [핵심] notion-client 2.0 이상 강제 설치
-      run: |
-        pip install --upgrade pip
-        pip install --upgrade "notion-client>=2.0.0" yfinance
-
-    - name: Run Price Update
-      env:
-        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      run: python update_stock.py
-
-  # ---------------------------------------------------
-  # JOB 2: 한국 재무정보 업데이트 (수동 실행 시에만 작동)
-  # ---------------------------------------------------
-  update_kr_finance:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # 수동 버튼 눌렀을 때만 실행
-    if: github.event_name == 'workflow_dispatch'
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-
-    - name: Install libraries
-      # [핵심] 여기도 똑같이 notion-client 2.0 이상 강제 설치 + pandas
-      run: |
-        pip install --upgrade pip
-        pip install --upgrade "notion-client>=2.0.0" pandas lxml html5lib
-
-    - name: Run KR Finance Update
-      env:
-        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      run: python update_kr_fin.py
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" pandas lxml html5lib
+      - name: Run Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_stock.py
