@@ -1,12 +1,16 @@
-name: US Finance Detailed Logging
+name: Stock Master Unified Update
 
 on:
+  # 1. 주가 업데이트 (30분마다 자동 실행)
+  schedule:
+    - cron: '*/30 * * * *'
+  # 2. 수동 실행 (주가 + 재무 정보 전체 업데이트)
   workflow_dispatch:
 
 jobs:
-  update_us_finance:
+  unified_update:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60 # 전체 데이터 처리 시간을 고려하여 넉넉히 설정
 
     steps:
       - uses: actions/checkout@v3
@@ -16,9 +20,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install "notion-client==2.2.1" "yfinance>=0.2.31" pandas
-      - name: Run US Update
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas lxml html5lib beautifulsoup4
+      - name: Run Master Update Script
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_us_fin.py
+        run: python update_master.py
