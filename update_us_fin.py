@@ -9,67 +9,71 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID") 
 notion = Client(auth=NOTION_TOKEN)
 
-def get_us_finance_data(ticker):
+def get_us_finance_with_logs(ticker):
     """
-    yfinance를 사용하여 미국 주식의 EPS와 BPS를 가져옵니다.
+    미국 주식 데이터를 가져오며, 실패 시 구체적인 이유를 반환합니다.
     """
     try:
         stock = yf.Ticker(ticker)
-        # 404 에러 방지를 위해 데이터 존재 여부를 먼저 확인하는 로직 강화
+        # fast_info와 info를 교차 확인하여 데이터 가용성 체크
         info = stock.info
         
-        if not info or 'quoteType' not in info:
-            return None, None
-            
-        eps = info.get("trailingEps")
+        if not info or len(info) < 5:
+            return None, None, "❌ 티커를 찾을 수 없거나 Yahoo Finance에 해당 종목 정보가 부족함"
+
+        # 1. EPS 추출 (TTM -> 연간 안전장치)
+        eps = info.get("trailingEps")  # TTM
+        eps_source = "TTM"
+        
+        if eps is None:
+            eps = info.get("forwardEps") or info.get("epsActual")
+            eps_source = "Annual/Est"
+
+        # 2. BPS 추출
         bps = info.get("bookValue")
         
-        return eps, bps
-    except Exception:
-        # 에러 발생 시 로그를 남기지 않고 조용히 넘어가도록 처리
-        return None, None
+        # 로그를 위한 상세 상태 메시지 생성
+        reasons = []
+        if eps is None: reasons.append("EPS 누락")
+        if bps is None: reasons.append("BPS 누락")
+        
+        if not reasons:
+            return eps, bps, f"✅ 성공 (EPS:{eps_source})"
+        else:
+            return eps, bps, f"⚠️ 일부 누락: {', '.join(reasons)}"
+
+    except Exception as e:
+        return None, None, f"🚨 시스템 에러: {str(e)}"
+
+def is_korean_ticker(ticker):
+    """한국 종목 필터링 로직 (0104P0 등 우선주 포함)"""
+    ticker = ticker.strip().upper()
+    if len(ticker) == 6 and ticker[0].isdigit(): return True
+    if any(ext in ticker for ext in [".KS", ".KQ"]): return True
+    if ticker.isdigit(): return True
+    return False
 
 def extract_ticker(props):
-    """
-    노션에서 미국 주식 티커를 추출합니다. 
-    한국 종목(숫자 6자리, 우선주 포함)은 철저히 제외합니다.
-    """
     for name in ["티커", "Ticker"]:
         prop = props.get(name, {})
         content = prop.get("title") or prop.get("rich_text")
         if content:
             ticker = content[0].get("plain_text", "").strip().upper()
-            
-            # [강화된 한국 종목 필터링]
-            # 1. 6자리이면서 숫자로 시작하면 한국 종목(0104P0 등 우선주 포함)으로 간주
-            if len(ticker) == 6 and ticker[0].isdigit():
-                continue
-            # 2. .KS 나 .KQ가 붙어있는 경우 제외
-            if any(ext in ticker for ext in [".KS", ".KQ"]):
-                continue
-            # 3. 순수 숫자로만 된 경우 제외
-            if ticker.isdigit():
-                continue
-            # 4. 티커가 너무 짧거나 없으면 제외
-            if not ticker or len(ticker) > 5: # 미국 주식은 보통 1~5글자
-                # 단, 6글자 중 숫자로 시작하지 않는 특수 케이스가 있을 수 있어 1번 조건이 우선임
-                if len(ticker) >= 6: continue
-                        
+            if not ticker or is_korean_ticker(ticker): continue
             return ticker
     return None
 
 def main():
     kst = timezone(timedelta(hours=9))
-    print(f"🇺🇸 [미국 재무 전용 업데이트] 시작 - {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🇺🇸 [미국 재무 업데이트] 상세 로그 모드 시작")
+    print(f"⏰ 실행 시간: {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-" * 50)
     
-    success, fail, skip = 0, 0, 0
+    success, partial, fail, skip = 0, 0, 0, 0
     next_cursor = None
     
     while True:
-        response = notion.databases.query(
-            database_id=DATABASE_ID,
-            start_cursor=next_cursor
-        )
+        response = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
         pages = response.get("results", [])
         
         for page in pages:
@@ -80,29 +84,40 @@ def main():
                 skip += 1
                 continue
 
-            # 데이터 수집 (yfinance)
-            eps, bps = get_us_finance_data(ticker)
+            eps, bps, log_msg = get_us_finance_with_logs(ticker)
             
+            # 노션 업데이트 로직
             if eps is not None or bps is not None:
-                upd = {}
-                if eps is not None: upd["EPS"] = {"number": eps}
-                if bps is not None: upd["BPS"] = {"number": bps}
-                
-                notion.pages.update(page_id=page["id"], properties=upd)
-                success += 1
-                print(f"   => ✅ {ticker} | EPS: {eps} | BPS: {bps}")
+                try:
+                    upd = {}
+                    if eps is not None: upd["EPS"] = {"number": eps}
+                    if bps is not None: upd["BPS"] = {"number": bps}
+                    
+                    notion.pages.update(page_id=page["id"], properties=upd)
+                    
+                    if "✅" in log_msg:
+                        success += 1
+                    else:
+                        partial += 1
+                    print(f"   [{ticker}] {log_msg}")
+                except Exception as e:
+                    print(f"   [{ticker}] 🚨 노션 기록 에러: {e}")
+                    fail += 1
             else:
-                # 미국 주식인데 데이터를 못 가져온 경우만 실패로 처리
-                print(f"   => ❌ {ticker} | 데이터 없음")
+                print(f"   [{ticker}] {log_msg}")
                 fail += 1
             
             time.sleep(0.5)
 
-        if not response.get("has_more"):
-            break
+        if not response.get("has_more"): break
         next_cursor = response.get("next_cursor")
 
-    print(f"\n✨ 완료 | 성공: {success} | 실패: {fail} | 건너뜀(한국 종목 등): {skip}")
+    print("-" * 50)
+    print(f"✨ 최종 결과 요약")
+    print(f"   - 전체 성공: {success}")
+    print(f"   - 일부 누락(부분 성공): {partial}")
+    print(f"   - 완전 실패: {fail}")
+    print(f"   - 한국종목 등 건너뜀: {skip}")
 
 if __name__ == "__main__":
     main()
