@@ -23,7 +23,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.10'
 
     - name: Install libraries
       # 가격 업데이트에는 pandas가 필요 없고 가벼운 yfinance만 있으면 됨
