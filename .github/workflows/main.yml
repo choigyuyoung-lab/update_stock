@@ -1,24 +1,67 @@
-name: Stock Update System
+name: Stock & Finance Full Update
 
 on:
+  # 1. 30분마다 주가 업데이트 실행
   schedule:
     - cron: '*/30 * * * *'
+  
+  # 2. 수동 실행 버튼 (테스트 및 재무정보 업데이트용)
   workflow_dispatch:
 
 jobs:
-  update:
+  # ---------------------------------------------------
+  # JOB 1: 주가 업데이트 (전체 데이터 처리)
+  # ---------------------------------------------------
+  update_prices:
     runs-on: ubuntu-latest
+    # 처리 데이터가 많으므로 타임아웃을 30분으로 넉넉히 설정합니다.
+    timeout-minutes: 30 
+    
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install "notion-client==2.2.1" "yfinance>=0.2.31" pandas lxml html5lib
-      - name: Run Update
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_stock.py
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install "notion-client==2.2.1" "yfinance>=0.2.31"
+
+    - name: Run Price Update
+      env:
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
+      run: python update_stock.py
+
+  # ---------------------------------------------------
+  # JOB 2: 한국 재무정보 업데이트 (수동 실행 시 전체 데이터 처리)
+  # ---------------------------------------------------
+  update_kr_finance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40 # 재무정보 크롤링은 시간이 더 소요될 수 있습니다.
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      # requests, pandas, lxml 등을 모두 포함하여 설치합니다.
+      run: |
+        pip install --upgrade pip
+        pip install "notion-client==2.2.1" requests pandas lxml html5lib
+
+    - name: Run KR Finance Update
+      env:
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
+      run: python update_kr_fin.py
