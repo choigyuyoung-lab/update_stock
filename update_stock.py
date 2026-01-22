@@ -8,7 +8,7 @@ import notion_client  # <--- 이 줄 추가
 
 # [범인 추적 코드] - 로그에서 이 부분을 확인하면 원인을 알 수 있습니다.
 print(f"🔎 현재 사용 중인 라이브러리 버전: {notion_client.__version__}")
-print(f"🔎 라이브러리 위치: {notion_client.__file__}"
+print(f"🔎 라이브러리 위치: {notion_client.__file__}")
 import time
 from datetime import datetime, timedelta, timezone
 
