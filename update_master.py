@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import yfinance as yf
 import math
+import io  # <--- 이 라이브러리가 추가되었습니다.
 from datetime import datetime, timedelta, timezone
 from notion_client import Client
 
@@ -42,18 +43,18 @@ def get_kr_finance(ticker):
             if "EPS" in key: eps = clean_num(item.get("value"))
             if "BPS" in key: bps = clean_num(item.get("value"))
         
-        # 2순위 안전장치: PC 웹페이지 (인코딩 에러 방지 적용)
+        # 2순위 안전장치: PC 웹페이지
         if eps is None or bps is None:
             pc_url = f"https://finance.naver.com/item/main.naver?code={ticker}"
             response = requests.get(pc_url, headers=headers)
             
-            # 인코딩 에러 해결: cp949 실패 시 utf-8로 시도
             try:
                 content = response.content.decode('cp949')
             except:
                 content = response.content.decode('utf-8', errors='ignore')
             
-            tables = pd.read_html(content)
+            # [수정 포인트] 경고를 방지하기 위해 io.StringIO(content)를 사용합니다.
+            tables = pd.read_html(io.StringIO(content))
             for table in tables:
                 if any("주요재무정보" in str(col) for col in table.columns):
                     table.columns = table.columns.get_level_values(-1)
@@ -96,6 +97,7 @@ def extract_ticker_info(props):
         content = prop.get("title") or prop.get("rich_text")
         if content:
             t = content[0].get("plain_text", "").strip().upper()
+            # 6자리 숫자로 시작하면 한국 주식으로 간주
             is_kr = len(t) == 6 and t[0].isdigit()
             return t, is_kr
     return None, False
@@ -106,17 +108,14 @@ def main():
     print(f"🚀 [통합 마스터] 시작 - {datetime.now(kst)}")
     
     success, fail, skip = 0, 0, 0
-    next_cursor = None # 페이지네이션 초기화
+    next_cursor = None 
     
-    # [핵심] 100개 제한을 풀기 위한 루프
     while True:
-        # start_cursor 파라미터를 사용하여 101번째부터 불러옴
         response = notion.databases.query(
             database_id=DATABASE_ID, 
             start_cursor=next_cursor
         )
         pages = response.get("results", [])
-        print(f"📦 현재 페이지 데이터 {len(pages)}건 처리 중...")
         
         for page in pages:
             props = page["properties"]
@@ -124,11 +123,11 @@ def main():
             if not ticker:
                 skip += 1; continue
 
-            # 1. 가격 및 재무 데이터 수집
+            # 1. 데이터 수집
             price, h52, l52 = get_price_data(ticker, is_kr)
             eps, bps, fin_msg = get_kr_finance(ticker) if is_kr else get_us_finance(ticker)
 
-            # 2. 노션 기록 시 유효성 검사 (JSON 에러 방지)
+            # 2. 노션 기록 (유효성 검사 강화)
             try:
                 upd = {}
                 if is_valid_number(price): upd["현재가"] = {"number": price}
@@ -147,10 +146,9 @@ def main():
             
             time.sleep(0.4)
 
-        # [페이지네이션 업데이트] 다음 페이지가 없으면 종료
         if not response.get("has_more"):
             break
-        next_cursor = response.get("next_cursor") # 다음 100개를 위한 커서 갱신
+        next_cursor = response.get("next_cursor")
 
     print(f"\n✨ 완료 | 성공: {success} | 실패: {fail} | 건너뜀: {skip}")
 
