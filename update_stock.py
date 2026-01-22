@@ -109,7 +109,6 @@ def get_smart_stock_data(ticker, market_hint):
             if data: return data, "US(Auto)"
             
             # [추가된 로직] 2단계: 미국에 없으면 한국(.KS)에서 검색 시도
-            # 알파벳 섞인 한국 ETF일 수 있음 (예: 0131V0.KS)
             data = fetch_yahoo_data(f"{clean_ticker}.KS")
             if data: return data, "KOSPI(Auto-Retry)"
             
@@ -153,4 +152,51 @@ def main():
 
                 try:
                     props = page["properties"]
-                    market = extract_value_from_
+                    
+                    # 롤업된 Market과 티커 추출
+                    market = extract_value_from_property(props.get("Market"))
+                    ticker = extract_value_from_property(props.get("티커"))
+                    
+                    if not ticker: continue
+                    
+                    # 스마트 조회 (3단 콤보 적용됨)
+                    data, detected_market = get_smart_stock_data(ticker, market)
+
+                    if data is not None:
+                        upd = {
+                            "현재가": {"number": data["price"]},
+                            "마지막 업데이트": {"date": {"start": now_iso}}
+                        }
+                        
+                        fields = {"PER": "per", "PBR": "pbr", "EPS": "eps", "52주 최고가": "high52w", "52주 최저가": "low52w"}
+                        for n_key, d_key in fields.items():
+                            val = safe_float(data[d_key])
+                            if val is not None: upd[n_key] = {"number": val}
+
+                        notion.pages.update(page_id=page["id"], properties=upd)
+                        success += 1
+                        print(f"   => ✅ [{detected_market}] {ticker} : {data['price']:,.0f}")
+                    else:
+                        print(f"   => ❌ [{market or 'Unknown'}] {ticker} : 검색 실패")
+                        fail += 1
+                    
+                    time.sleep(0.5) 
+                        
+                except Exception as e:
+                    fail += 1
+                    continue
+            
+            if not has_more: break
+            has_more = response.get("has_more")
+            next_cursor = response.get("next_cursor")
+
+        except Exception as e:
+            print(f"🚨 노션 연결 오류: {e}")
+            break
+
+    print("\n---------------------------------------------------")
+    print(f"✨ 결과: 성공 {success} / 실패 {fail}")
+    print(f"⏱️ 총 소요 시간: {time.time() - start_time:.1f}초")
+
+if __name__ == "__main__":
+    main()
