@@ -1,22 +1,32 @@
-name: Debug KR Finance Only
+name: KR Finance Only Update System
 
 on:
-  workflow_dispatch: # 수동으로 버튼을 누를 때만 실행
+  # 수동 실행 버튼을 누를 때만 작동합니다.
+  workflow_dispatch:
 
 jobs:
-  debug_kr:
+  update_kr_finance:
     runs-on: ubuntu-latest
+    # 100개 이상의 전체 데이터를 처리하기 위해 타임아웃을 넉넉히 설정했습니다.
+    timeout-minutes: 50
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install "notion-client==2.2.1" requests pandas lxml html5lib beautifulsoup4
-      - name: Run Debug Script
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_kr_fin.py
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      # API 호출을 위한 requests와 웹 표 분석을 위한 pandas/beautifulsoup4를 모두 설치합니다.
+      run: |
+        pip install --upgrade pip
+        pip install "notion-client==2.2.1" requests pandas lxml html5lib beautifulsoup4
+
+    - name: Run KR Finance Update Script
+      env:
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
+      run: python update_kr_fin.py
