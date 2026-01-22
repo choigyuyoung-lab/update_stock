@@ -2,11 +2,13 @@ import os, time, math, yfinance as yf
 from datetime import datetime, timedelta, timezone
 from notion_client import Client
 
+# 환경 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID") 
 notion = Client(auth=NOTION_TOKEN)
 
 def is_valid(val):
+    """노션 JSON 에러 방지를 위한 수치 유효성 검사"""
     return val is not None and not (math.isnan(val) or math.isinf(val))
 
 def main():
@@ -16,6 +18,7 @@ def main():
     
     next_cursor = None
     while True:
+        # 100개 제한 해제 (페이지네이션)
         res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
         pages = res.get("results", [])
         
@@ -29,7 +32,9 @@ def main():
             if not ticker: continue
             
             try:
-                symbol = ticker + (".KS" if (len(ticker) == 6 and ticker[0].isdigit()) else "")
+                # 한국 종목(6자리 숫자) 판별
+                is_kr = len(ticker) == 6 and ticker[0].isdigit()
+                symbol = ticker + (".KS" if is_kr else "")
                 stock = yf.Ticker(symbol)
                 d = stock.fast_info
                 
@@ -46,3 +51,6 @@ def main():
 
         if not res.get("has_more"): break
         next_cursor = res.get("next_cursor")
+
+if __name__ == "__main__":
+    main()
