@@ -12,7 +12,7 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 
-# 안전장치: 20분
+# 안전장치: 30분 간격 실행이므로 20분이면 충분
 MAX_RUNTIME_SEC = 1200 
 
 def safe_float(value):
@@ -23,7 +23,7 @@ def safe_float(value):
         return None
 
 def extract_value_from_property(prop):
-    """노션 롤업/선택/텍스트 등 모든 속성에서 텍스트 추출"""
+    """노션 속성값 추출 (롤업/선택/텍스트 호환)"""
     if not prop: return ""
     p_type = prop.get("type")
     
@@ -50,8 +50,10 @@ def extract_value_from_property(prop):
 
     return ""
 
-def fetch_yahoo_data(symbol):
-    """실제 야후 파이낸스 접속 함수"""
+def fetch_yahoo_price(symbol):
+    """
+    [변경] 재무정보(PER/EPS)는 빼고, 오직 '가격' 관련 정보만 가져옵니다.
+    """
     try:
         stock = yf.Ticker(symbol)
         d = stock.info
@@ -61,22 +63,17 @@ def fetch_yahoo_data(symbol):
 
         return {
             "price": price,
-            "per": d.get("trailingPE"),
-            "pbr": d.get("priceToBook"),
-            "eps": d.get("trailingEps"),
-            "high52w": d.get("fiftyTwoWeekHigh"),
-            "low52w": d.get("fiftyTwoWeekLow")
+            "high52w": d.get("fiftyTwoWeekHigh"), # 52주 신고가는 가격 정보라 유지
+            "low52w": d.get("fiftyTwoWeekLow")    # 52주 신저가도 유지
         }
     except:
         return None
 
 def get_smart_stock_data(ticker, market_hint):
-    """
-    [업그레이드] 알파벳이 섞인 한국 ETF도 찾아내는 3단 콤보 로직
-    """
+    """한/미 주식 자동 감지 및 가격 조회"""
     ticker = str(ticker).strip().upper()
     
-    # 1. 사용자가 Market을 명확히 지정해둔 경우 (가장 우선)
+    # 1. Market 힌트가 있는 경우
     if market_hint:
         symbol = ticker
         if "KOSPI" in market_hint.upper(): 
@@ -84,47 +81,40 @@ def get_smart_stock_data(ticker, market_hint):
         elif "KOSDAQ" in market_hint.upper(): 
             if not symbol.endswith(".KQ"): symbol = f"{symbol}.KQ"
         else:
-            # 미국 등 해외는 꼬리표 제거
             symbol = symbol.replace(".KS", "").replace(".KQ", "").replace(".K", "")
         
-        # 지정된 시장에서 조회
-        data = fetch_yahoo_data(symbol)
-        return data, market_hint
+        return fetch_yahoo_price(symbol), market_hint
 
-    # 2. Market이 비어있는 경우 (자동 추리)
+    # 2. Market 힌트가 없는 경우 (자동 감지)
     else:
-        # Case A: 숫자 6자리 -> 누가 봐도 한국 주식
+        # 한국 주식 (숫자 6자리)
         if ticker.isdigit() and len(ticker) == 6:
-            data = fetch_yahoo_data(f"{ticker}.KS")
+            data = fetch_yahoo_price(f"{ticker}.KS")
             if data: return data, "KOSPI(Auto)"
             
-            data = fetch_yahoo_data(f"{ticker}.KQ")
+            data = fetch_yahoo_price(f"{ticker}.KQ")
             if data: return data, "KOSDAQ(Auto)"
 
-        # Case B: 알파벳이 섞여있거나 길이가 다름 (미국 주식 OR 특수 한국 ETF)
+        # 미국 주식 (알파벳 등)
         else:
-            # 1단계: 미국 주식이라고 가정하고 검색 (원래 로직)
             clean_ticker = ticker.replace(".KS", "").replace(".KQ", "").replace(".K", "")
-            data = fetch_yahoo_data(clean_ticker)
+            data = fetch_yahoo_price(clean_ticker)
             if data: return data, "US(Auto)"
             
-            # [추가된 로직] 2단계: 미국에 없으면 한국(.KS)에서 검색 시도
-            data = fetch_yahoo_data(f"{clean_ticker}.KS")
+            # 한국 ETF 예외처리 (알파벳 섞인 것)
+            data = fetch_yahoo_price(f"{clean_ticker}.KS")
             if data: return data, "KOSPI(Auto-Retry)"
             
-            # [추가된 로직] 3단계: 코스닥(.KQ)에서도 검색 시도
-            data = fetch_yahoo_data(f"{clean_ticker}.KQ")
+            data = fetch_yahoo_price(f"{clean_ticker}.KQ")
             if data: return data, "KOSDAQ(Auto-Retry)"
 
     return None, "Unknown"
 
 def main():
     start_time = time.time()
-    
     kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst)
-    now_iso = now.isoformat() 
-    print(f"🚀 [집요한 검색 모드] 업데이트 시작 - {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    now_iso = datetime.now(kst).isoformat() 
+    print(f"🚀 [가격 전용 업데이트] 시작 - {datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')}")
     
     has_more = True
     next_cursor = None
@@ -133,18 +123,16 @@ def main():
     
     while has_more:
         if time.time() - start_time > MAX_RUNTIME_SEC:
-            print(f"\n⏰ 20분 경과. 안전 종료.")
             break
 
         try:
             response = notion.databases.query(
-                **{"database_id": DATABASE_ID, "start_cursor": next_cursor}
+                database_id=DATABASE_ID, 
+                start_cursor=next_cursor
             )
             pages = response.get("results", [])
             
-            if not pages and success == 0 and fail == 0:
-                print("🚨 가져온 페이지가 0개입니다.")
-                break
+            if not pages: break
 
             for page in pages:
                 if time.time() - start_time > MAX_RUNTIME_SEC:
@@ -152,37 +140,34 @@ def main():
 
                 try:
                     props = page["properties"]
-                    
-                    # 롤업된 Market과 티커 추출
                     market = extract_value_from_property(props.get("Market"))
                     ticker = extract_value_from_property(props.get("티커"))
                     
                     if not ticker: continue
                     
-                    # 스마트 조회 (3단 콤보 적용됨)
+                    # 스마트 가격 조회
                     data, detected_market = get_smart_stock_data(ticker, market)
 
                     if data is not None:
+                        # [변경] 업데이트할 항목이 줄어들었습니다.
                         upd = {
                             "현재가": {"number": data["price"]},
                             "마지막 업데이트": {"date": {"start": now_iso}}
                         }
                         
-                        fields = {"PER": "per", "PBR": "pbr", "EPS": "eps", "52주 최고가": "high52w", "52주 최저가": "low52w"}
-                        for n_key, d_key in fields.items():
-                            val = safe_float(data[d_key])
-                            if val is not None: upd[n_key] = {"number": val}
+                        # 52주 고가/저가는 가격 변동과 연관되므로 유지
+                        if data["high52w"]: upd["52주 최고가"] = {"number": data["high52w"]}
+                        if data["low52w"]: upd["52주 최저가"] = {"number": data["low52w"]}
 
                         notion.pages.update(page_id=page["id"], properties=upd)
                         success += 1
                         print(f"   => ✅ [{detected_market}] {ticker} : {data['price']:,.0f}")
                     else:
-                        print(f"   => ❌ [{market or 'Unknown'}] {ticker} : 검색 실패")
                         fail += 1
                     
                     time.sleep(0.5) 
                         
-                except Exception as e:
+                except:
                     fail += 1
                     continue
             
@@ -194,9 +179,7 @@ def main():
             print(f"🚨 노션 연결 오류: {e}")
             break
 
-    print("\n---------------------------------------------------")
-    print(f"✨ 결과: 성공 {success} / 실패 {fail}")
-    print(f"⏱️ 총 소요 시간: {time.time() - start_time:.1f}초")
+    print(f"\n✨ 완료: 성공 {success} / 실패 {fail}")
 
 if __name__ == "__main__":
     main()
