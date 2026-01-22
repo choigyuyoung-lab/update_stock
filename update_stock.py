@@ -52,7 +52,7 @@ def extract_value_from_property(prop):
 
 def fetch_yahoo_price(symbol):
     """
-    [변경] 재무정보(PER/EPS)는 빼고, 오직 '가격' 관련 정보만 가져옵니다.
+    [핵심] 재무정보는 빼고, 오직 '가격' 관련 정보만 가져옵니다.
     """
     try:
         stock = yf.Ticker(symbol)
@@ -63,8 +63,8 @@ def fetch_yahoo_price(symbol):
 
         return {
             "price": price,
-            "high52w": d.get("fiftyTwoWeekHigh"), # 52주 신고가는 가격 정보라 유지
-            "low52w": d.get("fiftyTwoWeekLow")    # 52주 신저가도 유지
+            "high52w": d.get("fiftyTwoWeekHigh"), 
+            "low52w": d.get("fiftyTwoWeekLow")    
         }
     except:
         return None
@@ -101,7 +101,7 @@ def get_smart_stock_data(ticker, market_hint):
             data = fetch_yahoo_price(clean_ticker)
             if data: return data, "US(Auto)"
             
-            # 한국 ETF 예외처리 (알파벳 섞인 것)
+            # 한국 ETF 예외처리 (알파벳 섞인 것 재시도)
             data = fetch_yahoo_price(f"{clean_ticker}.KS")
             if data: return data, "KOSPI(Auto-Retry)"
             
@@ -149,13 +149,11 @@ def main():
                     data, detected_market = get_smart_stock_data(ticker, market)
 
                     if data is not None:
-                        # [변경] 업데이트할 항목이 줄어들었습니다.
                         upd = {
                             "현재가": {"number": data["price"]},
                             "마지막 업데이트": {"date": {"start": now_iso}}
                         }
                         
-                        # 52주 고가/저가는 가격 변동과 연관되므로 유지
                         if data["high52w"]: upd["52주 최고가"] = {"number": data["high52w"]}
                         if data["low52w"]: upd["52주 최저가"] = {"number": data["low52w"]}
 
