@@ -15,28 +15,47 @@ def get_us_finance_data(ticker):
     """
     try:
         stock = yf.Ticker(ticker)
+        # 404 에러 방지를 위해 데이터 존재 여부를 먼저 확인하는 로직 강화
         info = stock.info
         
-        # EPS (Trailing EPS)
+        if not info or 'quoteType' not in info:
+            return None, None
+            
         eps = info.get("trailingEps")
-        # BPS (Book Value Per Share)
         bps = info.get("bookValue")
         
         return eps, bps
-    except Exception as e:
-        print(f"      ⚠️ {ticker} 데이터 추출 중 오류: {e}")
+    except Exception:
+        # 에러 발생 시 로그를 남기지 않고 조용히 넘어가도록 처리
         return None, None
 
 def extract_ticker(props):
-    """노션에서 미국 주식 티커(알파벳)를 추출합니다."""
+    """
+    노션에서 미국 주식 티커를 추출합니다. 
+    한국 종목(숫자 6자리, 우선주 포함)은 철저히 제외합니다.
+    """
     for name in ["티커", "Ticker"]:
         prop = props.get(name, {})
         content = prop.get("title") or prop.get("rich_text")
         if content:
             ticker = content[0].get("plain_text", "").strip().upper()
-            # 숫자가 아닌 알파벳 형색일 때 미국 주식으로 간주 (또는 .KS/.KQ가 없는 경우)
-            if not ticker.isdigit() and not any(ext in ticker for ext in [".KS", ".KQ"]):
-                return ticker
+            
+            # [강화된 한국 종목 필터링]
+            # 1. 6자리이면서 숫자로 시작하면 한국 종목(0104P0 등 우선주 포함)으로 간주
+            if len(ticker) == 6 and ticker[0].isdigit():
+                continue
+            # 2. .KS 나 .KQ가 붙어있는 경우 제외
+            if any(ext in ticker for ext in [".KS", ".KQ"]):
+                continue
+            # 3. 순수 숫자로만 된 경우 제외
+            if ticker.isdigit():
+                continue
+            # 4. 티커가 너무 짧거나 없으면 제외
+            if not ticker or len(ticker) > 5: # 미국 주식은 보통 1~5글자
+                # 단, 6글자 중 숫자로 시작하지 않는 특수 케이스가 있을 수 있어 1번 조건이 우선임
+                if len(ticker) >= 6: continue
+                        
+            return ticker
     return None
 
 def main():
@@ -46,7 +65,6 @@ def main():
     success, fail, skip = 0, 0, 0
     next_cursor = None
     
-    # [핵심] 100개 제한 해제를 위한 페이지네이션 루프
     while True:
         response = notion.databases.query(
             database_id=DATABASE_ID,
@@ -58,7 +76,6 @@ def main():
             props = page["properties"]
             ticker = extract_ticker(props)
             
-            # 미국 주식이 아니면(한국 주식이거나 티커가 없으면) 건너뜀
             if not ticker:
                 skip += 1
                 continue
@@ -75,16 +92,17 @@ def main():
                 success += 1
                 print(f"   => ✅ {ticker} | EPS: {eps} | BPS: {bps}")
             else:
-                print(f"   => ❌ {ticker} | 데이터 누락")
+                # 미국 주식인데 데이터를 못 가져온 경우만 실패로 처리
+                print(f"   => ❌ {ticker} | 데이터 없음")
                 fail += 1
             
-            time.sleep(0.5) # API 부하 방지
+            time.sleep(0.5)
 
         if not response.get("has_more"):
             break
         next_cursor = response.get("next_cursor")
 
-    print(f"\n✨ 완료 | 성공: {success} | 실패: {fail} | 건너뜀(한국 주식 등): {skip}")
+    print(f"\n✨ 완료 | 성공: {success} | 실패: {fail} | 건너뜀(한국 종목 등): {skip}")
 
 if __name__ == "__main__":
     main()
