@@ -54,8 +54,9 @@ jobs:
         python-version: '3.10'
 
     - name: Install libraries
-      # [수정됨] 판다스(pandas)와 표 읽기 도구(lxml, html5lib) 추가
-      run: pip install notion-client pandas lxml html5lib
+      run: |
+        pip install --upgrade pip
+        pip install --upgrade notion-client>=2.0.0 pandas lxml html5lib
 
     - name: Run KR Finance Update
       env:
