@@ -1,59 +1,64 @@
-name: Stock Price Update
+name: Stock & Finance Update System
 
 on:
+  # 1. 30분마다 자동 실행 (가격 업데이트용)
   schedule:
-    # [변경 전] 매 시간 0분 (1시간 간격)
-    # - cron: '0 * * * *'
-
-    # [변경 후] 매 30분마다 (0분, 30분)
     - cron: '*/30 * * * *'
+  
+  # 2. 수동 실행 버튼 (테스트용)
   workflow_dispatch:
 
 jobs:
-  build:
+  # ---------------------------------------------------
+  # JOB 1: 가격 업데이트 (30분마다 + 수동)
+  # ---------------------------------------------------
+  update_prices:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # 15분 넘으면 강제 종료 (안전장치)
     
-    # 넉넉하게 25분 설정
-    timeout-minutes: 25
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install notion-client==2.2.1 yfinance requests
-
-      - name: Run stock update script
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          DATABASE_ID: ${{ secrets.DATABASE_ID }}
-          PYTHONUNBUFFERED: '1'
-        run: python update_stock.py
-
-# ... 기존 update_stock 아래에 추가 ...
-
-  # [추가] 한국 주식 재무 정보 업데이트 (매주 토요일 아침 8시)
-  update_kr_finance:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
-    - name: Install dependencies
-      run: pip install notion-client
-    - name: Run KR Finance
+
+    - name: Install libraries
+      # 가격 업데이트에는 pandas가 필요 없고 가벼운 yfinance만 있으면 됨
+      run: pip install notion-client yfinance
+
+    - name: Run Price Update
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      # 매주 토요일(6) 23시 UTC (= 한국 일요일 오전 8시) 
-      # 또는 원하시는 시간대로 설정 가능. 지금은 수동 실행도 가능하게 설정됨.
+      run: python update_stock.py
+
+  # ---------------------------------------------------
+  # JOB 2: 한국 재무정보 업데이트 (수동 실행 시에만 작동)
+  # ---------------------------------------------------
+  update_kr_finance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # [중요] 30분마다 돌면 안 되니까, '수동 버튼' 눌렀을 때만 실행되게 설정
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install libraries
+      # [수정됨] 판다스(pandas)와 표 읽기 도구(lxml, html5lib) 추가
+      run: pip install notion-client pandas lxml html5lib
+
+    - name: Run KR Finance Update
+      env:
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
       run: python update_kr_fin.py
