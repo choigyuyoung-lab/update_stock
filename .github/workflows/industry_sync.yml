@@ -1,7 +1,10 @@
 name: Industry Classification Only
 
 on:
-  workflow_dispatch: # 오직 수동으로 버튼을 누를 때만 실행됩니다.
+  schedule:
+    # 매주 일요일 한국 시간 오전 9시 (UTC 00:00)에 자동 실행
+    - cron: '0 0 * * 0'
+  workflow_dispatch: # 언제든 원할 때 수동 실행 가능
 
 jobs:
   update_industry_task:
@@ -23,5 +26,5 @@ jobs:
       - name: Run Industry Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }} # 상장주식 DB ID
+          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
         run: python update_industry.py
