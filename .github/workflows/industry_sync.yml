@@ -3,7 +3,7 @@ name: Industry Classification Only
 on:
   schedule:
     # 매주 일요일 한국 시간 오전 9시 (UTC 00:00)에 자동 실행
-    - cron: '0 0 * * 0'
+    - cron: '37 15 * * 0'
   workflow_dispatch: # 언제든 원할 때 수동 실행 가능
 
 jobs:
