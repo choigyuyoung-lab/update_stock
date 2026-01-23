@@ -1,30 +1,23 @@
-
 name: Industry Classification Only
 
 on:
   schedule:
-   - cron: '37 15 * * 6' # 한국 시간 매주 일요일 00:37 (UTC 토요일 15:37)
-  workflow_dispatch: # 언제든 원할 때 수동 실행 가능
+    - cron: '37 15 * * 6' # 한국 시간 매주 일요일 00:37 (UTC 토요일 15:37)
+  workflow_dispatch: # 수동 실행 버튼
 
 jobs:
-  update_industry_task:
+  update-industry:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas lxml html5lib beautifulsoup4
-
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" "requests"
       - name: Run Industry Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
         run: python update_industry.py
