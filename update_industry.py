@@ -1,29 +1,54 @@
-name: Industry Classification Only
+import os, time, yfinance as yf
+from notion_client import Client
 
-on:
-  schedule:
-   - cron: '37 15 * * 6' # 한국 시간 매주 일요일 00:37 (UTC 토요일 15:37)
-  workflow_dispatch: # 언제든 원할 때 수동 실행 가능
+# 환경 변수 로드
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
+DATABASE_ID = os.environ.get("DATABASE_ID") 
+notion = Client(auth=NOTION_TOKEN)
 
-jobs:
-  update_industry_task:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+def main():
+    print("🏭 [산업 정보 업데이트] 시작...")
+    
+    next_cursor = None
+    while True:
+        # 데이터베이스 조회
+        res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
+        pages = res.get("results", [])
+        
+        for page in pages:
+            props = page["properties"]
+            # 티커 추출 (티커 또는 Ticker 속성 확인)
+            t_list = props.get("티커", {}).get("title") or props.get("Ticker", {}).get("rich_text")
+            if not t_list: continue
+            
+            ticker = t_list[0]["plain_text"].strip().upper()
+            # 한국 종목 판별 및 심볼 변환
+            is_kr = len(ticker) == 6 and ticker[0].isdigit()
+            symbol = ticker + (".KS" if is_kr else "")
+            
+            try:
+                # 야후 파이낸스에서 산업 정보 가져오기
+                info = yf.Ticker(symbol).info
+                sector = info.get("sector") # 섹터 정보
+                industry = info.get("industry") # 세부 산업 정보
+                
+                if sector or industry:
+                    industry_text = f"{sector} - {industry}" if sector and industry else (sector or industry)
+                    # 노션 '산업' 속성 업데이트 (속성명이 다르면 수정 필요)
+                    notion.pages.update(
+                        page_id=page["id"],
+                        properties={
+                            "산업": {"rich_text": [{"text": {"content": industry_text}}]}
+                        }
+                    )
+                    print(f"   ✅ {ticker}: {industry_text}")
+            except Exception as e:
+                print(f"   ❌ {ticker}: 정보 검색 실패 ({e})")
+            
+            time.sleep(0.5) # API 부하 방지
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+        if not res.get("has_more"): break
+        next_cursor = res.get("next_cursor")
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas lxml html5lib beautifulsoup4
-
-      - name: Run Industry Update
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-        run: python update_industry.py
+if __name__ == "__main__":
+    main()
