@@ -27,3 +27,4 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
         run: python update_industry.py
+
