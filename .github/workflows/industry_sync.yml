@@ -1,0 +1,27 @@
+name: Industry Classification Only
+
+on:
+  workflow_dispatch: # 오직 수동으로 버튼을 누를 때만 실행됩니다.
+
+jobs:
+  update_industry_task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas lxml html5lib beautifulsoup4
+
+      - name: Run Industry Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }} # 상장주식 DB ID
+        run: python update_industry.py
