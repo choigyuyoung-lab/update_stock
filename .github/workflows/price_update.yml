@@ -2,7 +2,7 @@ name: Stock Price Update
 
 on:
   schedule:
-    - cron: '12,42 * * * *' # 매 30분마다
+    - cron: '12,42 * * * *' # 매시간 12분, 42분에 실행 (30분 간격)
   workflow_dispatch:
 
 jobs:
