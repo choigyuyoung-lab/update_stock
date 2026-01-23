@@ -1,1 +1,30 @@
+name: Master DB Sync
 
+on:
+  schedule:
+    - cron: '0 15 * * *' # 매일 한국시간 자정 실행
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests yfinance notion-client google-api-python-client
+
+      - name: Run Master DB Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }} # 수정된 부분
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_CX: ${{ secrets.GOOGLE_CX }}
+        run: python update_master_db.py
