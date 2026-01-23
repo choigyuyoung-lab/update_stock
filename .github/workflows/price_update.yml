@@ -2,7 +2,7 @@ name: Stock Price Update
 
 on:
   schedule:
-    - cron: '0,30 * * * *' # 매 30분마다
+    - cron: '12,42 * * * *' # 매 30분마다
   workflow_dispatch:
 
 jobs:
