@@ -2,7 +2,6 @@ name: Optimized Stock System
 
 on:
   schedule:
-    # 주석은 이렇게 위쪽에 작성하는 것이 안전합니다.
     - cron: '0,30 * * * *'
     - cron: '0 */4 * * *'
   workflow_dispatch:
@@ -21,22 +20,27 @@ jobs:
           pip install --upgrade pip
           pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas lxml html5lib beautifulsoup4
 
+      # [원인 파악용] 현재 어떤 이벤트로 실행되었는지 로그에 출력합니다.
+      - name: Debug Event Info
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+
+      # 1. 주가 업데이트 (모든 스케줄 및 수동 실행 시 작동)
       - name: Run Price Update
-        # contains 대신 == 를 사용하고, 주석 없는 순수 문자열만 비교합니다.
         if: |
           github.event_name == 'workflow_dispatch' || 
-          github.event.schedule == '0,30 * * * *' || 
-          github.event.schedule == '0 */4 * * *'
+          github.event_name == 'schedule'
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
         run: python update_price.py
 
+      # 2. 재무 업데이트 (4시간 주기 스케줄 및 수동 실행 시 작동)
       - name: Run Finance Update
-        # 재무 업데이트는 수동 실행이거나 4시간 크론일 때만 실행
         if: |
           github.event_name == 'workflow_dispatch' || 
-          github.event.schedule == '0 */4 * * *'
+          contains(github.event.schedule, '0 */4 * * *')
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
