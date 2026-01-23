@@ -3,7 +3,7 @@ name: Stock Price Update
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '42 * * * *' # 매시간 42분에 한 번 실행 (1시간 주기)
   workflow_dispatch:
 
 jobs:
