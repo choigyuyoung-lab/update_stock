@@ -15,12 +15,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # 최신 라이브러리 호환성을 위해 3.11 사용
+          python-version: '3.11' # 사용자님의 성공 환경인 3.10 이상 준수
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests yfinance notion-client google-api-python-client
+          # 기존 성공 로직과의 호환성을 위해 버전을 명시적으로 고정합니다.
+          pip uninstall -y notion # 혹시 모를 패키지 충돌 방지
+          pip install notion-client==2.2.1 yfinance requests google-api-python-client
 
       - name: Run Master DB Update
         env:
