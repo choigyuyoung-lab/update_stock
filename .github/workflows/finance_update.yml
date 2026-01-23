@@ -1,0 +1,22 @@
+name: Stock Finance Update
+
+on:
+  schedule:
+    - cron: '0 */4 * * *' # 4시간마다
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install "notion-client==2.2.1" "yfinance>=0.2.31" requests pandas
+      - name: Run Finance Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_finance.py
