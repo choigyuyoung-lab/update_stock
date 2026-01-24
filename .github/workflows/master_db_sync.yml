@@ -2,7 +2,7 @@ name: Master DB Sync
 
 on:
   schedule:
-    - cron: '0 15 * * *' # 한국 시간 매일 자정 실행 (UTC 15:00)
+    - cron: '12 15 * * *' 
   workflow_dispatch:
 
 jobs:
