@@ -10,7 +10,7 @@ MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
 client = Client(auth=NOTION_TOKEN)
 
-# 산업분류 영문 -> 한글 매핑
+# 산업분류 매핑
 INDUSTRY_MAP = {
     "Technology": "IT/기술", "Financial Services": "금융 서비스",
     "Healthcare": "헬스케어", "Consumer Cyclical": "경기 소비재",
@@ -20,60 +20,77 @@ INDUSTRY_MAP = {
     "Utilities": "유틸리티"
 }
 
-def get_naver_basic_info(ticker):
+def get_naver_data_robust(ticker):
     """
-    [안정화된 로직] 네이버 모바일 API를 통해 기본 정보(이름, 산업, 개요)만 가져옵니다.
+    [안정화 로직] 267250 등 일부 종목 수집 실패를 방지하는 2중 수집 함수
     """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': f'https://m.stock.naver.com/domestic/stock/{ticker}/total'
+    }
+
+    name, industry, summary = None, None, None
+
+    # ---------------------------------------------------------
+    # 1단계: 'integration' API 시도 (가장 상세한 정보 - 회사개요 포함)
+    # ---------------------------------------------------------
     try:
-        # 네이버가 차단하지 않도록 브라우저인 척 헤더를 설정합니다.
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': f'https://m.stock.naver.com/domestic/stock/{ticker}/total'
-        }
-        
-        # 통합 정보 API 호출
-        url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
-        res = requests.get(url, headers=headers, timeout=5)
+        url_integ = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
+        res = requests.get(url_integ, headers=headers, timeout=5)
         
         if res.status_code == 200:
             data = res.json()
-            # 데이터 위치가 조금씩 다를 수 있어 안전하게 가져옵니다.
-            item = data.get("result", {}).get("stockItem", {})
+            # 일반 종목(stockItem) 또는 ETF(etfItem) 구조 확인
+            item = data.get("result", {}).get("stockItem") or data.get("result", {}).get("etfItem")
             
-            if not item:
-                return None, None, None, False, f"❌ 네이버 데이터 없음 ({ticker})"
+            if item:
+                name = item.get("stockName") or item.get("itemname")
+                industry = item.get("industryName", "")
+                summary = item.get("description", "") # 기업개요
                 
-            name = item.get("stockName")
-            industry = item.get("industryName", "")
-            summary = item.get("description", "")
-            
-            return name, industry, summary, True, "✅ 네이버 수집 성공"
-        else:
-            return None, None, None, False, f"❌ 네이버 접속 차단/오류 ({res.status_code})"
-            
+                if name: # 이름이 있으면 성공으로 간주
+                    return name, industry, summary, True, "✅ 네이버(통합) 수집 성공"
+    except Exception:
+        pass # 1단계 실패 시 조용히 2단계로 넘어감
+
+    # ---------------------------------------------------------
+    # 2단계: 'basic' API 시도 (267250 등의 구조적 문제 해결용 - 가장 기본)
+    # ---------------------------------------------------------
+    try:
+        url_basic = f"https://m.stock.naver.com/api/stock/{ticker}/basic"
+        res = requests.get(url_basic, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            data = res.json()
+            # 'basic'은 구조가 조금 다를 수 있어 바로 접근 시도
+            if "stockName" in data:
+                name = data.get("stockName")
+                # basic에는 industryCode만 있고 industryName이 없는 경우가 많아 공란 처리 가능성 있음
+                industry = industry if industry else "" 
+                # basic에는 보통 description(개요)이 없습니다.
+                summary = summary if summary else "" 
+                
+                return name, industry, summary, True, "✅ 네이버(기본) 수집 성공 (개요 없음)"
     except Exception as e:
-        return None, None, None, False, f"❌ 네이버 에러: {e}"
+        return None, None, None, False, f"❌ 네이버 2단계 실패: {e}"
+
+    return None, None, None, False, f"❌ 데이터 없음 ({ticker})"
 
 def get_stock_data(ticker):
-    """티커를 기반으로 [종목명, 산업분류, 회사개요]만 수집합니다."""
-    # 접미어 제거 (005930.KS -> 005930)
+    """티커를 기반으로 [종목명, 산업분류, 회사개요] 수집"""
     clean_ticker = ticker.split('.')[0].strip().upper()
     
-    # ---------------------------
-    # CASE A: 한국 주식 (숫자 6자리) -> 네이버 로직 적용
-    # ---------------------------
+    # CASE A: 한국 주식 (네이버)
     if len(clean_ticker) == 6 and clean_ticker.isdigit():
-        return get_naver_basic_info(clean_ticker)
+        return get_naver_data_robust(clean_ticker)
 
-    # ---------------------------
-    # CASE B: 미국/해외 주식 -> 야후 파이낸스
-    # ---------------------------
+    # CASE B: 미국/해외 주식 (야후)
     else:
         try:
             stock = yf.Ticker(clean_ticker)
             info = stock.info
             
-            # 실패 시 원본 티커로 재시도
+            # 1차 실패 시 원본 티커 재시도
             if not info or ('longName' not in info and 'shortName' not in info):
                 stock = yf.Ticker(ticker)
                 info = stock.info
@@ -91,14 +108,14 @@ def get_stock_data(ticker):
             return None, None, None, False, f"❌ 야후 에러: {e}"
 
 def main():
-    print(f"🚀 [상장주식 DB 업데이트] 시작 (EPS/BPS 제외, 기본정보 집중)")
+    print(f"🚀 [Master DB 업데이트] 시작 (이중 안전장치 적용)")
     
     next_cursor = None
     processed_count = 0
     
     while True:
         try:
-            # '데이터 상태'가 '✅ 검증완료'가 아닌 항목 조회
+            # 필터: '데이터 상태'가 '✅ 검증완료'가 아닌 것
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
                 "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
@@ -118,17 +135,14 @@ def main():
                 page_id = page["id"]
                 props = page["properties"]
                 
-                # 티커 추출
                 ticker_list = props.get("티커", {}).get("title", [])
                 if not ticker_list: continue
                 raw_ticker = ticker_list[0].get("plain_text", "").strip().upper()
                 
                 print(f"🔍 {raw_ticker} 조회 중...")
                 
-                # 데이터 수집 (EPS/BPS 제외)
                 name, industry, summary, success, log_msg = get_stock_data(raw_ticker)
                 
-                # 노션 업데이트 준비
                 status = "✅ 검증완료" if success else "⚠️ 확인필요"
                 upd_props = {
                     "데이터 상태": {"select": {"name": status}},
@@ -136,7 +150,6 @@ def main():
                 }
                 
                 if success:
-                    # 회사개요 길이 제한 (1900자)
                     safe_summary = summary[:1900] + "..." if summary and len(summary) > 1900 else (summary or "")
                     
                     upd_props.update({
@@ -144,7 +157,7 @@ def main():
                         "산업분류": {"rich_text": [{"text": {"content": industry if industry else ""}}]},
                         "회사개요(텍스트)": {"rich_text": [{"text": {"content": safe_summary}}]}
                     })
-                    print(f"   └ 성공: {name} ({industry})")
+                    print(f"   └ 성공: {name}")
                 else:
                     print(f"   └ 실패: {log_msg}")
 
