@@ -25,6 +25,7 @@ def is_valid(val):
 def get_kr_price(ticker):
     """
     [한국 주식] 네이버 금융 PC 페이지(HTML)를 직접 크롤링
+    - 화면에 보이는 '실시간 현재가'를 가져옴 (전일종가 아님)
     """
     price_data = {'price': None, 'high': None, 'low': None}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -36,7 +37,7 @@ def get_kr_price(ticker):
         
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. 현재가 추출 (화면 상단의 큰 빨간/파란 숫자)
+        # 1. 현재가 추출 (div.today 안의 blind 텍스트)
         today_area = soup.select_one('div.today p.no_today em .blind')
         if today_area:
             price_data['price'] = float(today_area.text.replace(',', '').strip())
@@ -64,7 +65,7 @@ def main():
     kst = timezone(timedelta(hours=9))
     now_iso = datetime.now(kst).isoformat()
     
-    print(f"💰 [주가 업데이트] 최종 점검 버전 시작 - {datetime.now(kst)}")
+    print(f"💰 [주가 업데이트] 최종 완성 버전 시작 - {datetime.now(kst)}")
     
     next_cursor = None
     processed_count = 0
@@ -81,7 +82,7 @@ def main():
             for page in pages:
                 props = page["properties"]
                 
-                # [안전 장치] 변수 선언 분리 (SyntaxError 방지)
+                # [안전 장치] 변수 초기화 (SyntaxError 방지)
                 ticker = ""
                 is_kr = False
                 
@@ -92,7 +93,17 @@ def main():
                         content = target.get("title") or target.get("rich_text")
                         if content:
                             ticker = content[0].get("plain_text", "").strip().upper()
-                            is_kr = len(ticker) == 6 and ticker.isdigit()
+                            
+                            # [핵심 로직] 스마트 분류
+                            # 1. .KS/.KQ로 끝나면 무조건 한국
+                            if ticker.endswith('.KS') or ticker.endswith('.KQ'):
+                                is_kr = True
+                            # 2. 숫자가 하나라도 포함되면 한국 (005930, 0057H0)
+                            elif any(char.isdigit() for char in ticker):
+                                is_kr = True
+                            # 3. 숫자가 없으면(영어만 있으면) 미국 (AAPL)
+                            else:
+                                is_kr = False
                             break
                 
                 if not ticker: continue
@@ -102,7 +113,7 @@ def main():
                     current_price_log = 0
                     
                     if is_kr:
-                        # [한국] 네이버 HTML 크롤링
+                        # [한국] 네이버 (숫자 포함된 모든 티커)
                         d = get_kr_price(ticker)
                         if is_valid(d['price']): 
                             upd["현재가"] = {"number": d['price']}
@@ -110,10 +121,11 @@ def main():
                         if is_valid(d['high']): upd["52주 최고가"] = {"number": d['high']}
                         if is_valid(d['low']): upd["52주 최저가"] = {"number": d['low']}
                     else:
-                        # [미국] 야후 파이낸스 (안전한 속성 접근)
+                        # [미국] 야후 (순수 영문 티커)
                         stock = yf.Ticker(ticker)
                         fast = stock.fast_info
                         
+                        # 안전한 속성 접근 (getattr)
                         last_price = getattr(fast, 'last_price', None)
                         year_high = getattr(fast, 'year_high', None)
                         year_low = getattr(fast, 'year_low', None)
