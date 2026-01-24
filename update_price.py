@@ -25,8 +25,6 @@ def is_valid(val):
 def get_kr_price(ticker):
     """
     [한국 주식] 네이버 금융 PC 페이지(HTML)를 직접 크롤링
-    - 화면에 보이는 '빨간색 큰 숫자(현재가)' 추출 (div.today)
-    - 52주 최고/최저가 추출 (테이블 파싱)
     """
     price_data = {'price': None, 'high': None, 'low': None}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -34,8 +32,6 @@ def get_kr_price(ticker):
     try:
         url = f"https://finance.naver.com/item/main.naver?code={ticker}"
         res = requests.get(url, headers=headers, timeout=10)
-        
-        # 인코딩 처리
         res.encoding = res.apparent_encoding 
         
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -84,4 +80,70 @@ def main():
 
             for page in pages:
                 props = page["properties"]
-                ticker =
+                
+                # [수정] 변수 초기화를 분리하여 문법 오류 방지
+                ticker = ""
+                is_kr = False
+                
+                # 티커 추출
+                for name in ["티커", "Ticker"]:
+                    target = props.get(name)
+                    if target:
+                        content = target.get("title") or target.get("rich_text")
+                        if content:
+                            ticker = content[0].get("plain_text", "").strip().upper()
+                            is_kr = len(ticker) == 6 and ticker.isdigit()
+                            break
+                
+                if not ticker: continue
+                
+                try:
+                    upd = {}
+                    current_price_log = 0
+                    
+                    if is_kr:
+                        # [한국] 네이버 HTML 크롤링
+                        d = get_kr_price(ticker)
+                        if is_valid(d['price']): 
+                            upd["현재가"] = {"number": d['price']}
+                            current_price_log = d['price']
+                        if is_valid(d['high']): upd["52주 최고가"] = {"number": d['high']}
+                        if is_valid(d['low']): upd["52주 최저가"] = {"number": d['low']}
+                    else:
+                        # [미국] 야후 파이낸스
+                        stock = yf.Ticker(ticker)
+                        fast = stock.fast_info
+                        
+                        last_price = getattr(fast, 'last_price', None)
+                        year_high = getattr(fast, 'year_high', None)
+                        year_low = getattr(fast, 'year_low', None)
+                        
+                        if is_valid(last_price): 
+                            upd["현재가"] = {"number": last_price}
+                            current_price_log = last_price
+                        if is_valid(year_high): upd["52주 최고가"] = {"number": year_high}
+                        if is_valid(year_low): upd["52주 최저가"] = {"number": year_low}
+
+                    # 업데이트 시간 기록
+                    upd["마지막 업데이트"] = {"date": {"start": now_iso}}
+                    
+                    notion.pages.update(page_id=page["id"], properties=upd)
+                    processed_count += 1
+                    print(f"   ✅ [{ticker}] 완료 (현재가: {current_price_log})")
+                    
+                except Exception as e:
+                    print(f"   ❌ [{ticker}] 실패: {e}")
+                
+                time.sleep(0.5) 
+
+            if not res.get("has_more"): break
+            next_cursor = res.get("next_cursor")
+            
+        except Exception as e:
+            print(f"❌ 시스템 에러: {e}")
+            break
+
+    print(f"🏁 작업 완료: 총 {processed_count}건 업데이트됨")
+
+if __name__ == "__main__":
+    main()
