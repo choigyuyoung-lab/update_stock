@@ -1,14 +1,20 @@
 import os
 import time
 import requests
+import re
 import yfinance as yf
 from notion_client import Client
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# 1. 환경 변수 설정
+# 1. 환경 변수 설정 (구글 키 불필요)
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-client = Client(auth=NOTION_TOKEN)
+# 2. 시스템 상수
+MAX_RETRIES = 3
+TIMEOUT = 10
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 # 산업분류 매핑
 INDUSTRY_MAP = {
@@ -20,160 +26,177 @@ INDUSTRY_MAP = {
     "Utilities": "유틸리티"
 }
 
-def get_naver_data_robust(ticker):
-    """
-    [안정화 로직] 267250 등 일부 종목 수집 실패를 방지하는 2중 수집 함수
-    """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': f'https://m.stock.naver.com/domestic/stock/{ticker}/total'
-    }
+class StockAPIClient:
+    """데이터 수집 전담 클래스 (재시도 로직 포함)"""
+    def __init__(self):
+        self.session = requests.Session()
+        retries = Retry(total=MAX_RETRIES, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        self.session.mount('https://', HTTPAdapter(max_retries=retries))
+        self.session.headers.update({'User-Agent': USER_AGENT})
 
-    name, industry, summary = None, None, None
-
-    # ---------------------------------------------------------
-    # 1단계: 'integration' API 시도 (가장 상세한 정보 - 회사개요 포함)
-    # ---------------------------------------------------------
-    try:
-        url_integ = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
-        res = requests.get(url_integ, headers=headers, timeout=5)
-        
-        if res.status_code == 200:
-            data = res.json()
-            # 일반 종목(stockItem) 또는 ETF(etfItem) 구조 확인
-            item = data.get("result", {}).get("stockItem") or data.get("result", {}).get("etfItem")
-            
-            if item:
-                name = item.get("stockName") or item.get("itemname")
-                industry = item.get("industryName", "")
-                summary = item.get("description", "") # 기업개요
-                
-                if name: # 이름이 있으면 성공으로 간주
-                    return name, industry, summary, True, "✅ 네이버(통합) 수집 성공"
-    except Exception:
-        pass # 1단계 실패 시 조용히 2단계로 넘어감
-
-    # ---------------------------------------------------------
-    # 2단계: 'basic' API 시도 (267250 등의 구조적 문제 해결용 - 가장 기본)
-    # ---------------------------------------------------------
-    try:
-        url_basic = f"https://m.stock.naver.com/api/stock/{ticker}/basic"
-        res = requests.get(url_basic, headers=headers, timeout=5)
-        
-        if res.status_code == 200:
-            data = res.json()
-            # 'basic'은 구조가 조금 다를 수 있어 바로 접근 시도
-            if "stockName" in data:
-                name = data.get("stockName")
-                # basic에는 industryCode만 있고 industryName이 없는 경우가 많아 공란 처리 가능성 있음
-                industry = industry if industry else "" 
-                # basic에는 보통 description(개요)이 없습니다.
-                summary = summary if summary else "" 
-                
-                return name, industry, summary, True, "✅ 네이버(기본) 수집 성공 (개요 없음)"
-    except Exception as e:
-        return None, None, None, False, f"❌ 네이버 2단계 실패: {e}"
-
-    return None, None, None, False, f"❌ 데이터 없음 ({ticker})"
-
-def get_stock_data(ticker):
-    """티커를 기반으로 [종목명, 산업분류, 회사개요] 수집"""
-    clean_ticker = ticker.split('.')[0].strip().upper()
-    
-    # CASE A: 한국 주식 (네이버)
-    if len(clean_ticker) == 6 and clean_ticker.isdigit():
-        return get_naver_data_robust(clean_ticker)
-
-    # CASE B: 미국/해외 주식 (야후)
-    else:
+    def fetch_korean_stock(self, ticker):
+        """네이버 모바일 API (안정성 강화)"""
         try:
-            stock = yf.Ticker(clean_ticker)
+            # 1. 통합 API (개요 포함)
+            self.session.headers.update({'Referer': f'https://m.stock.naver.com/domestic/stock/{ticker}/total'})
+            url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
+            res = self.session.get(url, timeout=TIMEOUT)
+            
+            if res.status_code == 200:
+                data = res.json()
+                item = data.get("result", {}).get("stockItem") or data.get("result", {}).get("etfItem")
+                if item:
+                    return {
+                        "name": item.get("stockName") or item.get("itemname"),
+                        "industry": item.get("industryName", ""),
+                        "summary": item.get("description", ""),
+                        "source": "NAVER"
+                    }
+            
+            # 2. 기본 API (비상용)
+            url_basic = f"https://m.stock.naver.com/api/stock/{ticker}/basic"
+            res = self.session.get(url_basic, timeout=TIMEOUT)
+            if res.status_code == 200:
+                data = res.json()
+                if "stockName" in data:
+                    return {
+                        "name": data.get("stockName"),
+                        "industry": "",
+                        "summary": "",
+                        "source": "NAVER_BASIC"
+                    }
+        except Exception as e:
+            print(f"      ⚠️ [KR] 통신 오류: {e}")
+        return None
+
+    def fetch_us_stock(self, ticker):
+        """야후 파이낸스 API"""
+        try:
+            stock = yf.Ticker(ticker)
             info = stock.info
             
-            # 1차 실패 시 원본 티커 재시도
+            # 데이터 없음 -> 원본 티커 재시도
             if not info or ('longName' not in info and 'shortName' not in info):
-                stock = yf.Ticker(ticker)
-                info = stock.info
+                return None
+
+            name = info.get("longName") or info.get("shortName")
+            sector = info.get("sector", "")
+            summary = info.get("longBusinessSummary", "")
             
-            if info and ('longName' in info or 'shortName' in info):
-                name = info.get("longName") or info.get("shortName")
-                sector = info.get("sector", "")
-                summary = info.get("longBusinessSummary", "")
-                
-                korean_sector = INDUSTRY_MAP.get(sector, sector)
-                return name, korean_sector, summary, True, "✅ 야후 수집 성공"
-            else:
-                return None, None, None, False, f"❌ 야후 데이터 없음 ({ticker})"
+            return {
+                "name": name,
+                "industry": INDUSTRY_MAP.get(sector, sector),
+                "summary": summary,
+                "source": "YAHOO"
+            }
         except Exception as e:
-            return None, None, None, False, f"❌ 야후 에러: {e}"
+            print(f"      ⚠️ [US] 통신 오류: {e}")
+        return None
+
+    def get_data(self, ticker):
+        """티커 라우팅"""
+        clean_ticker = ticker.split('.')[0].strip().upper()
+        if len(clean_ticker) == 6 and clean_ticker.isdigit():
+            return self.fetch_korean_stock(clean_ticker)
+        else:
+            # 미국 주식: 정제된 티커 우선 시도 -> 실패시 원본 시도
+            result = self.fetch_us_stock(clean_ticker)
+            if not result:
+                result = self.fetch_us_stock(ticker)
+            return result
 
 def main():
-    print(f"🚀 [Master DB 업데이트] 시작 (이중 안전장치 적용)")
+    print(f"🚀 [Master DB] 티커 기준 동기화 시작 (Google API 미사용)")
     
+    try:
+        notion = Client(auth=NOTION_TOKEN)
+        api = StockAPIClient()
+    except Exception as e:
+        print(f"❌ 초기화 실패: {e}")
+        return
+
     next_cursor = None
     processed_count = 0
     
     while True:
         try:
-            # 필터: '데이터 상태'가 '✅ 검증완료'가 아닌 것
+            # 필터: '데이터 상태'가 '✅ 검증완료'가 아닌 것만 (속도 최적화)
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
                 "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
-                "page_size": 30
+                "page_size": 50 # 한 번에 많이 처리
             }
-            if next_cursor:
-                query_params["start_cursor"] = next_cursor
+            if next_cursor: query_params["start_cursor"] = next_cursor
             
-            response = client.databases.query(**query_params)
+            response = notion.databases.query(**query_params)
             pages = response.get("results", [])
             
             if not pages and processed_count == 0:
-                print("✨ 업데이트할 대상이 없습니다.")
+                print("✨ 모든 데이터가 최신입니다.")
                 break
 
             for page in pages:
                 page_id = page["id"]
                 props = page["properties"]
                 
-                ticker_list = props.get("티커", {}).get("title", [])
-                if not ticker_list: continue
-                raw_ticker = ticker_list[0].get("plain_text", "").strip().upper()
+                # 1. 티커 확보
+                ticker_obj = props.get("티커", {}).get("title", [])
+                if not ticker_obj: continue
+                raw_ticker = ticker_obj[0].get("plain_text", "").strip().upper()
                 
-                print(f"🔍 {raw_ticker} 조회 중...")
+                print(f"🔍 동기화: {raw_ticker} ...")
                 
-                name, industry, summary, success, log_msg = get_stock_data(raw_ticker)
+                # 2. API 데이터 수집 (티커만 믿음)
+                data = api.get_data(raw_ticker)
                 
-                status = "✅ 검증완료" if success else "⚠️ 확인필요"
-                upd_props = {
-                    "데이터 상태": {"select": {"name": status}},
-                    "검증로그": {"rich_text": [{"text": {"content": log_msg}}]}
-                }
+                status = ""
+                log_msg = ""
+                upd_props = {}
                 
-                if success:
-                    safe_summary = summary[:1900] + "..." if summary and len(summary) > 1900 else (summary or "")
+                if data:
+                    # 성공: 공식 데이터로 덮어씌움
+                    status = "✅ 검증완료"
+                    log_msg = f"✅ 업데이트 완료 ({data['name']} / {data['source']})"
                     
-                    upd_props.update({
-                        "종목명": {"rich_text": [{"text": {"content": name}}]},
-                        "산업분류": {"rich_text": [{"text": {"content": industry if industry else ""}}]},
-                        "회사개요(텍스트)": {"rich_text": [{"text": {"content": safe_summary}}]}
-                    })
-                    print(f"   └ 성공: {name}")
+                    # 요약문 길이 안전 처리
+                    summary = data['summary']
+                    safe_summary = summary[:1900] + "..." if summary and len(summary) > 1900 else (summary or "")
+
+                    upd_props = {
+                        "데이터 상태": {"select": {"name": status}},
+                        "검증로그": {"rich_text": [{"text": {"content": log_msg}}]},
+                        "종목명": {"rich_text": [{"text": {"content": data['name']}}]},
+                        "산업분류": {"rich_text": [{"text": {"content": data['industry']}}]}
+                    }
+                    
+                    # '회사개요' 열이 있으면 채움
+                    if "회사개요" in props:
+                        upd_props["회사개요"] = {"rich_text": [{"text": {"content": safe_summary}}]}
+                    
+                    print(f"   └ [완료] {data['name']}")
                 else:
-                    print(f"   └ 실패: {log_msg}")
+                    # 실패: 티커가 잘못됨
+                    status = "⚠️ 확인필요"
+                    log_msg = f"❌ 티커 오류: 해당 코드({raw_ticker})의 데이터를 찾을 수 없음"
+                    upd_props = {
+                        "데이터 상태": {"select": {"name": status}},
+                        "검증로그": {"rich_text": [{"text": {"content": log_msg}}]}
+                    }
+                    print(f"   └ [실패] 데이터 없음")
 
-                client.pages.update(page_id=page_id, properties=upd_props)
+                # 3. 노션 반영
+                notion.pages.update(page_id=page_id, properties=upd_props)
                 processed_count += 1
-                time.sleep(0.3)
+                time.sleep(0.2) # 노션 API 부하 조절
 
-            if not response.get("has_more"):
-                break
+            if not response.get("has_more"): break
             next_cursor = response.get("next_cursor")
             
         except Exception as e:
-            print(f"❌ 오류 발생: {e}")
+            print(f"❌ 시스템 오류: {e}")
             break
             
-    print(f"🏁 총 {processed_count}개 종목 처리 완료")
+    print(f"🏁 총 {processed_count}건 동기화 완료")
 
 if __name__ == "__main__":
     main()
