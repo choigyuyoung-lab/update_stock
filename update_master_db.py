@@ -15,10 +15,6 @@ MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 TARGET_TICKERS = [] 
 
 class StockCrawler:
-    """
-    복잡한 API 호출 대신, 네이버 웹페이지(HTML)를 직접 분석하는 
-    가장 전통적이고 안정적인 방식의 크롤러
-    """
     def __init__(self):
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -26,79 +22,85 @@ class StockCrawler:
 
     def get_korea_stock(self, ticker):
         """
-        [한국 주식] 네이버 금융(PC버전) HTML 크롤링
-        출처: https://finance.naver.com/item/main.naver?code=...
+        [한국 주식] 네이버 금융 HTML 크롤링 (한글 깨짐 방지 적용)
         """
         try:
             url = f"https://finance.naver.com/item/main.naver?code={ticker}"
             res = requests.get(url, headers=self.headers, timeout=10)
             
-            # 네이버 금융은 EUC-KR 인코딩을 사용 (깨짐 방지)
-            res.encoding = 'euc-kr' 
+            # [핵심 수정] 인코딩을 강제하지 않고, 실제 페이지 내용에 맞춰 자동으로 찾습니다.
+            # 이 코드가 '' 깨짐 현상을 해결합니다.
+            res.encoding = res.apparent_encoding 
+            
+            if res.status_code != 200:
+                return None, f"페이지 접속 불가({res.status_code})"
+
             soup = BeautifulSoup(res.text, 'html.parser')
 
-            # 1. 종목명 (h2 태그)
+            # 1. 종목명
             name_tag = soup.select_one('.wrap_company h2 a')
             if not name_tag:
-                return None, "페이지 구조 다름(종목명 실패)"
+                return None, "종목명 추출 실패 (페이지 구조 다름)"
             name = name_tag.text.strip()
 
-            # 2. 산업분류 (하이라이트 섹션 등에서 유추하거나 업종 란 파싱)
-            # 보통 '업종' 란이 상단에 있음
+            # 2. 산업분류 (네이버 금융 '업종'란 파싱)
             industry = ""
-            ind_tag = soup.select_one('.first .blind') # '전일' 등의 텍스트가 걸릴 수 있어 상세 파싱 필요
-            # 더 확실한 방법: 기업개요 섹션 근처의 업종 확인
-            # 네이버 금융 메인에서는 업종 찾기가 까다로워 WICS(섹터) 정보를 많이 씁니다.
-            # 여기서는 '투자의견/목표주가' 테이블 옆이나 '동일업종비교' 탭을 봐야하는데,
-            # 간단하게 기업개요 텍스트에서 추출 시도 혹은 빈칸.
-            # (네이버 블로그 방식: 보통 ETF가 아니면 업종란이 명확치 않아 '코스피/코스닥'만 구분하기도 함)
-            # 여기서는 안정성을 위해 데이터를 비워두거나, 아래 기업개요에서 가져옵니다.
-            
-            # 3. 회사개요 (기업개요 div)
+            try:
+                # 기업개요 섹션 옆의 '업종' 링크 찾기 시도
+                industry_tag = soup.select_one('div.section.trade_compare h4 em a')
+                if industry_tag:
+                    industry = industry_tag.text.strip()
+                else:
+                    # 실패 시 하단 기업개요 텍스트에서 유추하거나 '한국증시'로 대체
+                    industry = "한국증시"
+            except:
+                industry = "한국증시"
+
+            # 3. 회사개요
+            summary = ""
             summary_div = soup.select_one('#summary_info p')
-            summary = summary_div.text.strip() if summary_div else "기업개요 없음"
+            if summary_div:
+                summary = summary_div.text.strip()
+            else:
+                summary = "기업개요 정보 없음"
 
             return {
                 "name": name,
-                "industry": "한국증시", # HTML 파싱으로 정확한 업종 찾기는 복잡하여 일단 국가로 표기
+                "industry": industry,
                 "summary": summary
             }, "✅ 네이버 크롤링 성공"
 
         except Exception as e:
             return None, f"크롤링 에러: {e}"
 
-    def get_usa_stock_summary_kr(self, ticker):
-        """
-        [미국 주식 보조] 네이버 해외주식에서 '한글 개요'만 살짝 긁어오기
-        실패하면 None 반환
-        """
-        try:
-            # 네이버 해외주식 모바일 페이지 (여기가 구조가 제일 단순함)
-            url = f"https://m.stock.naver.com/api/stock/{ticker}.O/integration" # .O는 나스닥/NYSE 등 자동매칭됨
-            # 만약 .O가 안먹히면 검색 API를 써야하므로, 여기서는 단순 시도만 함.
-            # 이번엔 API 말고 순수 yfinance로 가되, 한글 개요가 꼭 필요하면 아래 로직 사용.
-            pass 
-        except:
-            pass
-        return None
-
     def get_usa_stock(self, ticker):
         """
-        [미국 주식] yfinance 라이브러리 사용 (세계 표준, 가장 안정적)
-        단, 기본 정보는 영어로 나옵니다.
+        [미국 주식] yfinance 사용 (안정성 최우선)
         """
         try:
+            # yfinance는 기본적으로 데이터를 잘 가져오지만, 
+            # 티커가 'LENB' 처럼 점(.)이 빠진 경우 'LEN-B'나 'LEN.B'로 변환 시도 가능
+            # 여기서는 기본 시도 후 실패 시 변환 시도 로직 추가
+            
             stock = yf.Ticker(ticker)
             info = stock.info
             
-            # 데이터가 없으면 실패
+            # 데이터 없음 확인 (yfinance는 에러를 안 뱉고 빈 딕셔너리를 줄 때가 있음)
             if 'regularMarketPrice' not in info and 'symbol' not in info:
-                 return None, "yfinance 데이터 없음"
+                # 점(.)이 있는 티커(BRK.B 등)를 위한 재시도 로직
+                if len(ticker) > 3 and 'B' in ticker and '.' not in ticker:
+                     # 예: LENB -> LEN-B (야후는 하이픈 사용)
+                     retry_ticker = ticker.replace("B", "-B")
+                     stock = yf.Ticker(retry_ticker)
+                     info = stock.info
+                
+                if 'regularMarketPrice' not in info and 'symbol' not in info:
+                    return None, "데이터 없음 (티커 확인 필요)"
 
-            # 1. 종목명 (영어)
+            # 1. 종목명
             name = info.get('longName') or info.get('shortName') or ticker
             
-            # 2. 산업분류 (한글 매핑 시도)
+            # 2. 산업분류 (영어 -> 한글 단순 매핑)
             sector_map = {
                 "Technology": "기술", "Financial Services": "금융", "Healthcare": "헬스케어",
                 "Consumer Cyclical": "경기소비재", "Communication Services": "통신",
@@ -106,13 +108,10 @@ class StockCrawler:
                 "Basic Materials": "소재", "Real Estate": "부동산", "Utilities": "유틸리티"
             }
             eng_sector = info.get('sector', '')
-            industry = sector_map.get(eng_sector, eng_sector) # 매핑 없으면 영어 그대로
+            industry = sector_map.get(eng_sector, eng_sector)
 
-            # 3. 회사개요 (영어 -> 한글 번역은 구글 API 없이 불가능하므로 영어 원문 or 네이버 시도)
+            # 3. 회사개요 (영어)
             summary = info.get('longBusinessSummary') or "개요 없음"
-            
-            # [옵션] 여기서 네이버에 한 번 물어봐서 한글 개요가 있으면 바꿔치기 할 수 있습니다.
-            # 하지만 '뒤죽박죽'을 피하기 위해, 미국 주식은 일단 yfinance(영어)로 확실하게 채우는 걸 추천합니다.
             
             return {
                 "name": name,
@@ -124,25 +123,26 @@ class StockCrawler:
             return None, f"yfinance 에러: {e}"
 
     def fetch(self, ticker):
-        """티커 형태를 보고 한국/미국 분류하여 데이터 수집"""
+        """티커를 분석하여 한국/미국 분류 후 데이터 수집"""
         clean_ticker = ticker.strip().upper()
         
-        # 한국 주식 판별: 6자리 숫자 (또는 뒤에 한글자 알파벳)
-        # 예: 005930, 0057H0 (알파벳 섞인 코드도 한국주식 로직 태움)
+        # 한국 주식 판별 로직 (6자리 숫자 포함)
         is_korea = False
-        if len(clean_ticker) >= 6 and clean_ticker[:5].isdigit(): 
+        # 숫자 6개가 포함되어 있으면 한국 주식으로 간주 (예: 005930, 0057H0)
+        # 정규표현식으로 숫자 5개 이상 연속되면 한국으로 판단
+        import re
+        if re.search(r'\d{5,}', clean_ticker):
             is_korea = True
         
         if is_korea:
-            # 005930.KS 등 접미어가 있으면 제거하고 순수 코드로 변환
+            # 접미어(.KS) 제거
             code = clean_ticker.split('.')[0]
             return self.get_korea_stock(code)
         else:
-            # 미국 주식 (알파벳 티커)
             return self.get_usa_stock(clean_ticker)
 
 def main():
-    print(f"🚀 [Master DB] Classic Mode 업데이트 시작 (Naver Crawling + yfinance)")
+    print(f"🚀 [Master DB] 한글 깨짐 수정 완료 버전 시작")
     
     try:
         notion = Client(auth=NOTION_TOKEN)
@@ -156,7 +156,7 @@ def main():
     
     while True:
         try:
-            # 필터: 검증되지 않은 항목만
+            # 아직 검증되지 않은 항목만 가져오기
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
                 "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
@@ -179,13 +179,13 @@ def main():
                 if not ticker_list: continue
                 raw_ticker = ticker_list[0].get("plain_text", "").strip().upper()
                 
-                # 타겟 필터링
+                # 타겟 필터링 (리스트가 비어있으면 전체 실행)
                 if TARGET_TICKERS and raw_ticker not in TARGET_TICKERS:
                     continue
 
                 print(f"🔍 조회 중: {raw_ticker} ...")
                 
-                # 데이터 수집 (크롤러 결정)
+                # 데이터 수집
                 data, log_msg = crawler.fetch(raw_ticker)
                 
                 status = ""
