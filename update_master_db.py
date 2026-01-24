@@ -102,7 +102,7 @@ class StockCrawler:
             if not name_tag: return None 
             name = name_tag.text.strip()
 
-            industry = "한국증시"
+            industry = "ETF"
             try:
                 ind_tag = soup.select_one('div.section.trade_compare h4 em a')
                 if ind_tag: industry = ind_tag.text.strip()
