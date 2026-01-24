@@ -12,7 +12,7 @@ from urllib3.util.retry import Retry
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# 재시도 및 타임아웃 설정 (시스템 안정성)
+# 재시도 및 타임아웃 설정
 MAX_RETRIES = 3
 TIMEOUT = 10
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -24,7 +24,6 @@ class NaverStockClient:
     """
     def __init__(self):
         self.session = requests.Session()
-        # 네트워크 불안정 시 3회 재시도 설정
         retries = Retry(total=MAX_RETRIES, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
         self.session.headers.update({'User-Agent': USER_AGENT})
@@ -36,13 +35,13 @@ class NaverStockClient:
         if not ticker:
             return None
 
-        # 1. 검색어 정제 (접미어 제거: 005930.KS -> 005930)
+        # 1. 검색어 정제
         clean_ticker = ticker.strip().upper()
         search_query = clean_ticker.split('.')[0]
 
         try:
             # -----------------------------------------------------
-            # STEP A: 네이버 검색 API로 '실제 코드(reutersCode)' 조회
+            # STEP A: 네이버 검색 API로 '실제 코드' 조회
             # -----------------------------------------------------
             search_url = f"https://m.stock.naver.com/api/search/all?query={search_query}"
             res = self.session.get(search_url, timeout=TIMEOUT)
@@ -70,25 +69,137 @@ class NaverStockClient:
                 target_code = first_item.get("reutersCode", "") or first_item.get("stockId", "")
 
             # -----------------------------------------------------
-            # STEP B: 상세 정보(Integration) 수집 - 한글 데이터 원천
+            # STEP B: 상세 정보(Integration) 수집
             # -----------------------------------------------------
             detail_url = f"https://m.stock.naver.com/api/stock/{target_code}/integration"
             
-            # 차단 방지용 Referer 설정
             self.session.headers.update({'Referer': f'https://m.stock.naver.com/domestic/stock/{target_code}/total'})
             
             res_detail = self.session.get(detail_url, timeout=TIMEOUT)
             if res_detail.status_code == 200:
                 data = res_detail.json()
                 
-                # 데이터 위치 찾기 (주식, ETF, ETN, 리츠 등)
                 r = data.get("result", {})
                 item = (r.get("stockItem") or r.get("etfItem") or 
                         r.get("etnItem") or r.get("reitItem"))
                 
                 if item:
-                    # 1. 종목명 (한글 우선)
+                    # 1. 종목명
                     korean_name = item.get("stockName") or item.get("itemname") or item.get("gname")
                     
-                    # 2. 산업분류
-                    industry = item.get("industryName", "") or item.get("industryCodeName
+                    # 2. 산업분류 (수정된 부분)
+                    industry = item.get("industryName", "") or item.get("industryCodeName", "") or item.get("categoryName", "")
+                    
+                    # 3. 회사개요
+                    summary = (
+                        item.get("description") or 
+                        item.get("summary") or 
+                        item.get("gsummary") or 
+                        item.get("corpSummary") or
+                        ""
+                    )
+
+                    return {
+                        "name": korean_name,
+                        "industry": industry,
+                        "summary": summary,
+                        "code": target_code
+                    }
+
+        except Exception as e:
+            print(f"      ⚠️ API 처리 중 오류 ({ticker}): {e}")
+        
+        return None
+
+def main():
+    print(f"🚀 [Master DB] 한글 데이터 동기화 시작 (Syntax Fixed)")
+    
+    try:
+        notion = Client(auth=NOTION_TOKEN)
+        naver = NaverStockClient()
+    except Exception as e:
+        print(f"❌ 시스템 초기화 실패: {e}")
+        return
+
+    next_cursor = None
+    processed_count = 0
+    
+    while True:
+        try:
+            query_params = {
+                "database_id": MASTER_DATABASE_ID,
+                "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
+                "page_size": 30
+            }
+            if next_cursor:
+                query_params["start_cursor"] = next_cursor
+            
+            response = notion.databases.query(**query_params)
+            pages = response.get("results", [])
+            
+            if not pages and processed_count == 0:
+                print("✨ 업데이트할 대상이 없습니다 (모두 최신 상태).")
+                break
+
+            for page in pages:
+                page_id = page["id"]
+                props = page["properties"]
+                
+                ticker_list = props.get("티커", {}).get("title", [])
+                if not ticker_list:
+                    continue
+                
+                raw_ticker = ticker_list[0].get("plain_text", "").strip().upper()
+                print(f"🔍 조회 중: {raw_ticker} ...")
+                
+                data = naver.search_and_fetch(raw_ticker)
+                
+                status = ""
+                log_msg = ""
+                upd_props = {}
+                
+                if data:
+                    status = "✅ 검증완료"
+                    log_msg = f"✅ 수집 성공: {data['name']} ({data['code']})"
+                    
+                    summary_text = data['summary']
+                    safe_summary = summary_text[:1900] + "..." if summary_text and len(summary_text) > 1900 else (summary_text or "")
+
+                    upd_props = {
+                        "데이터 상태": {"select": {"name": status}},
+                        "검증로그": {"rich_text": [{"text": {"content": log_msg}}]},
+                        "종목명": {"rich_text": [{"text": {"content": data['name']}}]},
+                        "산업분류": {"rich_text": [{"text": {"content": data['industry']}}]}
+                    }
+                    
+                    if "회사개요" in props:
+                        upd_props["회사개요"] = {"rich_text": [{"text": {"content": safe_summary}}]}
+                        print(f"   └ [완료] {data['name']} (개요 포함)")
+                    else:
+                        print(f"   └ [완료] {data['name']} (개요 열 없음)")
+                
+                else:
+                    status = "⚠️ 확인필요"
+                    log_msg = f"❌ 검색 실패 ({raw_ticker})"
+                    upd_props = {
+                        "데이터 상태": {"select": {"name": status}},
+                        "검증로그": {"rich_text": [{"text": {"content": log_msg}}]}
+                    }
+                    print(f"   └ [실패] 데이터 없음")
+
+                notion.pages.update(page_id=page_id, properties=upd_props)
+                processed_count += 1
+                time.sleep(0.3)
+
+            if not response.get("has_more"):
+                break
+            next_cursor = response.get("next_cursor")
+            
+        except Exception as e:
+            print(f"❌ 실행 중 오류 발생: {e}")
+            break
+            
+    print(f"🏁 작업 완료: 총 {processed_count}건 처리됨")
+
+if __name__ == "__main__":
+    main()
