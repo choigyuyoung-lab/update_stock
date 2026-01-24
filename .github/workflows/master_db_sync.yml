@@ -2,7 +2,7 @@ name: Master DB Sync
 
 on:
   schedule:
-    - cron: '0 15 * * *' # 한국 시간 매일 자정 실행
+    - cron: '0 15 * * *' # 한국 시간 매일 자정 실행 (UTC 15:00)
   workflow_dispatch:
 
 jobs:
@@ -10,24 +10,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # 사용자님의 성공 환경인 3.10 이상 준수
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          # 기존 성공 로직과의 호환성을 위해 버전을 명시적으로 고정합니다.
-          pip uninstall -y notion # 혹시 모를 패키지 충돌 방지
-          pip install notion-client==2.2.1 yfinance requests google-api-python-client
+          python -m pip install --upgrade pip
+          # [중요] beautifulsoup4 추가 (네이버 크롤링 필수)
+          # requests 사용하므로 google-api-python-client는 삭제함
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" "requests" "beautifulsoup4"
 
       - name: Run Master DB Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          # [수정됨] 파이썬 변수명(GOOGLE_CX)과 시크릿 이름(GOOGLE_CX) 통일
           GOOGLE_CX: ${{ secrets.GOOGLE_CX }}
         run: python update_master_db.py
