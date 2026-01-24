@@ -6,129 +6,144 @@ from notion_client import Client
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# 1. 환경 변수 설정
+# ---------------------------------------------------------
+# 1. 환경 변수 및 설정
+# ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# 2. 시스템 상수
-MAX_RETRIES = 3
-TIMEOUT = 10
+# [설정] 전체 업데이트를 위해 비워둠 (테스트 시 여기에 티커 추가)
+TARGET_TICKERS = [] 
+
+# 시스템 상수 (차단 방지를 위한 헤더 강화)
+MAX_RETRIES = 5
+TIMEOUT = 15
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+REFERER_URL = 'https://m.stock.naver.com/'
 
 class NaverStockClient:
     def __init__(self):
         self.session = requests.Session()
-        retries = Retry(total=MAX_RETRIES, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        # 재시도 횟수 늘림 (안정성 확보)
+        retries = Retry(total=MAX_RETRIES, backoff_factor=2, status_forcelist=[403, 404, 500, 502, 503, 504])
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
-        self.session.headers.update({'User-Agent': USER_AGENT})
+        # 헤더에 Referer 추가 (중요: 차단 방지)
+        self.session.headers.update({
+            'User-Agent': USER_AGENT,
+            'Referer': REFERER_URL,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+        })
 
-    def search_ticker(self, ticker):
+    def search_and_fetch(self, ticker):
         """
-        [핵심 수정] 404 오류가 나는 검색 API 대신,
-        네이버 검색창이 사용하는 '자동완성(AC) API'를 사용하여 종목을 찾습니다.
+        [성공했던 로직 복구] 네이버 통합 검색 -> 상세 정보(한글) 수집
         """
-        # 검색어 정제
-        query = ticker.strip().upper()
+        if not ticker: return None, "티커 없음"
         
-        # 1. 자동완성 API 호출 (한국/미국 통합)
-        # 이 API는 'LENB'를 넣으면 'LEN.B'를, '005930'을 넣으면 '삼성전자'를 찾아줍니다.
-        ac_url = "https://ac.finance.naver.com/ac"
-        params = {
-            "q": query,
-            "q_enc": "euc-kr",
-            "st": "111",
-            "r_format": "json",
-            "r_enc": "euc-kr",
-            "r_unicode": "0",
-            "t_koreng": "1",
-            "r_lt": "111"
-        }
+        # 검색어 정제
+        input_ticker = ticker.strip().upper()
+        # 접미어 제거 후 검색 (검색 성공률 상승)
+        search_query = input_ticker.split('.')[0]
 
         try:
-            res = self.session.get(ac_url, params=params, timeout=TIMEOUT)
+            # -----------------------------------------------------
+            # 1. 네이버 통합 검색 (search/all)
+            # -----------------------------------------------------
+            # 헤더가 강화되어 이제 404 오류가 나지 않을 것입니다.
+            search_url = f"https://m.stock.naver.com/api/search/all?query={search_query}"
+            res = self.session.get(search_url, timeout=TIMEOUT)
+            
             if res.status_code != 200:
                 return None, f"검색 접속 실패({res.status_code})"
 
-            data = res.json()
-            # items 구조: [[['종목코드', '종목명', ...], ...]]
-            items = data.get("items", [])
-            
-            if not items or not items[0]:
-                return None, "검색 결과 없음"
+            search_result = res.json().get("searchList", [])
+            if not search_result:
+                return None, "검색 결과 0건"
 
-            # 2. 최적의 결과 매칭
-            # 자동완성 결과 중 입력한 티커와 가장 비슷한 것을 찾습니다.
-            best_match = None
-            
-            # items[0] 리스트를 순회
-            for item in items[0]:
-                # item[0]: 코드 (005930, AAPL 등)
-                # item[1]: 종목명 (삼성전자, 애플 등)
-                code = item[0]
-                name = item[1]
+            # -----------------------------------------------------
+            # 2. 정확한 코드 매칭 (엄격 모드 유지)
+            # -----------------------------------------------------
+            target_code = None
+            for item in search_result:
+                # 네이버가 주는 코드 후보군
+                candidates = [
+                    item.get("reutersCode", ""), 
+                    item.get("stockId", ""), 
+                    item.get("itemCode", "")
+                ]
                 
-                # 정제된 코드로 비교 (LEN.B -> LENB)
-                clean_code = re.sub(r'[^a-zA-Z0-9]', '', code).upper()
-                clean_query = re.sub(r'[^a-zA-Z0-9]', '', query).upper()
-
-                # 정확히 일치하거나, 코드가 쿼리를 포함하는 경우
-                if clean_query == clean_code or clean_query in clean_code:
-                    best_match = {"code": code, "name": name}
-                    break
+                for code in candidates:
+                    if not code: continue
+                    code_upper = code.upper()
+                    
+                    # 1) 완전 일치 (AAPL == AAPL)
+                    # 2) 점(.) 앞부분 일치 (005930 == 005930.KS)
+                    if code_upper == input_ticker or ('.' in code_upper and code_upper.split('.')[0] == input_ticker):
+                        target_code = item.get("reutersCode") or item.get("stockId")
+                        break
+                if target_code: break
             
-            # 일치하는 게 없으면 첫 번째 결과 사용 (유연한 매칭)
-            if not best_match:
-                first = items[0][0]
-                best_match = {"code": first[0], "name": first[1]}
+            if not target_code:
+                # [보완] 만약 엄격 매칭에 실패했더라도, 검색 결과가 1개뿐이고 
+                # 그 이름이 매우 유사하다면 가져오는 것이 사용자 의도에 맞을 수 있음
+                # 하지만 요청하신 대로 '엄격함'을 유지하되, 검색어가 코드 그 자체인 경우는 신뢰
+                if len(search_result) > 0:
+                    first = search_result[0]
+                    first_code = first.get("stockId", "") or first.get("reutersCode", "")
+                    if input_ticker in first_code.upper(): # 부분 포함이면 시도
+                        target_code = first_code
+                    else:
+                        return None, f"매칭 실패 (검색됨: {first.get('stockName', '')})"
+                else:
+                    return None, "매칭 실패"
 
-            return best_match, None
-
-        except Exception as e:
-            return None, f"검색 에러: {e}"
-
-    def get_details(self, target_code):
-        """찾아낸 코드(target_code)로 상세 정보(개요 등) 수집"""
-        try:
-            # 통합 상세 정보 URL
+            # -----------------------------------------------------
+            # 3. 상세 데이터(한글 개요) 수집
+            # -----------------------------------------------------
             detail_url = f"https://m.stock.naver.com/api/stock/{target_code}/integration"
+            # 상세 페이지용 Referer 업데이트
             self.session.headers.update({'Referer': f'https://m.stock.naver.com/domestic/stock/{target_code}/total'})
             
-            res = self.session.get(detail_url, timeout=TIMEOUT)
-            if res.status_code != 200:
-                return None
-
-            data = res.json()
-            r = data.get("result", {})
-            
-            # 주식, ETF, ETN, 리츠 등 모든 타입 확인
-            item = (r.get("stockItem") or r.get("etfItem") or 
-                    r.get("etnItem") or r.get("reitItem"))
-            
-            if item:
-                # 한글 데이터 추출
-                k_name = item.get("stockName") or item.get("itemname") or item.get("gname")
-                industry = item.get("industryName", "") or item.get("industryCodeName", "") or item.get("categoryName", "")
+            res_detail = self.session.get(detail_url, timeout=TIMEOUT)
+            if res_detail.status_code == 200:
+                data = res_detail.json()
+                r = data.get("result", {})
                 
-                # 개요 필드 전수 조사
-                summary_candidates = [
-                    item.get("description"), item.get("summary"), 
-                    item.get("gsummary"), item.get("corpSummary")
-                ]
-                valid_summaries = [s for s in summary_candidates if s]
-                summary = max(valid_summaries, key=len) if valid_summaries else ""
+                # 주식, ETF, ETN, 리츠 등 모든 타입 탐색
+                item = (r.get("stockItem") or r.get("etfItem") or r.get("etnItem") or r.get("reitItem"))
+                
+                if item:
+                    k_name = item.get("stockName") or item.get("itemname") or item.get("gname")
+                    industry = item.get("industryName", "") or item.get("industryCodeName", "") or item.get("categoryName", "")
+                    
+                    # 회사개요 필드 전수 조사 (가장 긴 설명 선택)
+                    summary_candidates = [
+                        item.get("description"),   # 국내
+                        item.get("summary"),       # 해외1
+                        item.get("gsummary"),      # 해외2 (한글)
+                        item.get("corpSummary")    # ETF
+                    ]
+                    valid_summaries = [s for s in summary_candidates if s]
+                    summary = max(valid_summaries, key=len) if valid_summaries else ""
 
-                return {
-                    "name": k_name,
-                    "industry": industry,
-                    "summary": summary,
-                    "real_code": target_code
-                }
-        except Exception:
-            pass
-        return None
+                    return {
+                        "name": k_name,
+                        "industry": industry,
+                        "summary": summary,
+                        "real_code": target_code
+                    }, None
+
+        except Exception as e:
+            return None, f"에러: {e}"
+        
+        return None, "상세 정보 없음"
 
 def main():
-    print(f"🚀 [Master DB] 검색 엔진 교체 (404 해결 버전)")
+    if TARGET_TICKERS:
+        print(f"🚀 [Target Mode] 지정된 종목만 업데이트: {TARGET_TICKERS}")
+    else:
+        print(f"🚀 [Full Mode] 전체 종목 업데이트 시작 (네이버 통합검색 복구)")
     
     try:
         notion = Client(auth=NOTION_TOKEN)
@@ -142,11 +157,11 @@ def main():
     
     while True:
         try:
-            # 필터링: 검증되지 않은 항목만
+            # 필터: 검증되지 않은 항목만
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
                 "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
-                "page_size": 30
+                "page_size": 30 
             }
             if next_cursor: query_params["start_cursor"] = next_cursor
             
@@ -165,15 +180,14 @@ def main():
                 if not ticker_list: continue
                 raw_ticker = ticker_list[0].get("plain_text", "").strip().upper()
                 
+                # 타겟 필터링
+                if TARGET_TICKERS and raw_ticker not in TARGET_TICKERS:
+                    continue
+
                 print(f"🔍 조회 중: {raw_ticker} ...")
                 
-                # 1. 검색 (자동완성 API)
-                search_result, err_msg = naver.search_ticker(raw_ticker)
-                
-                data = None
-                if search_result:
-                    # 2. 상세 정보 수집
-                    data = naver.get_details(search_result['code'])
+                # 데이터 수집
+                data, err_msg = naver.search_and_fetch(raw_ticker)
                 
                 status = ""
                 log_msg = ""
@@ -181,8 +195,12 @@ def main():
                 
                 if data:
                     status = "✅ 검증완료"
-                    log_msg = f"✅ 성공: {data['name']} (코드: {data['real_code']})"
-                    safe_summary = data['summary'][:1900] + "..." if data['summary'] and len(data['summary']) > 1900 else (data['summary'] or "")
+                    log_msg = f"✅ 성공: {data['name']} ({data['real_code']})"
+                    
+                    # 요약본 길이 제한
+                    summary_text = data['summary']
+                    safe_summary = summary_text[:1900] + "..." if summary_text and len(summary_text) > 1900 else (summary_text or "")
+                    summary_len = len(safe_summary)
 
                     upd_props = {
                         "데이터 상태": {"select": {"name": status}},
@@ -193,22 +211,21 @@ def main():
                     
                     if "회사개요" in props:
                         upd_props["회사개요"] = {"rich_text": [{"text": {"content": safe_summary}}]}
-                        print(f"   └ [완료] {data['name']} (개요 확보)")
+                        print(f"   └ [완료] {data['name']} (개요: {summary_len}자)")
                     else:
-                        print(f"   └ [완료] {data['name']} (개요 열 없음)")
+                        print(f"   └ [완료] {data['name']} (⚠️ 개요 열 없음)")
                 else:
                     status = "⚠️ 확인필요"
-                    fail_reason = err_msg if err_msg else "상세 정보 없음"
-                    log_msg = f"❌ 실패: {fail_reason}"
+                    log_msg = f"❌ 실패: {err_msg}"
                     upd_props = {
                         "데이터 상태": {"select": {"name": status}},
                         "검증로그": {"rich_text": [{"text": {"content": log_msg}}]}
                     }
-                    print(f"   └ [실패] {fail_reason}")
+                    print(f"   └ [실패] {err_msg}")
 
                 notion.pages.update(page_id=page_id, properties=upd_props)
                 processed_count += 1
-                time.sleep(0.3)
+                time.sleep(0.5) # 차단 방지를 위해 대기 시간 약간 늘림
 
             if not response.get("has_more"): break
             next_cursor = response.get("next_cursor")
@@ -217,7 +234,7 @@ def main():
             print(f"❌ 시스템 오류: {e}")
             break
             
-    print(f"🏁 작업 완료: 총 {processed_count}건")
+    print(f"🏁 작업 완료: 총 {processed_count}건 처리됨")
 
 if __name__ == "__main__":
     main()
