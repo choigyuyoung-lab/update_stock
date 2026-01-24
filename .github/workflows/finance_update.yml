@@ -1,9 +1,9 @@
-
 name: Stock Finance Update
 
 on:
   schedule:
-    - cron: '25 */4 * * *' # (UTC 기준) 4시간마다 25분에 실행
+    # (UTC 기준) 매주 월요일 00:00에 실행 (한국 시간 월요일 오전 9시)
+    - cron: '0 0 * * 1'
   workflow_dispatch:
 
 jobs:
@@ -19,11 +19,11 @@ jobs:
       - name: Upgrade pip & Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "notion-client==2.2.1" "yfinance>=0.2.31" "requests" "pandas"
+          # [중요] update_finance.py 실행을 위해 beautifulsoup4 추가됨
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" "requests" "pandas" "beautifulsoup4"
 
       - name: Run Finance Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
         run: python update_finance.py
-
