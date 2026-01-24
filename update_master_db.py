@@ -6,7 +6,7 @@ import yfinance as yf
 from notion_client import Client
 from googleapiclient.discovery import build
 
-# 1. 환경 변수 및 설정
+# 환경 변수 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -14,7 +14,7 @@ GOOGLE_CX = os.environ.get("GOOGLE_CX")
 
 client = Client(auth=NOTION_TOKEN)
 
-# 산업분류 매핑 테이블
+# 산업분류 매핑
 INDUSTRY_MAP = {
     "Technology": "IT/기술", "Financial Services": "금융 서비스",
     "Healthcare": "헬스케어", "Consumer Cyclical": "경기 소비재",
@@ -25,46 +25,46 @@ INDUSTRY_MAP = {
 }
 
 def clean_name(name):
-    """비교를 위해 특수문자 제거 및 대문자 변환"""
     if not name: return ""
     return re.sub(r'[^a-zA-Z0-9가-힣]', '', str(name)).upper()
 
 def get_stock_data(ticker):
-    """네이버/야후 API를 통해 종목 데이터 수집 (접미어 제거 로직 포함)"""
-    # [중요] 티커에서 접미어 제거 (.KS, .KQ, .O, .N 등 모두 삭제)
+    """네이버/야후 API 데이터 수집"""
+    # 접미어 제거 (.KS, .KQ, .O 등)
     clean_ticker = ticker.split('.')[0].strip()
     
     try:
-        if len(clean_ticker) == 6 and clean_ticker.isdigit(): # 한국 주식
-            res = requests.get(f"https://m.stock.naver.com/api/stock/{clean_ticker}/integration", timeout=10).json()
+        if len(clean_ticker) == 6 and clean_ticker.isdigit(): # 한국
+            # 네이버 API 헤더 추가 (차단 방지)
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            res = requests.get(f"https://m.stock.naver.com/api/stock/{clean_ticker}/integration", headers=headers, timeout=10).json()
             item = res.get("result", {}).get("stockItem", {})
             if item:
-                return item.get("stockName"), item.get("description"), item.get("industryName")
-        else: # 미국 주식
-            # 1차 시도: 접미어 제거된 티커로 시도
+                return item.get("stockName"), item.get("industryName")
+        else: # 미국
             stock = yf.Ticker(clean_ticker)
             info = stock.info
-            
-            # 1차 실패 시 원본 티커로 재시도 (야후 파이낸스 특성 반영)
+            # 1차 실패 시 원본 티커로 재시도
             if not info or 'longName' not in info:
                 stock = yf.Ticker(ticker)
                 info = stock.info
-                
+            
             if info and ('longName' in info or 'shortName' in info):
                 name = info.get("longName") or info.get("shortName")
-                return name, info.get("longBusinessSummary"), info.get("sector")
+                return name, info.get("sector")
     except Exception as e:
-        print(f"      ⚠️ {ticker} API 수집 중 오류: {e}")
+        print(f"      ⚠️ {ticker} 수집 에러: {e}")
     
-    return None, None, None
+    return None, None
 
 def main():
-    print(f"🚀 [상장주식 DB 검증] 시작")
+    print(f"🚀 [상장주식 DB 검증] 시작 - 실제 열 이름 반영 버전")
     google_count = 0
     next_cursor = None
     
     while True:
         try:
+            # 필터: '데이터 상태'가 '✅ 검증완료'가 아닌 것
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
                 "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
@@ -82,30 +82,45 @@ def main():
                 page_id = page["id"]
                 props = page["properties"]
                 
+                # 티커 추출
                 raw_ticker = props.get("티커", {}).get("title", [{}])[0].get("plain_text", "").strip().upper()
                 if not raw_ticker: continue
                 
+                # 기존 이름 추출
                 existing_name_list = props.get("종목명(기존)", {}).get("rich_text", [])
                 existing_name = existing_name_list[0].get("plain_text", "").strip() if existing_name_list else ""
                 
                 print(f"🔍 {raw_ticker} ({existing_name}) 처리 중...")
                 
-                # 데이터 수집 호출
-                actual_name, summary, sector = get_stock_data(raw_ticker)
+                # 데이터 수집 (회사개요 제외)
+                actual_name, sector = get_stock_data(raw_ticker)
 
                 verified = False
                 log = ""
                 
                 if not actual_name:
-                    log = f"❌ API 수집 실패 (티커 확인 요망: {raw_ticker})" # 상세 로그 남김
+                    log = f"❌ API 수집 실패 (티커: {raw_ticker})"
                 elif clean_name(existing_name) in clean_name(actual_name) or clean_name(actual_name) in clean_name(existing_name):
                     verified, log = True, "✅ 1차 대조 성공"
                 else:
-                    # 구글 2차 검증 (생략 가능하나 무결성을 위해 유지)
-                    # google_search_verify 로직은 기존과 동일하므로 필요시 추가 가능
-                    log = f"❌ 이름 불일치 (기존: {existing_name} vs API: {actual_name})"
+                    # 구글 검색
+                    try:
+                        if GOOGLE_API_KEY and GOOGLE_CX:
+                            service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
+                            res = service.cse().list(q=f"{raw_ticker} {existing_name} 주식", cx=GOOGLE_CX, num=3).execute()
+                            items = res.get("items", [])
+                            combined = "".join([i.get("title", "") + i.get("snippet", "") for i in items])
+                            if clean_name(existing_name) in clean_name(combined):
+                                google_count += 1
+                                verified, log = True, "✅ 2차 구글 검증 성공"
+                            else:
+                                log = f"❌ 불일치 ({actual_name})"
+                        else:
+                             log = f"❌ 불일치 ({actual_name}) - 구글키 없음"
+                    except:
+                        log = f"❌ 불일치 ({actual_name}) - 검색 에러"
 
-                # 노션 업데이트
+                # [수정됨] 실제 노션 열 이름('종목명', '산업분류') 사용
                 upd_props = {
                     "데이터 상태": {"select": {"name": "✅ 검증완료" if verified else "⚠️ 확인필요"}},
                     "검증로그": {"rich_text": [{"text": {"content": log}}]}
@@ -113,10 +128,9 @@ def main():
                 
                 if verified:
                     upd_props.update({
-                        "종목명(텍스트)": {"rich_text": [{"text": {"content": actual_name}}]},
-                        "산업분류(원문)": {"rich_text": [{"text": {"content": sector if sector else ""}}]},
-                        "산업분류(텍스트)": {"rich_text": [{"text": {"content": INDUSTRY_MAP.get(sector, sector) if sector else ""}}]},
-                        "회사개요": {"rich_text": [{"text": {"content": summary[:1900] if summary else ""}}]}
+                        "종목명": {"rich_text": [{"text": {"content": actual_name}}]}, # (텍스트) 제거
+                        "산업분류": {"rich_text": [{"text": {"content": INDUSTRY_MAP.get(sector, sector) if sector else ""}}]} # (텍스트) 제거
+                        # 회사개요는 없으므로 삭제함
                     })
                 
                 client.pages.update(page_id=page_id, properties=upd_props)
@@ -125,7 +139,7 @@ def main():
             if not response.get("has_more") or google_count >= 90: break
             next_cursor = response.get("next_cursor")
         except Exception as e:
-            print(f"❌ 오류: {e}")
+            print(f"❌ 오류 발생: {e}")
             break
 
 if __name__ == "__main__":
