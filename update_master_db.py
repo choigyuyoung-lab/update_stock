@@ -12,11 +12,14 @@ from notion_client import Client
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# [수정됨] GitHub Secrets 이름인 GOOGLE_CX를 그대로 사용
+# GitHub Secrets 이름인 GOOGLE_CX를 그대로 사용
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_CX = os.environ.get("GOOGLE_CX")
 
-# [설정] 전체 업데이트 (비워두면 전체 실행)
+# [설정 1] True = 전체 강제 업데이트 (수동 실행용)
+# [설정 1] False = '검증완료' 제외하고 업데이트 (스케줄 실행용)
+IS_FULL_UPDATE = True 
+
 TARGET_TICKERS = []
 
 # 시스템 상수
@@ -35,39 +38,42 @@ class StockCrawler:
         self.headers = {'User-Agent': USER_AGENT}
 
     # ------------------------------------------------------------------
-    # [기능] 구글 검색 검증
+    # [기능] 구글 검색 검증 (3단 상태 반환으로 수정)
     # ------------------------------------------------------------------
     def verify_with_google(self, ticker, fetched_name):
         """
-        티커로 구글 검색 후, 결과에 크롤링한 종목명(fetched_name)이 있는지 교차 검증
+        반환값: (상태코드, 로그메시지)
+        - PASS: 검증 성공 (-> ✅ 검증완료)
+        - SKIP: 할당량 초과 또는 키 없음 (-> ⏳ 검증대기)
+        - FAIL: 검증 실패 (-> ⚠️ 확인필요)
         """
-        # 키가 없으면 검증 패스 (기존 크롤링 데이터 신뢰)
         if not GOOGLE_API_KEY or not GOOGLE_CX:
-            return True, ""
+            return "SKIP", "(API키 없음/건너뜀)"
 
         try:
-            # 검색어 생성
             query = f"{ticker} 주식" if re.search(r'\d', ticker) else f"{ticker} stock"
-            
             url = "https://www.googleapis.com/customsearch/v1"
             params = {
                 'key': GOOGLE_API_KEY,
-                'cx': GOOGLE_CX,  # [수정됨] GOOGLE_CX 사용
+                'cx': GOOGLE_CX, 
                 'q': query,
                 'num': 2
             }
             
             res = requests.get(url, params=params, timeout=5)
+            
+            # [설정 2] 할당량 초과(429) 또는 권한 에러(403) 발생 시 -> 검증대기
+            if res.status_code in [429, 403]:
+                return "SKIP", f"(일일할당량 초과/대기: {res.status_code})"
+            
             if res.status_code != 200:
-                return True, "" 
+                return "SKIP", f"(구글 에러 {res.status_code})"
 
             items = res.json().get('items', [])
             if not items:
-                return False, "(구글결과 없음)"
+                return "FAIL", "(구글결과 없음)"
 
-            # 검증 로직
             core_name = fetched_name.split()[0].replace(',', '').lower()
-            
             is_matched = False
             for item in items:
                 title = item.get('title', '').lower()
@@ -79,15 +85,15 @@ class StockCrawler:
                     break
             
             if is_matched:
-                return True, "+ 구글검증됨"
+                return "PASS", "+ 구글검증됨"
             else:
-                return False, "(구글검증 실패)"
+                return "FAIL", "(구글검증 실패)"
 
-        except Exception:
-            return True, "" 
+        except Exception as e:
+            return "SKIP", f"(검증 에러: {str(e)})"
 
     # ------------------------------------------------------------------
-    # 크롤링 로직 (네이버/야후)
+    # 크롤링 로직 (기존 코드 유지)
     # ------------------------------------------------------------------
     def fetch_naver_crawling(self, ticker):
         try:
@@ -162,16 +168,17 @@ class StockCrawler:
         else:
             data = self.fetch_yahoo(search_code)
 
+        # [수정됨] 검증 로직 호출 시 상태값 처리
         if data:
-            is_verified, msg = self.verify_with_google(search_code, data['name'])
-            if msg:
-                data['source'] = f"{data['source']} {msg}"
-            data['is_verified'] = is_verified
+            v_status, msg = self.verify_with_google(search_code, data['name'])
+            data['ver_status'] = v_status # PASS, SKIP, FAIL
+            data['source'] = f"{data['source']} {msg}"
 
         return data
 
 def main():
-    print(f"🚀 [Master DB] 미검증 종목 업데이트 시작")
+    mode_msg = "전체 강제 업데이트" if IS_FULL_UPDATE else "미검증 항목만 업데이트"
+    print(f"🚀 [Master DB] 시작: {mode_msg}")
     
     try:
         notion = Client(auth=NOTION_TOKEN)
@@ -185,12 +192,19 @@ def main():
     
     while True:
         try:
-            # [필터] '검증완료'가 아닌 것만 가져오기
+            # 기본 쿼리 파라미터
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
-                "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
                 "page_size": 50
             }
+
+            # [설정 3] IS_FULL_UPDATE가 False일 때만 '검증완료' 제외 필터 적용
+            if not IS_FULL_UPDATE:
+                query_params["filter"] = {
+                    "property": "데이터 상태", 
+                    "select": {"does_not_equal": "✅ 검증완료"}
+                }
+            
             if next_cursor: query_params["start_cursor"] = next_cursor
             
             response = notion.databases.query(**query_params)
@@ -220,8 +234,12 @@ def main():
                 upd_props = {}
                 
                 if data:
-                    if data.get('is_verified', True):
+                    # [설정 2] 상태값 매핑 (PASS->완료, SKIP->대기, FAIL->확인필요)
+                    v_stat = data.get('ver_status', 'SKIP')
+                    if v_stat == "PASS":
                         status = "✅ 검증완료"
+                    elif v_stat == "SKIP":
+                        status = "⏳ 검증대기"
                     else:
                         status = "⚠️ 확인필요"
                     
@@ -238,7 +256,7 @@ def main():
                     if "회사개요" in props:
                         upd_props["회사개요"] = {"rich_text": [{"text": {"content": safe_summary}}]}
                     
-                    print(f"   └ 완료 {data['name']} ({log_msg})")
+                    print(f"   └ {status}: {data['name']} ({log_msg})")
                 else:
                     status = "⚠️ 확인필요"
                     log_msg = "데이터 없음"
