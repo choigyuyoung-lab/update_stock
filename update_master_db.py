@@ -5,6 +5,7 @@ import re
 import yfinance as yf
 from bs4 import BeautifulSoup
 from notion_client import Client
+from datetime import datetime  # [추가됨] 날짜 기록을 위한 모듈
 
 # ---------------------------------------------------------
 # 1. 환경 변수 및 설정
@@ -12,15 +13,16 @@ from notion_client import Client
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# GitHub Secrets 이름인 GOOGLE_CX를 그대로 사용
+# [수정됨] GitHub Secrets 이름인 GOOGLE_CX를 그대로 사용
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_CX = os.environ.get("GOOGLE_CX")
+
+# [설정] 전체 업데이트 (비워두면 전체 실행)
+TARGET_TICKERS = []
 
 # [설정 1] True = 전체 강제 업데이트 (수동 실행용)
 # [설정 1] False = '검증완료' 제외하고 업데이트 (스케줄 실행용)
 IS_FULL_UPDATE = True 
-
-TARGET_TICKERS = []
 
 # 시스템 상수
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -38,7 +40,7 @@ class StockCrawler:
         self.headers = {'User-Agent': USER_AGENT}
 
     # ------------------------------------------------------------------
-    # [기능] 구글 검색 검증 (3단 상태 반환으로 수정)
+    # [기능] 구글 검색 검증
     # ------------------------------------------------------------------
     def verify_with_google(self, ticker, fetched_name):
         """
@@ -51,11 +53,13 @@ class StockCrawler:
             return "SKIP", "(API키 없음/건너뜀)"
 
         try:
+            # 검색어 생성
             query = f"{ticker} 주식" if re.search(r'\d', ticker) else f"{ticker} stock"
+            
             url = "https://www.googleapis.com/customsearch/v1"
             params = {
                 'key': GOOGLE_API_KEY,
-                'cx': GOOGLE_CX, 
+                'cx': GOOGLE_CX,  # [수정됨] GOOGLE_CX 사용
                 'q': query,
                 'num': 2
             }
@@ -73,7 +77,9 @@ class StockCrawler:
             if not items:
                 return "FAIL", "(구글결과 없음)"
 
+            # 검증 로직
             core_name = fetched_name.split()[0].replace(',', '').lower()
+            
             is_matched = False
             for item in items:
                 title = item.get('title', '').lower()
@@ -93,7 +99,7 @@ class StockCrawler:
             return "SKIP", f"(검증 에러: {str(e)})"
 
     # ------------------------------------------------------------------
-    # 크롤링 로직 (기존 코드 유지)
+    # 크롤링 로직 (네이버/야후)
     # ------------------------------------------------------------------
     def fetch_naver_crawling(self, ticker):
         try:
@@ -168,10 +174,9 @@ class StockCrawler:
         else:
             data = self.fetch_yahoo(search_code)
 
-        # [수정됨] 검증 로직 호출 시 상태값 처리
         if data:
             v_status, msg = self.verify_with_google(search_code, data['name'])
-            data['ver_status'] = v_status # PASS, SKIP, FAIL
+            data['ver_status'] = v_status 
             data['source'] = f"{data['source']} {msg}"
 
         return data
@@ -229,12 +234,15 @@ def main():
                 
                 data = crawler.get_data(raw_ticker)
                 
+                # [추가] 오늘 날짜 가져오기 (YYYY-MM-DD 형식)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                
                 status = ""
                 log_msg = ""
                 upd_props = {}
                 
                 if data:
-                    # [설정 2] 상태값 매핑 (PASS->완료, SKIP->대기, FAIL->확인필요)
+                    # [설정 2] 상태값 매핑
                     v_stat = data.get('ver_status', 'SKIP')
                     if v_stat == "PASS":
                         status = "✅ 검증완료"
@@ -251,7 +259,8 @@ def main():
                         "데이터 상태": {"select": {"name": status}},
                         "검증로그": {"rich_text": [{"text": {"content": log_msg}}]},
                         "종목명": {"rich_text": [{"text": {"content": data['name']}}]},
-                        "산업분류": {"rich_text": [{"text": {"content": data['industry']}}]}
+                        "산업분류": {"rich_text": [{"text": {"content": data['industry']}}]},
+                        "업데이트 일자": {"date": {"start": today_str}} # [추가됨] 날짜 업데이트
                     }
                     if "회사개요" in props:
                         upd_props["회사개요"] = {"rich_text": [{"text": {"content": safe_summary}}]}
@@ -262,7 +271,8 @@ def main():
                     log_msg = "데이터 없음"
                     upd_props = {
                         "데이터 상태": {"select": {"name": status}},
-                        "검증로그": {"rich_text": [{"text": {"content": log_msg}}]}
+                        "검증로그": {"rich_text": [{"text": {"content": log_msg}}]},
+                        "업데이트 일자": {"date": {"start": today_str}} # [추가됨] 실패 시에도 날짜 업데이트
                     }
                     print(f"   └ 실패 {log_msg}")
 
