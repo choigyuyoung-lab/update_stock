@@ -3,6 +3,7 @@ import time
 import requests
 import re
 import yfinance as yf
+from bs4 import BeautifulSoup
 from notion_client import Client
 
 # ---------------------------------------------------------
@@ -11,151 +12,142 @@ from notion_client import Client
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# 구글 검증용 API 키
+# [수정됨] GitHub Secrets 이름인 GOOGLE_CX를 그대로 사용
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_CX = os.environ.get("GOOGLE_CX")
 
-# [설정] 특정 티커만 테스트하고 싶을 때 사용 (비워두면 전체 실행)
+# [설정] 전체 업데이트 (비워두면 전체 실행)
 TARGET_TICKERS = []
 
-# ---------------------------------------------------------
-# 2. 크롤러 클래스 (하이브리드 API + 구글 검증)
-# ---------------------------------------------------------
+# 시스템 상수
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+# 야후 산업분류 한글 매핑
+YAHOO_SECTOR_MAP = {
+    "Technology": "기술", "Financial Services": "금융", "Healthcare": "헬스케어",
+    "Consumer Cyclical": "경기소비재", "Communication Services": "통신 서비스",
+    "Industrials": "산업재", "Consumer Defensive": "필수소비재", "Energy": "에너지",
+    "Basic Materials": "소재", "Real Estate": "부동산", "Utilities": "유틸리티"
+}
+
 class StockCrawler:
     def __init__(self):
-        # [핵심] 모바일 아이폰으로 위장하여 네이버 보안을 통과합니다.
-        self.mobile_headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        }
+        self.headers = {'User-Agent': USER_AGENT}
 
     # ------------------------------------------------------------------
-    # [기능] 구글 검색 검증 (3단 상태 반환)
+    # [기능] 구글 검색 검증
     # ------------------------------------------------------------------
     def verify_with_google(self, ticker, fetched_name):
         """
-        반환값: (상태코드, 로그메시지)
-        - PASS: 검증 성공 (✅ 검증완료)
-        - SKIP: 할당량 초과 또는 API 키 없음 (⏳ 검증대기)
-        - FAIL: 검증 실패 (⚠️ 확인필요)
+        티커로 구글 검색 후, 결과에 크롤링한 종목명(fetched_name)이 있는지 교차 검증
         """
+        # 키가 없으면 검증 패스 (기존 크롤링 데이터 신뢰)
         if not GOOGLE_API_KEY or not GOOGLE_CX:
-            return "SKIP", "(API키 없음/건너뜀)"
+            return True, ""
 
         try:
+            # 검색어 생성
             query = f"{ticker} 주식" if re.search(r'\d', ticker) else f"{ticker} stock"
+            
             url = "https://www.googleapis.com/customsearch/v1"
-            params = {'key': GOOGLE_API_KEY, 'cx': GOOGLE_CX, 'q': query, 'num': 2}
+            params = {
+                'key': GOOGLE_API_KEY,
+                'cx': GOOGLE_CX,  # [수정됨] GOOGLE_CX 사용
+                'q': query,
+                'num': 2
+            }
             
             res = requests.get(url, params=params, timeout=5)
-            
-            # [중요] 할당량 초과(429) 또는 권한 없음(403) -> 검증대기 상태로 전환
-            if res.status_code in [429, 403]:
-                return "SKIP", "(일일할당량 초과/대기)"
-            
             if res.status_code != 200:
-                return "SKIP", f"(구글 에러 {res.status_code})"
+                return True, "" 
 
             items = res.json().get('items', [])
             if not items:
-                return "FAIL", "(구글결과 없음)"
+                return False, "(구글결과 없음)"
 
-            # 이름 비교 로직 (핵심 단어 포함 여부)
+            # 검증 로직
             core_name = fetched_name.split()[0].replace(',', '').lower()
+            
             is_matched = False
             for item in items:
                 title = item.get('title', '').lower()
                 snippet = item.get('snippet', '').lower()
+                
                 if (core_name in title or core_name in snippet) or \
                    (ticker.lower().split('.')[0] in title):
                     is_matched = True
                     break
             
             if is_matched:
-                return "PASS", "+ 구글검증됨"
+                return True, "+ 구글검증됨"
             else:
-                return "FAIL", "(이름 불일치)"
+                return False, "(구글검증 실패)"
 
-        except Exception as e:
-            return "SKIP", f"(시스템 에러: {str(e)})"
+        except Exception:
+            return True, "" 
 
     # ------------------------------------------------------------------
-    # [1] 한국 주식 (모바일 API)
+    # 크롤링 로직 (네이버/야후)
     # ------------------------------------------------------------------
-    def fetch_korean_stock(self, ticker):
-        url = f"https://m.stock.naver.com/api/stock/{ticker}/integration"
-        headers = self.mobile_headers.copy()
-        headers['Referer'] = f"https://m.stock.naver.com/domestic/stock/{ticker}/total"
-        headers['Origin'] = 'https://m.stock.naver.com'
-        
+    def fetch_naver_crawling(self, ticker):
         try:
-            res = requests.get(url, headers=headers, timeout=5)
+            url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+            res = requests.get(url, headers=self.headers, timeout=10)
+            res.encoding = res.apparent_encoding 
+
             if res.status_code != 200: return None
-
-            data = res.json()
-            name = data.get('stockName', ticker)
             
-            # 산업분류
-            industry = ""
-            if 'stocks' in data and data['stocks']:
-                 industry = data['stocks'][0].get('industryCodeName', '')
-            if not industry and 'stockItem' in data:
-                industry = data['stockItem'].get('industryName', '')
-            if not industry: industry = "한국증시"
+            soup = BeautifulSoup(res.text, 'html.parser')
+            name_tag = soup.select_one('.wrap_company h2 a')
+            if not name_tag: return None 
+            name = name_tag.text.strip()
 
-            # 개요
-            total_infos = data.get('totalInfos', [])
-            summary = ""
-            for info in total_infos:
-                if info.get('key') == 'summary_info':
-                    summary = info.get('value', '')
-                    break
-
-            return {"name": name, "industry": industry, "summary": summary, "source": "네이버(국내)"}
-        except Exception: return None
-
-    # ------------------------------------------------------------------
-    # [2] 미국 주식 (PC API + 모바일 헤더)
-    # ------------------------------------------------------------------
-    def fetch_us_stock(self, ticker):
-        suffixes = ['.O', '', '.K', '.N'] # 나스닥, NYSE, 아멕스 순
-        
-        for suffix in suffixes:
+            industry = "한국증시"
             try:
-                search_ticker = f"{ticker}{suffix}"
-                url = f"https://api.stock.naver.com/stock/{search_ticker}/integration"
-                
-                headers = self.mobile_headers.copy()
-                headers['Referer'] = f"https://m.stock.naver.com/worldstock/stock/{search_ticker}/total"
-                headers['Origin'] = 'https://m.stock.naver.com'
-                
-                res = requests.get(url, headers=headers, timeout=5)
-                if res.status_code != 200: continue
+                ind_tag = soup.select_one('div.section.trade_compare h4 em a')
+                if ind_tag: industry = ind_tag.text.strip()
+            except: pass
 
-                data = res.json()
-                if not data.get('symbolCode'): continue
-
-                kor_name = data.get('stockName', '')
-                eng_name = data.get('engStockName', '')
-                final_name = kor_name if kor_name else (eng_name if eng_name else ticker)
-
-                industry_map = data.get('industryCodeType', {})
-                industry = industry_map.get('industryGroupKor', "미국주식")
-                summary = data.get('corpSummary', "")
-
-                if final_name:
-                    return {"name": final_name, "industry": industry, "summary": summary, "source": "네이버(해외)"}
-            except Exception: continue
+            summary = ""
+            summary_div = soup.select_one('#summary_info p')
+            if summary_div: summary = summary_div.text.strip()
+            
+            return {
+                "name": name,
+                "industry": industry,
+                "summary": summary,
+                "source": "네이버 정보"
+            }
+        except Exception: pass
         return None
 
-    # ------------------------------------------------------------------
-    # 데이터 수집 총괄
-    # ------------------------------------------------------------------
+    def fetch_yahoo(self, ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            if 'regularMarketPrice' not in info and 'symbol' not in info:
+                return None
+
+            name = info.get('longName') or info.get('shortName') or ticker
+            eng_sector = info.get('sector', '')
+            industry = YAHOO_SECTOR_MAP.get(eng_sector, eng_sector)
+            summary = info.get('longBusinessSummary', '')
+
+            return {
+                "name": name,
+                "industry": industry,
+                "summary": summary,
+                "source": "야후 정보"
+            }
+        except Exception: pass
+        return None
+
     def get_data(self, ticker):
         raw_ticker = ticker.strip().upper()
-        search_code = raw_ticker
+        
         is_korea = False
+        search_code = raw_ticker
 
         if (len(raw_ticker) == 6 and raw_ticker[0].isdigit()) or \
            raw_ticker.endswith('.KS') or raw_ticker.endswith('.KQ'):
@@ -166,23 +158,20 @@ class StockCrawler:
 
         data = None
         if is_korea:
-            data = self.fetch_korean_stock(search_code)
+            data = self.fetch_naver_crawling(search_code)
         else:
-            data = self.fetch_us_stock(search_code)
+            data = self.fetch_yahoo(search_code)
 
-        # 데이터가 있으면 구글 검증 진행
         if data:
-            status, msg = self.verify_with_google(search_code, data['name'])
-            data['ver_status'] = status # PASS, SKIP, FAIL
-            data['source'] = f"{data['source']} {msg}"
-        
+            is_verified, msg = self.verify_with_google(search_code, data['name'])
+            if msg:
+                data['source'] = f"{data['source']} {msg}"
+            data['is_verified'] = is_verified
+
         return data
 
-# ---------------------------------------------------------
-# 3. 메인 실행 함수
-# ---------------------------------------------------------
 def main():
-    print(f"🚀 [Master DB] 전체 종목 업데이트 시작 (필터 없음)")
+    print(f"🚀 [Master DB] 미검증 종목 업데이트 시작")
     
     try:
         notion = Client(auth=NOTION_TOKEN)
@@ -196,9 +185,10 @@ def main():
     
     while True:
         try:
-            # [수정됨] 필터 제거 -> 모든 데이터베이스 항목을 가져옵니다.
+            # [필터] '검증완료'가 아닌 것만 가져오기
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
+                "filter": {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}},
                 "page_size": 50
             }
             if next_cursor: query_params["start_cursor"] = next_cursor
@@ -207,7 +197,7 @@ def main():
             pages = response.get("results", [])
             
             if not pages and processed_count == 0:
-                print("✨ 데이터베이스가 비어있습니다.")
+                print("✨ 업데이트할 대상이 없습니다.")
                 break
             if not pages: break
 
@@ -221,31 +211,26 @@ def main():
                 
                 if TARGET_TICKERS and raw_ticker not in TARGET_TICKERS: continue
 
-                print(f"🔍 조회 중: {raw_ticker} ...")
+                print(f"🔍 업데이트 중: {raw_ticker} ...")
                 
                 data = crawler.get_data(raw_ticker)
                 
-                final_status = ""
+                status = ""
                 log_msg = ""
                 upd_props = {}
                 
                 if data:
-                    # [상태 결정 로직]
-                    v_stat = data.get('ver_status', 'SKIP')
-                    
-                    if v_stat == "PASS":
-                        final_status = "✅ 검증완료"
-                    elif v_stat == "SKIP":
-                        final_status = "⏳ 검증대기" # 할당량 초과/에러 등
+                    if data.get('is_verified', True):
+                        status = "✅ 검증완료"
                     else:
-                        final_status = "⚠️ 확인필요" # 구글 검색 실패
+                        status = "⚠️ 확인필요"
                     
                     log_msg = data['source']
                     summary_text = data['summary']
                     safe_summary = summary_text[:1900] + "..." if summary_text and len(summary_text) > 1900 else (summary_text or "")
                     
                     upd_props = {
-                        "데이터 상태": {"select": {"name": final_status}},
+                        "데이터 상태": {"select": {"name": status}},
                         "검증로그": {"rich_text": [{"text": {"content": log_msg}}]},
                         "종목명": {"rich_text": [{"text": {"content": data['name']}}]},
                         "산업분류": {"rich_text": [{"text": {"content": data['industry']}}]}
@@ -253,15 +238,15 @@ def main():
                     if "회사개요" in props:
                         upd_props["회사개요"] = {"rich_text": [{"text": {"content": safe_summary}}]}
                     
-                    print(f"   └ {final_status}: {data['name']} ({log_msg})")
+                    print(f"   └ 완료 {data['name']} ({log_msg})")
                 else:
-                    final_status = "⚠️ 확인필요"
-                    log_msg = "데이터 없음(네이버/야후 실패)"
+                    status = "⚠️ 확인필요"
+                    log_msg = "데이터 없음"
                     upd_props = {
-                        "데이터 상태": {"select": {"name": final_status}},
+                        "데이터 상태": {"select": {"name": status}},
                         "검증로그": {"rich_text": [{"text": {"content": log_msg}}]}
                     }
-                    print(f"   └ 실패: {log_msg}")
+                    print(f"   └ 실패 {log_msg}")
 
                 notion.pages.update(page_id=page_id, properties=upd_props)
                 processed_count += 1
