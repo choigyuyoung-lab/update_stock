@@ -10,9 +10,10 @@ import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 from notion_client import Client
+from duckduckgo_search import DDGS
 
 # ---------------------------------------------------------
-# 1. 환경 변수 및 핵심 설정
+# 1. 전역 설정 및 로깅
 # ---------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -22,10 +23,8 @@ MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_CX = os.environ.get("GOOGLE_CX")
 
-# [핵심 제어 변수]
-# True: 전체 업데이트 / False: 검증완료 제외 업데이트
+# 제어 변수 (True: 전체 업데이트 / False: 검증완료 항목 제외)
 IS_FULL_UPDATE = False 
-
 MAX_WORKERS = 2 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -42,31 +41,47 @@ class StockCrawlerOptimizer:
         self.session.headers.update({'User-Agent': USER_AGENT})
 
     def _clean_text(self, text: str) -> str:
-        """데이터 부재 시 공백 반환"""
+        """데이터 부재 시 공백 반환 최적화"""
         if not text: return ""
         cleaned = re.sub(r'\[.*?\]', '', text).strip()
         return "" if cleaned in ["정보 없음", "정보없음"] else cleaned
 
-    def verify_ticker_with_google(self, ticker: str) -> Tuple[str, str]:
-        """3단계: 구글 API 할당량 감지 및 티커 검증"""
-        if not GOOGLE_API_KEY or not GOOGLE_CX:
-            return "SKIP", "(API 키 없음)"
+    def verify_ticker_hybrid(self, ticker: str) -> Tuple[str, str]:
+        """[하이브리드 검증] DDG 우선 시도 후 실패 시 구글 API 백업"""
+        query = f"{ticker} stock"
+        
+        # 1단계: DuckDuckGo 검증 (무제한)
         try:
-            query = f"{ticker} stock"
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=3))
+                if results:
+                    is_valid = any(ticker.lower() in r.get('title', '').lower() for r in results)
+                    if is_valid:
+                        return "PASS", "(DDG) +검증됨"
+                    # DDG 결과는 있지만 티커가 안 보일 경우 다음 구글 백업으로 넘김
+        except Exception as e:
+            logger.debug(f"DDG Search failed for {ticker}: {e}")
+
+        # 2단계: 구글 API 백업 (제한적)
+        if not GOOGLE_API_KEY or not GOOGLE_CX:
+            return "SKIP", "(DDG) 검증지연"
+
+        try:
             url = "https://www.googleapis.com/customsearch/v1"
             params = {'key': GOOGLE_API_KEY, 'cx': GOOGLE_CX, 'q': query, 'num': 3}
             res = self.session.get(url, params=params, timeout=5)
             
             if res.status_code in [429, 403]:
-                return "SKIP", "(API 사용량 초과)"
+                return "SKIP", "(GOO) 사용량초과"
 
             items = res.json().get('items', [])
             is_valid = any(ticker.lower() in item.get('title', '').lower() for item in items)
-            return ("PASS", "+ 구글검증됨") if is_valid else ("FAIL", "(검증 실패)")
-        except: return "SKIP", "(검증 에러)"
+            return ("PASS", "(GOO) +검증됨") if is_valid else ("FAIL", "(GOO) 검증실패")
+        except:
+            return "SKIP", "(검증 서버 오류)"
 
     def fetch_wiki_url_from_google(self, ticker: str, is_korea: bool) -> Optional[str]:
-        """4단계: 구글 파이낸스 Wikipedia 직통 링크 추출"""
+        """구글 파이낸스 직통 Wikipedia 링크 추출"""
         exchange = "KRX" if is_korea else "NASDAQ"
         url = f"https://www.google.com/finance/quote/{ticker}:{exchange}?hl=ko"
         try:
@@ -77,7 +92,7 @@ class StockCrawlerOptimizer:
         except: return None
 
     def fetch_wiki_infobox(self, wiki_url: str) -> Dict[str, str]:
-        """위키백과 데이터 추출 (공백 초기화)"""
+        """위키백과 데이터 추출 (데이터 부재 시 공백 유지)"""
         data = {"wiki_industry": "", "wiki_service": ""}
         try:
             res = self.session.get(wiki_url, timeout=10)
@@ -94,36 +109,43 @@ class StockCrawlerOptimizer:
         return data
 
     def get_integrated_data(self, raw_ticker: str) -> Optional[Dict[str, Any]]:
-        ticker = raw_ticker.strip().upper()
-        base_ticker = ticker.split('.')[0]
-        is_korea = (len(base_ticker) == 6) or ticker.endswith(('.KS', '.KQ'))
+        ticker_upper = raw_ticker.strip().upper()
+        base_ticker = ticker_upper.split('.')[0]
+        # 6자리 판별 (영문 혼합 포함)
+        is_korea = (len(base_ticker) == 6) or ticker_upper.endswith(('.KS', '.KQ'))
         
         data = {}
         try:
+            # 1. 산업 분류 정보 수집 (네이버/야후)
             if is_korea:
                 url = f"https://finance.naver.com/item/main.naver?code={base_ticker}"
                 res = self.session.get(url, timeout=10); res.encoding = res.apparent_encoding
                 soup = BeautifulSoup(res.text, 'html.parser')
                 data['name'] = soup.select_one('.wrap_company h2 a').get_text(strip=True)
                 data['industry'] = soup.select_one('div.section.trade_compare h4 em a').get_text(strip=True) if soup.select_one('div.section.trade_compare h4 em a') else "ETF"
-                data['source_tag'] = "네이버"
+                data['tag'] = "네이버"
             else:
-                y_ticker = ticker.replace('.', '-')
+                y_ticker = ticker_upper.replace('.', '-')
                 stock = yf.Ticker(y_ticker)
                 data['name'] = stock.info.get('longName') or stock.info.get('shortName') or base_ticker
                 data['industry'] = YAHOO_SECTOR_MAP.get(stock.info.get('sector', ''), stock.info.get('sector', ''))
-                data['source_tag'] = "야후"
+                data['tag'] = "야후"
             
-            v_status, v_msg = self.verify_ticker_with_google(base_ticker)
-            data.update({"ver_status": v_status, "ver_log": f"{data['source_tag']} {v_msg}"})
+            # 2. 하이브리드 검증 실행
+            v_status, v_msg = self.verify_ticker_hybrid(base_ticker)
+            data.update({"ver_status": v_status, "ver_log": f"{data['tag']}{v_msg}"})
             
+            # 3. 위키백과 정보 보강
             wiki_url = self.fetch_wiki_url_from_google(base_ticker, is_korea)
             wiki_data = self.fetch_wiki_infobox(wiki_url) if wiki_url else {"wiki_industry": "", "wiki_service": ""}
             data.update(wiki_data)
+            
             return data
-        except: return None
+        except Exception as e:
+            logger.error(f"Execution Error for {raw_ticker}: {e}")
+            return None
 
-def process_page(page: Dict[str, Any], crawler: StockCrawlerOptimizer, notion: Client):
+def process_page_job(page: Dict[str, Any], crawler: StockCrawlerOptimizer, notion: Client):
     try:
         page_id, props = page["id"], page["properties"]
         ticker_rich = props.get("티커", {}).get("title", [])
@@ -148,42 +170,38 @@ def process_page(page: Dict[str, Any], crawler: StockCrawlerOptimizer, notion: C
             upd_props = {"데이터 상태": {"select": {"name": "⚠️ 확인필요"}}, "업데이트 일자": {"date": {"start": now_iso}}}
             
         notion.pages.update(page_id=page_id, properties=upd_props)
-        logger.info(f"SUCCESS: {raw_ticker}")
-    except Exception as e: logger.error(f"UPDATE ERROR: {e}")
+        logger.info(f"UPDATED: {raw_ticker}")
+    except Exception as e:
+        logger.error(f"NOTION UPDATE FAIL: {e}")
 
 def main():
-    logger.info(f"Notion Automation v1.4 [Full Update: {IS_FULL_UPDATE}]")
+    logger.info(f"Stock Automation Hybrid v1.5 [Full Update: {IS_FULL_UPDATE}]")
     notion, crawler = Client(auth=NOTION_TOKEN), StockCrawlerOptimizer()
     
     start_cursor = None
-    processed_count = 0
+    processed_total = 0
 
     while True:
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if start_cursor: query_params["start_cursor"] = start_cursor
         
-        # [교정] 자동 업데이트 시 '✅ 검증완료' 항목 제외 필터링 추가
+        # 선택적 업데이트 필터 적용
         if not IS_FULL_UPDATE:
-            query_params["filter"] = {
-                "property": "데이터 상태",
-                "select": {
-                    "does_not_equal": "✅ 검증완료"
-                }
-            }
+            query_params["filter"] = {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}}
         
         response = notion.databases.query(**query_params)
         pages = response.get("results", [])
         
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             for page in pages:
-                executor.submit(process_page, page, crawler, notion)
-                time.sleep(0.4)
+                executor.submit(process_page_job, page, crawler, notion)
+                time.sleep(0.4) # Rate Limit 안전장치
         
-        processed_count += len(pages)
+        processed_total += len(pages)
         if not response.get("has_more"): break
         start_cursor = response.get("next_cursor")
 
-    logger.info(f"Job Finished. Total processed: {processed_count}")
+    logger.info(f"Job Completed. Total Processed: {processed_total}")
 
 if __name__ == "__main__":
     main()
