@@ -35,66 +35,98 @@ class StockCrawler:
         self.headers = {'User-Agent': USER_AGENT}
 
     # ------------------------------------------------------------------
+    # [NEW] 네이버 해외주식(미국) 데이터 가져오기 (모바일 API 사용)
+    # ------------------------------------------------------------------
+    def fetch_naver_us_stock(self, ticker):
+        """
+        네이버 해외주식 모바일 API를 통해 '한글' 기업 개요와 섹터 정보를 가져옴
+        """
+        try:
+            # 네이버는 미국 주식 뒤에 보통 .O (NYSE/AMEX/NASDAQ 통합) 등을 붙임
+            # API: https://api.stock.naver.com/stock/{ticker}.O/basic
+            
+            # 1차 시도: 티커 + .O (네이버의 일반적인 미국주식 식별자)
+            search_ticker = f"{ticker}.O"
+            url = f"https://api.stock.naver.com/stock/{search_ticker}/basic"
+            
+            res = requests.get(url, headers=self.headers, timeout=5)
+            
+            # 만약 .O로 안 되면(404 등), 티커 그대로 한 번 더 시도 (혹시나 해서)
+            if res.status_code != 200:
+                url = f"https://api.stock.naver.com/stock/{ticker}/basic"
+                res = requests.get(url, headers=self.headers, timeout=5)
+                if res.status_code != 200:
+                    return None # 네이버에 정보 없음 -> 야후로 넘기자
+
+            data = res.json()
+            
+            # 데이터 파싱
+            stock_item = data.get('stockItem', {})
+            
+            # 1. 종목명 (한글 이름 우선)
+            kor_name = stock_item.get('stockName', ticker)
+            eng_name = stock_item.get('engStockName', ticker)
+            final_name = kor_name if kor_name else eng_name
+            
+            # 2. 산업분류 (한글 섹터)
+            industry_map = stock_item.get('industryCodeType', {})
+            industry = industry_map.get('industryGroupKor', "미국주식") 
+
+            # 3. 회사개요 (한글 설명!)
+            summary = stock_item.get('corpSummary', "")
+            
+            # 요약이 없더라도 이름/산업이라도 건졌으면 성공으로 처리
+            return {
+                "name": final_name,
+                "industry": industry,
+                "summary": summary,
+                "source": "네이버 해외주식(API)"
+            }
+
+        except Exception as e:
+            # 에러 나면 조용히 야후로 넘김
+            return None
+
+    # ------------------------------------------------------------------
     # [기능] 구글 검색 검증
     # ------------------------------------------------------------------
     def verify_with_google(self, ticker, fetched_name):
-        """
-        티커로 구글 검색 후, 결과에 크롤링한 종목명(fetched_name)이 있는지 교차 검증
-        """
-        # 키가 없으면 검증 패스 (기존 크롤링 데이터 신뢰)
         if not GOOGLE_API_KEY or not GOOGLE_CX:
             return True, ""
-
         try:
-            # 검색어 생성
             query = f"{ticker} 주식" if re.search(r'\d', ticker) else f"{ticker} stock"
-            
             url = "https://www.googleapis.com/customsearch/v1"
-            params = {
-                'key': GOOGLE_API_KEY,
-                'cx': GOOGLE_CX,  # [수정됨] GOOGLE_CX 사용
-                'q': query,
-                'num': 2
-            }
+            params = {'key': GOOGLE_API_KEY, 'cx': GOOGLE_CX, 'q': query, 'num': 2}
             
             res = requests.get(url, params=params, timeout=5)
-            if res.status_code != 200:
-                return True, "" 
+            if res.status_code != 200: return True, "" 
 
             items = res.json().get('items', [])
-            if not items:
-                return False, "(구글결과 없음)"
+            if not items: return False, "(구글결과 없음)"
 
-            # 검증 로직
             core_name = fetched_name.split()[0].replace(',', '').lower()
-            
             is_matched = False
             for item in items:
                 title = item.get('title', '').lower()
                 snippet = item.get('snippet', '').lower()
-                
                 if (core_name in title or core_name in snippet) or \
                    (ticker.lower().split('.')[0] in title):
                     is_matched = True
                     break
             
-            if is_matched:
-                return True, "+ 구글검증됨"
-            else:
-                return False, "(구글검증 실패)"
-
+            if is_matched: return True, "+ 구글검증됨"
+            else: return False, "(구글검증 실패)"
         except Exception:
             return True, "" 
 
     # ------------------------------------------------------------------
-    # 크롤링 로직 (네이버/야후)
+    # 크롤링 로직 (네이버 국내 PC)
     # ------------------------------------------------------------------
     def fetch_naver_crawling(self, ticker):
         try:
             url = f"https://finance.naver.com/item/main.naver?code={ticker}"
             res = requests.get(url, headers=self.headers, timeout=10)
             res.encoding = res.apparent_encoding 
-
             if res.status_code != 200: return None
             
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -102,7 +134,7 @@ class StockCrawler:
             if not name_tag: return None 
             name = name_tag.text.strip()
 
-            industry = "ETF"
+            industry = "한국증시"
             try:
                 ind_tag = soup.select_one('div.section.trade_compare h4 em a')
                 if ind_tag: industry = ind_tag.text.strip()
@@ -121,13 +153,14 @@ class StockCrawler:
         except Exception: pass
         return None
 
+    # ------------------------------------------------------------------
+    # 야후 파이낸스 (백업용)
+    # ------------------------------------------------------------------
     def fetch_yahoo(self, ticker):
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
-            
-            if 'regularMarketPrice' not in info and 'symbol' not in info:
-                return None
+            if 'regularMarketPrice' not in info and 'symbol' not in info: return None
 
             name = info.get('longName') or info.get('shortName') or ticker
             eng_sector = info.get('sector', '')
@@ -138,11 +171,14 @@ class StockCrawler:
                 "name": name,
                 "industry": industry,
                 "summary": summary,
-                "source": "야후 정보"
+                "source": "야후 정보(영문)"
             }
         except Exception: pass
         return None
 
+    # ------------------------------------------------------------------
+    # [수정됨] 데이터 수집 총괄 (네이버 해외주식 우선 적용)
+    # ------------------------------------------------------------------
     def get_data(self, ticker):
         raw_ticker = ticker.strip().upper()
         
@@ -157,10 +193,17 @@ class StockCrawler:
             if '.' in raw_ticker: search_code = raw_ticker.split('.')[0]
 
         data = None
+        
         if is_korea:
+            # 1. 한국 주식 -> 네이버 국내
             data = self.fetch_naver_crawling(search_code)
         else:
-            data = self.fetch_yahoo(search_code)
+            # 2. 미국/해외 주식 -> [NEW] 네이버 해외주식 API 먼저 시도!
+            data = self.fetch_naver_us_stock(search_code)
+            
+            # 네이버에 없으면 -> 야후 파이낸스로 백업
+            if not data:
+                data = self.fetch_yahoo(search_code)
 
         if data:
             is_verified, msg = self.verify_with_google(search_code, data['name'])
@@ -171,7 +214,7 @@ class StockCrawler:
         return data
 
 def main():
-    print(f"🚀 [Master DB] 미검증 종목 업데이트 시작")
+    print(f"🚀 [Master DB] 업데이트 시작 (네이버 한글정보 우선모드)")
     
     try:
         notion = Client(auth=NOTION_TOKEN)
