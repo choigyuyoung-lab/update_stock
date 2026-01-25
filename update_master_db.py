@@ -18,7 +18,7 @@ GOOGLE_CX = os.environ.get("GOOGLE_CX")
 
 TARGET_TICKERS = []
 IS_FULL_UPDATE = True 
-MAX_WORKERS = 2  # 안정성을 위해 2개로 조정
+MAX_WORKERS = 2  # 안정성을 위한 동시 작업 수
 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 YAHOO_SECTOR_MAP = {
@@ -32,7 +32,7 @@ class StockCrawler:
     def __init__(self):
         self.headers = {'User-Agent': USER_AGENT}
 
-    # [3단계] 구글 검색 검증 (100건 제한 대응)
+    # [3단계] 구글 검색 검증 (기존 유지)
     def verify_with_google(self, ticker, fetched_name):
         if not GOOGLE_API_KEY or not GOOGLE_CX:
             return "SKIP", "(API키 없음/건너뜀)"
@@ -50,7 +50,7 @@ class StockCrawler:
             return ("PASS", "+ 구글검증됨") if is_matched else ("FAIL", "(검증 실패)")
         except: return "SKIP", "(검증 에러)"
 
-    # [4단계] 한글 위키백과 상세 크롤링
+    # [4단계] 한글 위키백과 크롤링 (산업 분야, 서비스)
     def fetch_wikipedia_data(self, company_name):
         clean_name = company_name.replace('(주)', '').strip()
         url = f"https://ko.wikipedia.org/wiki/{clean_name}"
@@ -78,6 +78,7 @@ class StockCrawler:
             res.encoding = res.apparent_encoding 
             soup = BeautifulSoup(res.text, 'html.parser')
             name = soup.select_one('.wrap_company h2 a').text.strip()
+            # 네이버 산업분류
             industry = soup.select_one('div.section.trade_compare h4 em a').text.strip() if soup.select_one('div.section.trade_compare h4 em a') else "ETF"
             wiki_ind, wiki_srv = self.fetch_wikipedia_data(name)
             return {"name": name, "industry": industry, "wiki_industry": wiki_ind, "service": wiki_srv, "source": "네이버+위키"}
@@ -88,6 +89,7 @@ class StockCrawler:
             stock = yf.Ticker(ticker)
             info = stock.info
             name = info.get('longName') or info.get('shortName') or ticker
+            # 야후 산업분류
             industry = YAHOO_SECTOR_MAP.get(info.get('sector', ''), info.get('sector', ''))
             wiki_ind, wiki_srv = self.fetch_wikipedia_data(name)
             return {"name": name, "industry": industry, "wiki_industry": wiki_ind, "service": wiki_srv, "source": "야후+위키"}
@@ -104,7 +106,7 @@ class StockCrawler:
         return data
 
 def process_page(page, crawler, notion):
-    """개별 페이지 업데이트를 위한 스레드 작업"""
+    """요청하신 열 매핑 규칙을 정확히 적용합니다."""
     try:
         page_id, props = page["id"], page["properties"]
         ticker_list = props.get("티커", {}).get("title", [])
@@ -112,33 +114,38 @@ def process_page(page, crawler, notion):
         raw_ticker = ticker_list[0].get("plain_text", "").strip().upper()
         
         data = crawler.get_data(raw_ticker)
-        # ISO 8601 형식으로 시간 기록
         now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:00")
         
         if data:
             v_stat = data.get('ver_status', 'SKIP')
             status = "✅ 검증완료" if v_stat == "PASS" else ("⏳ 검증대기" if v_stat == "SKIP" else "⚠️ 확인필요")
-            final_industry = data['wiki_industry'] if data['wiki_industry'] != "정보 없음" else data['industry']
             
+            # [교정] 각 데이터 소스별 열 매핑
             upd_props = {
                 "데이터 상태": {"select": {"name": status}},
                 "검증로그": {"rich_text": [{"text": {"content": data['source']}}]},
                 "종목명": {"rich_text": [{"text": {"content": data['name']}}]},
-                "산업분류": {"rich_text": [{"text": {"content": final_industry}}]},
+                "산업분류": {"rich_text": [{"text": {"content": data['industry']}}]}, # 네이버/야후 분류
                 "업데이트 일자": {"date": {"start": now_iso}}
             }
+            
+            # 위키백과 데이터: 산업 분야 열이 있을 경우 업데이트
+            if "산업분야" in props:
+                upd_props["산업분야"] = {"rich_text": [{"text": {"content": data['wiki_industry']}}]}
+            
+            # 위키백과 데이터: 서비스 열이 있을 경우 업데이트
             if "서비스" in props:
                 upd_props["서비스"] = {"rich_text": [{"text": {"content": data['service']}}]}
         else:
             upd_props = {"데이터 상태": {"select": {"name": "⚠️ 확인필요"}}, "업데이트 일자": {"date": {"start": now_iso}}}
         
         notion.pages.update(page_id=page_id, properties=upd_props)
-        print(f"✅ {raw_ticker} 업데이트 완료 ({now_iso})")
+        print(f"✅ {raw_ticker} 업데이트 완료")
     except Exception as e:
         print(f"❌ 오류 ({raw_ticker}): {e}")
 
 def main():
-    print(f"🚀 [Master DB] 멀티스레딩({MAX_WORKERS} 스레드) 실행 시작")
+    print(f"🚀 [Master DB] 멀티스레딩(2 스레드) 실행 시작")
     try:
         notion, crawler = Client(auth=NOTION_TOKEN), StockCrawler()
     except Exception as e:
@@ -154,7 +161,7 @@ def main():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         for page in pages:
             executor.submit(process_page, page, crawler, notion)
-            time.sleep(0.4) # 노션 API 안정성을 위한 최소 간격
+            time.sleep(0.4)
 
     print(f"🏁 전체 {len(pages)}건 작업 종료")
 
