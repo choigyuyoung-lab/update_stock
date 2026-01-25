@@ -22,7 +22,7 @@ MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_CX = os.environ.get("GOOGLE_CX")
 
-MAX_WORKERS = 2  # 안정성을 위한 2개 스레드 고정
+MAX_WORKERS = 2 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 YAHOO_SECTOR_MAP = {
@@ -38,14 +38,13 @@ class StockCrawlerOptimizer:
         self.session.headers.update({'User-Agent': USER_AGENT})
 
     def _clean_text(self, text: str) -> str:
-        """[최적화] 데이터가 없으면 '정보 없음' 대신 빈 문자열 반환"""
+        """데이터 부재 시 공백 반환 최적화"""
         if not text: return ""
         cleaned = re.sub(r'\[.*?\]', '', text).strip()
-        # "정보 없음"이라는 텍스트가 위키 자체에 적혀있는 경우도 공백 처리
-        return "" if cleaned == "정보 없음" else cleaned
+        return "" if cleaned in ["정보 없음", "정보없음"] else cleaned
 
     def verify_ticker_with_google(self, ticker: str) -> Tuple[str, str]:
-        """3단계: 티커 포함 여부로 구글 검색 검증"""
+        """[교정] 3단계: 구글 API 할당량 초과 여부 정밀 감지"""
         if not GOOGLE_API_KEY or not GOOGLE_CX:
             return "SKIP", "(API 키 없음)"
         try:
@@ -53,13 +52,24 @@ class StockCrawlerOptimizer:
             url = "https://www.googleapis.com/customsearch/v1"
             params = {'key': GOOGLE_API_KEY, 'cx': GOOGLE_CX, 'q': query, 'num': 3}
             res = self.session.get(url, params=params, timeout=5)
+            
+            # 할당량 초과 발생 시 (HTTP 429 또는 403 에러 처리)
+            if res.status_code == 429:
+                return "SKIP", "(API 사용량 초과: 429)"
+            if res.status_code == 403:
+                # 403 중에서도 할당량 초과 관련 메시지 확인
+                if "quotaExceeded" in res.text:
+                    return "SKIP", "(API 사용량 초과: 할당량 부족)"
+                return "SKIP", f"(API 에러: {res.status_code})"
+
             items = res.json().get('items', [])
             is_valid = any(ticker.lower() in item.get('title', '').lower() for item in items)
             return ("PASS", "+ 구글검증됨") if is_valid else ("FAIL", "(검증 실패)")
-        except: return "SKIP", "(검증 에러)"
+        except Exception as e:
+            return "SKIP", f"(검증 중 오류)"
 
     def fetch_wiki_url_direct(self, ticker: str, is_korea: bool) -> Optional[str]:
-        """4단계-1: 구글 파이낸스 Wikipedia 직통 주소 추출"""
+        """4단계-1: 구글 파이낸스 직통 링크 사냥"""
         exchange = "KRX" if is_korea else "NASDAQ"
         url = f"https://www.google.com/finance/quote/{ticker}:{exchange}?hl=ko"
         try:
@@ -70,7 +80,7 @@ class StockCrawlerOptimizer:
         except: return None
 
     def fetch_wiki_infobox(self, wiki_url: str) -> Dict[str, str]:
-        """[최적화] 4단계-2: 위키백과 정보상자 추출 (초기값을 공백으로 설정)"""
+        """4단계-2: 위키백과 데이터 추출 (공백 초기화)"""
         data = {"wiki_industry": "", "wiki_service": ""}
         try:
             res = self.session.get(wiki_url, timeout=10)
@@ -87,7 +97,7 @@ class StockCrawlerOptimizer:
         return data
 
     def get_integrated_data(self, raw_ticker: str) -> Optional[Dict[str, Any]]:
-        """메인 수집 파이프라인"""
+        """통합 수집 파이프라인"""
         ticker = raw_ticker.strip().upper()
         base_ticker = ticker.split('.')[0]
         is_korea = (len(base_ticker) == 6) or ticker.endswith(('.KS', '.KQ'))
@@ -108,18 +118,18 @@ class StockCrawlerOptimizer:
                 data['industry'] = YAHOO_SECTOR_MAP.get(stock.info.get('sector', ''), stock.info.get('sector', ''))
                 data['source_tag'] = "야후"
             
-            # 3단계: 구글 검증
+            # 3단계: 구글 검증 (할당량 감지 포함)
             v_status, v_msg = self.verify_ticker_with_google(base_ticker)
             data.update({"ver_status": v_status, "ver_log": f"{data['source_tag']} {v_msg}"})
             
-            # 4단계: 위키백과 정보 추가 (데이터 없으면 공백 유지)
+            # 4단계: 위키백과 정보 보강 (공백 원칙 적용)
             wiki_url = self.fetch_wiki_url_direct(base_ticker, is_korea)
             wiki_data = self.fetch_wiki_infobox(wiki_url) if wiki_url else {"wiki_industry": "", "wiki_service": ""}
             data.update(wiki_data)
             
             return data
         except Exception as e:
-            logger.error(f"Error gathering data for {ticker}: {e}")
+            logger.error(f"Data collection failed for {ticker}: {e}")
             return None
 
 def process_notion_page(page: Dict[str, Any], crawler: StockCrawlerOptimizer, notion: Client):
@@ -149,10 +159,10 @@ def process_notion_page(page: Dict[str, Any], crawler: StockCrawlerOptimizer, no
         notion.pages.update(page_id=page_id, properties=upd_props)
         logger.info(f"Updated: {raw_ticker}")
     except Exception as e:
-        logger.error(f"Failed to update page: {e}")
+        logger.error(f"Update failed: {e}")
 
 def main():
-    logger.info("Starting Notion Stock Automation Optimizer v1.2 (Blank Space Fix)")
+    logger.info("Starting Notion Stock Automation Optimizer v1.3 (Quota Monitoring)")
     notion, crawler = Client(auth=NOTION_TOKEN), StockCrawlerOptimizer()
     
     start_cursor = None
