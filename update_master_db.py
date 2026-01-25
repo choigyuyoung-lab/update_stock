@@ -15,11 +15,7 @@ MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_CX = os.environ.get("GOOGLE_CX")
 
-# [설정] True = 전체 강제 업데이트 (수동 실행용)
-# [설정] False = '검증완료' 건너뛰기 (스케줄 자동 실행용)
-IS_FULL_UPDATE = True 
-
-# [설정] 특정 티커만 테스트 (비워두면 전체 실행)
+# [설정] 특정 티커만 테스트하고 싶을 때 사용 (비워두면 전체 실행)
 TARGET_TICKERS = []
 
 # ---------------------------------------------------------
@@ -40,9 +36,9 @@ class StockCrawler:
     def verify_with_google(self, ticker, fetched_name):
         """
         반환값: (상태코드, 로그메시지)
-        - PASS: 검증 성공
-        - SKIP: 할당량 초과 또는 API 키 없음
-        - FAIL: 검증 실패
+        - PASS: 검증 성공 (✅ 검증완료)
+        - SKIP: 할당량 초과 또는 API 키 없음 (⏳ 검증대기)
+        - FAIL: 검증 실패 (⚠️ 확인필요)
         """
         if not GOOGLE_API_KEY or not GOOGLE_CX:
             return "SKIP", "(API키 없음/건너뜀)"
@@ -54,7 +50,7 @@ class StockCrawler:
             
             res = requests.get(url, params=params, timeout=5)
             
-            # [중요] 할당량 초과 (429) 또는 권한 없음 (403) -> 검증대기 상태로
+            # [중요] 할당량 초과(429) 또는 권한 없음(403) -> 검증대기 상태로 전환
             if res.status_code in [429, 403]:
                 return "SKIP", "(일일할당량 초과/대기)"
             
@@ -65,7 +61,7 @@ class StockCrawler:
             if not items:
                 return "FAIL", "(구글결과 없음)"
 
-            # 이름 비교 로직
+            # 이름 비교 로직 (핵심 단어 포함 여부)
             core_name = fetched_name.split()[0].replace(',', '').lower()
             is_matched = False
             for item in items:
@@ -186,8 +182,7 @@ class StockCrawler:
 # 3. 메인 실행 함수
 # ---------------------------------------------------------
 def main():
-    mode_msg = "전체 강제 업데이트" if IS_FULL_UPDATE else "미검증 항목만 업데이트"
-    print(f"🚀 [Master DB] 시작: {mode_msg}")
+    print(f"🚀 [Master DB] 전체 종목 업데이트 시작 (필터 없음)")
     
     try:
         notion = Client(auth=NOTION_TOKEN)
@@ -201,25 +196,18 @@ def main():
     
     while True:
         try:
+            # [수정됨] 필터 제거 -> 모든 데이터베이스 항목을 가져옵니다.
             query_params = {
                 "database_id": MASTER_DATABASE_ID,
                 "page_size": 50
             }
-            
-            # [설정 적용] 부분 업데이트 모드일 때만 필터 적용
-            if not IS_FULL_UPDATE:
-                query_params["filter"] = {
-                    "property": "데이터 상태", 
-                    "select": {"does_not_equal": "✅ 검증완료"}
-                }
-            
             if next_cursor: query_params["start_cursor"] = next_cursor
             
             response = notion.databases.query(**query_params)
             pages = response.get("results", [])
             
             if not pages and processed_count == 0:
-                print("✨ 업데이트할 대상이 없습니다.")
+                print("✨ 데이터베이스가 비어있습니다.")
                 break
             if not pages: break
 
@@ -248,7 +236,7 @@ def main():
                     if v_stat == "PASS":
                         final_status = "✅ 검증완료"
                     elif v_stat == "SKIP":
-                        final_status = "⏳ 검증대기" # 할당량 초과 등
+                        final_status = "⏳ 검증대기" # 할당량 초과/에러 등
                     else:
                         final_status = "⚠️ 확인필요" # 구글 검색 실패
                     
