@@ -1,10 +1,11 @@
 name: Stock Price Update
 
 on:
-  schedule:
-    # (UTC 기준) 매시간 42분에 실행
-    # 주식 시장은 평일에만 열리지만, 단순함을 위해 매일 돌려도 무방합니다.
-    - cron: '42 * * * *'
+  # 외부(Cron-job.org)에서 보내는 '벨 소리'를 받겠다는 설정입니다.
+  repository_dispatch:
+    types: [price_update] # 이 이름(run_update)은 리모컨 버튼 이름과 같습니다.
+  
+  # 수동 실행 버튼은 그대로 남겨두는 것이 좋습니다.
   workflow_dispatch:
 
 jobs:
