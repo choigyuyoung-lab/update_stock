@@ -2,7 +2,7 @@ name: Stock Master DB Automation
 
 on:
   schedule:
-    - cron: '15 9 * * *' # 매일 한국 시간 오후 6시 (UTC 09:00)
+    - cron: '12 9 * * *' # 매일 한국 시간 오후 6시 (UTC 09:00)
   workflow_dispatch: # 사용자가 Actions 탭에서 직접 'Run workflow' 버튼을 누를 때만 실행
 
 jobs:
