@@ -1,44 +1,29 @@
 name: Stock Master DB Automation
 
-# 실행 트리거 설정
 on:
   schedule:
-    # 한국 시간 기준 매일 오후 6시 (UTC 09:00) 실행 
-    # 구글 API 초기화 시간(한국 시간 오후 4~5시) 이후로 설정
-    - cron: '0 9 * * *'
-  push:
-    branches: [ main ] # 메인 브랜치에 푸시될 때 실행
-  workflow_dispatch: # 버튼을 눌러 수동으로 즉시 실행 가능
+    - cron: '15 9 * * *' # 매일 한국 시간 오후 6시 (UTC 09:00)
+  workflow_dispatch: # 사용자가 Actions 탭에서 직접 'Run workflow' 버튼을 누를 때만 실행
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-    # 1. 소스 코드 체크아웃
-    - name: Checkout Source Code
-      uses: actions/checkout@v3
-
-    # 2. 파이썬 환경 설정 (v3.10 권장)
-    - name: Set up Python 3.10
+    - uses: actions/checkout@v3
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-
-    # 3. 필수 라이브러리 설치 (duckduckgo_search 포함)
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install notion-client requests beautifulsoup4 yfinance duckduckgo_search
-
-    # 4. 스크립트 실행
+        # 버전을 명시하여 속성 오류를 방지합니다.
+        pip install notion-client==2.2.1 requests beautifulsoup4 yfinance duckduckgo_search
     - name: Run Update Script
       env:
-        # GitHub Repository Secrets에 등록된 값들을 불러옵니다
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         GOOGLE_CX: ${{ secrets.GOOGLE_CX }}
-        # 자동 실행 시에는 검증완료 항목을 건너뛰도록 False 설정
         IS_FULL_UPDATE: "False" 
       run: python update_master_db.py
