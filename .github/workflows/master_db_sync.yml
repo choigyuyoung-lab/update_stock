@@ -18,7 +18,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         # 버전을 명시하여 속성 오류를 방지합니다.
-        pip install notion-client==2.2.1 requests beautifulsoup4 yfinance duckduckgo_search
+        pip install notion-client==2.2.1 requests beautifulsoup4 yfinance ddgs
     - name: Run Update Script
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
