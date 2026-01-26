@@ -1,9 +1,12 @@
 name: Stock Master DB Automation
 
 on:
-  schedule:
-    - cron: '12 9 * * *' # 매일 한국 시간 오후 6시 (UTC 09:00)
-  workflow_dispatch: # 사용자가 Actions 탭에서 직접 'Run workflow' 버튼을 누를 때만 실행
+  # 외부(Cron-job.org)에서 보내는 '벨 소리'를 받겠다는 설정입니다.
+  repository_dispatch:
+    types: [master_db_sync] # 이 이름(run_update)은 리모컨 버튼 이름과 같습니다.
+  
+  # 수동 실행 버튼은 그대로 남겨두는 것이 좋습니다.
+  workflow_dispatch:
 
 jobs:
   build:
