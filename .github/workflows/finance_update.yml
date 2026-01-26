@@ -1,8 +1,11 @@
 name: Stock Finance Update
 
 on:
-  schedule:
-    - cron: '12 9 * * 6'
+  # 외부(Cron-job.org)에서 보내는 '벨 소리'를 받겠다는 설정입니다.
+  repository_dispatch:
+    types: [finance_update] # 이 이름(run_update)은 리모컨 버튼 이름과 같습니다.
+  
+  # 수동 실행 버튼은 그대로 남겨두는 것이 좋습니다.
   workflow_dispatch:
 
 jobs:
