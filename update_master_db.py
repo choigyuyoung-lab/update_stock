@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 from notion_client import Client
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # ---------------------------------------------------------
 # 1. 환경 설정 및 로깅
