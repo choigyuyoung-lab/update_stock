@@ -17,8 +17,10 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 크롤링(beautifulsoup4)과 데이터 분석(pandas, fdr, pykrx) 라이브러리 통합 설치
-        pip install notion-client requests beautifulsoup4 pandas finance-datareader pykrx lxml
+        # 기존에 설치되었을지 모르는 비공식 notion 패키지를 삭제하여 충돌 방지
+        pip uninstall notion -y 
+        # 공식 notion-client 라이브러리를 최신 버전으로 강제 업데이트 설치
+        pip install --upgrade notion-client requests beautifulsoup4 pandas finance-datareader pykrx lxml
     - name: Run Update Script
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
