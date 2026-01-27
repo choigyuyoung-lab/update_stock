@@ -3,7 +3,7 @@ name: Stock Master DB Automation (FDR Edition)
 on:
   repository_dispatch:
     types: [master_db_sync]
-  workflow_dispatch:
+  workflow_dispatch: # GitHub에서 'Run workflow' 버튼을 직접 누를 때
 
 jobs:
   build:
@@ -22,5 +22,6 @@ jobs:
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-        IS_FULL_UPDATE: "False" 
+        # [핵심 로직] 버튼 클릭(workflow_dispatch)이면 'true', 아니면 'false'가 자동으로 할당됩니다.
+        IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db.py
