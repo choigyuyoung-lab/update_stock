@@ -1,9 +1,9 @@
-name: Stock Master DB Automation (FDR Edition)
+name: Stock Master DB Automation
 
 on:
   repository_dispatch:
     types: [master_db_sync]
-  workflow_dispatch: # GitHub에서 'Run workflow' 버튼을 직접 누를 때
+  workflow_dispatch: # 직접 'Run workflow' 버튼 클릭 시 전체 업데이트
 
 jobs:
   build:
@@ -17,11 +17,12 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install notion-client==2.2.1 requests beautifulsoup4 pandas finance-datareader
+        # 성공을 위한 필수 패키지 설치
+        pip install notion-client==2.2.1 requests beautifulsoup4 pandas finance-datareader pykrx
     - name: Run Update Script
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-        # [핵심 로직] 버튼 클릭(workflow_dispatch)이면 'true', 아니면 'false'가 자동으로 할당됩니다.
+        # 버튼 클릭 시에만 'true'가 전달되어 전체 데이터를 갱신합니다. 
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db.py
