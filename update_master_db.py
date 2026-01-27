@@ -20,28 +20,19 @@ logger = logging.getLogger(__name__)
 
 class StockAutomationEngine:
     def __init__(self):
-        logger.info("📡 주식 및 ETF 통합 데이터 로드 중...")
+        logger.info("📡 데이터 로드 및 4대 우량주 리스트 구축 중...")
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
         
-        # 1. 일반 주식 리스트 로드
+        # 1. 주식/ETF 통합 데이터 로드
         self.df_krx = fdr.StockListing('KRX') 
         self.df_nasdaq = fdr.StockListing('NASDAQ')
         self.df_nyse = fdr.StockListing('NYSE')
-        
-        # 2. [추가] ETF 리스트 로드 (국내/미국 통합) 
-        try:
-            self.df_etf_kr = fdr.StockListing('ETF/KR')
-            self.df_etf_us = fdr.StockListing('ETF/US')
-            logger.info(f"✅ ETF 데이터 로드 완료 (국내: {len(self.df_etf_kr)}, 미국: {len(self.df_etf_us)})")
-        except Exception as e:
-            logger.error(f"❌ ETF 데이터 로드 실패: {e}")
-            self.df_etf_kr = pd.DataFrame()
-            self.df_etf_us = pd.DataFrame()
-
+        self.df_etf_kr = fdr.StockListing('ETF/KR')
+        self.df_etf_us = fdr.StockListing('ETF/US')
         self.df_us_all = pd.concat([self.df_nasdaq, self.df_nyse], ignore_index=True)
         
-        # 3. 4대 우량주 맵 구축
+        # 2. 4대 우량주 맵 (KOSDAQ GLOBAL 포함)
         self.blue_chip_map = {
             "S&P 500": self._get_sp500(),
             "NASDAQ 100": self._get_nas100(),
@@ -97,37 +88,29 @@ class StockAutomationEngine:
         return res_data
 
     def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
-        """주식 및 ETF 통합 검색 로직"""
-        # 1. 한국 시장 검색 (주식 -> ETF 순)
+        # 국내 주식/ETF
         kr_match = self.df_krx[self.df_krx['Code'] == clean_t]
         if not kr_match.empty:
-            row = kr_match.iloc[0]
-            return {"name": row['Name'], "market": str(row['Market']), "origin": "KR", "wiki": self.fetch_wiki_info(clean_t, "KR")}
+            return {"name": kr_match.iloc[0]['Name'], "market": str(kr_match.iloc[0]['Market']), "origin": "KR", "wiki": self.fetch_wiki_info(clean_t, "KR")}
         
-        # [추가] 한국 ETF 검색
-        if not self.df_etf_kr.empty:
-            etf_kr_match = self.df_etf_kr[self.df_etf_kr['Symbol'] == clean_t]
-            if not etf_kr_match.empty:
-                row = etf_kr_match.iloc[0]
-                return {"name": row['Name'], "market": "ETF(KR)", "origin": "KR", "wiki": {"ind": "ETF", "svc": "국내 상장지수펀드"}}
+        etf_kr_match = self.df_etf_kr[self.df_etf_kr['Symbol'] == clean_t]
+        if not etf_kr_match.empty:
+            return {"name": etf_kr_match.iloc[0]['Name'], "market": "ETF(KR)", "origin": "KR", "wiki": {"ind": "ETF", "svc": "국내 상장지수펀드"}}
 
-        # 2. 미국 시장 검색 (주식 -> ETF 순)
+        # 미국 주식/ETF
         us_match = self.df_us_all[self.df_us_all['Symbol'] == clean_t]
         if not us_match.empty:
-            row = us_match.iloc[0]
             mkt = "NASDAQ" if clean_t in self.df_nasdaq['Symbol'].values else "NYSE"
-            return {"name": row['Name'], "market": mkt, "origin": "US", "wiki": self.fetch_wiki_info(clean_t, "US")}
+            return {"name": us_match.iloc[0]['Name'], "market": mkt, "origin": "US", "wiki": self.fetch_wiki_info(clean_t, "US")}
         
-        # [추가] 미국 ETF 검색
-        if not self.df_etf_us.empty:
-            etf_us_match = self.df_etf_us[self.df_etf_us['Symbol'] == clean_t]
-            if not etf_us_match.empty:
-                row = etf_us_match.iloc[0]
-                return {"name": row['Name'], "market": "ETF(US)", "origin": "US", "wiki": {"ind": "ETF", "svc": "미국 상장지수펀드"}}
+        etf_us_match = self.df_etf_us[self.df_etf_us['Symbol'] == clean_t]
+        if not etf_us_match.empty:
+            return {"name": etf_us_match.iloc[0]['Name'], "market": "ETF(US)", "origin": "US", "wiki": {"ind": "ETF", "svc": "미국 상장지수펀드"}}
 
         return {"name": "", "market": "기타", "origin": "", "wiki": {"ind": "", "svc": ""}}
 
     def clean_ticker(self, raw_ticker: str) -> str:
+        """[검증완료] 티커 정제 규칙 (Python 3.10+)"""
         t = str(raw_ticker).strip().upper()
         if match := re.search(r'(\d{6})', t): return match.group(1)
         return re.split(r'[-.]', t)[0]
@@ -148,7 +131,6 @@ def process_page(page, engine, client):
         "Market": {"select": {"name": info["market"]}},
         "산업분야": {"rich_text": [{"text": {"content": info["wiki"]["ind"]}}]},
         "서비스": {"rich_text": [{"text": {"content": info["wiki"]["svc"]}}]},
-        "데이터 상태": {"select": {"name": "✅ 검증완료"}},
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
     
@@ -157,9 +139,9 @@ def process_page(page, engine, client):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료")
+        logger.info(f"✅ {raw_ticker} 업데이트 성공")
     except Exception as e:
-        logger.error(f"❌ {raw_ticker} 업데이트 실패: {e}")
+        logger.error(f"❌ {raw_ticker} 실패: {e}")
 
 def main():
     client = Client(auth=NOTION_TOKEN) 
@@ -169,8 +151,13 @@ def main():
     while True:
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query_params["start_cursor"] = cursor
+        
+        # [수정] 데이터 상태 필터링 제거 -> 대신 '종목명'이 비어 있는 것만 수집
         if not IS_FULL_UPDATE:
-            query_params["filter"] = {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}}
+            query_params["filter"] = {
+                "property": "종목명",
+                "rich_text": {"is_empty": True}
+            }
         
         response = client.databases.query(**query_params) 
         pages = response.get("results", [])
