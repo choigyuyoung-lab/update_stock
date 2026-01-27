@@ -25,6 +25,7 @@ class StockAutomationEngine:
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
         
         # 1. 기초 데이터 로드 (종목명, 마켓 정보 추출용)
+        # KOSDAQ GLOBAL은 fdr.StockListing('KRX')의 Market 컬럼에 들어있음 확인됨
         self.df_krx = fdr.StockListing('KRX') 
         self.df_nasdaq = fdr.StockListing('NASDAQ')
         self.df_nyse = fdr.StockListing('NYSE')
@@ -52,19 +53,20 @@ class StockAutomationEngine:
         except: return []
 
     def _get_ks200(self) -> List[str]:
-        for i in range(10):
+        for i in range(10): # 최근 10일 탐색 (0개 로드 방지)
             date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
             res = stock.get_index_portfolio_deposit_file("1028", date)
             if len(res) > 0: return res
         return []
 
     def _get_kglobal(self) -> List[str]:
+        # Market 컬럼에서 'KOSDAQ GLOBAL' 포함 종목 필터링
         target = self.df_krx[self.df_krx['Market'].str.contains('KOSDAQ GLOBAL', case=False, na=False)]
         col = 'Code' if 'Code' in target.columns else 'Symbol'
         return target[col].tolist()
 
     def fetch_wiki_info(self, ticker: str, origin: str) -> Dict[str, str]:
-        """구글 파이낸스를 거쳐 위키백과 정보 수집"""
+        """구글 파이낸스 -> 위키백과 정보 수집"""
         res_data = {"ind": "", "svc": ""}
         search_ticker = f"{ticker}:KRX" if origin == "KR" else ticker
         url = f"https://www.google.com/finance/quote/{search_ticker}?hl=ko"
@@ -87,7 +89,7 @@ class StockAutomationEngine:
         return res_data
 
     def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
-        """종목명, 마켓, 위키 정보를 한 번에 조회"""
+        """종목명, 마켓, 위키 통합 조회"""
         # 한국 시장
         kr_match = self.df_krx[self.df_krx['Code'] == clean_t]
         if not kr_match.empty:
@@ -104,11 +106,12 @@ class StockAutomationEngine:
         return {"name": "", "market": "기타", "origin": "", "wiki": {"ind": "", "svc": ""}}
 
     def clean_ticker(self, raw_ticker: str) -> str:
+        """티커 정제 로직 (Python 3.10+ 기준)"""
         t = str(raw_ticker).strip().upper()
         if match := re.search(r'(\d{6})', t): return match.group(1)
         return re.split(r'[-.]', t)[0]
 
-def process_page(page, engine, notion):
+def process_page(page, engine, client):
     pid, props = page["id"], page["properties"]
     ticker_rich = props.get("티커", {}).get("title", [])
     if not ticker_rich: return
@@ -116,9 +119,7 @@ def process_page(page, engine, notion):
     raw_ticker = ticker_rich[0]["plain_text"].strip()
     clean_t = engine.clean_ticker(raw_ticker)
 
-    # 1. 상세 정보 수집 (종목명, 마켓, 산업, 서비스)
     info = engine.get_stock_detail(clean_t)
-    # 2. 우량주 지수 체크
     bc_tags = [{"name": label} for label, lst in engine.blue_chip_map.items() if clean_t in lst]
 
     update_props = {
@@ -134,13 +135,13 @@ def process_page(page, engine, notion):
         update_props["우량주"] = {"multi_select": bc_tags}
 
     try:
-        notion.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"✅ {raw_ticker} 업데이트 완료")
+        client.pages.update(page_id=pid, properties=update_props)
+        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료")
     except Exception as e:
         logger.error(f"❌ {raw_ticker} 업데이트 실패: {e}")
 
 def main():
-    # 변수명을 'notion' 대신 'client'로 변경하여 라이브러리 이름과의 혼동 방지
+    # 'client.databases.query'를 지원하는 공식 SDK 객체 생성
     client = Client(auth=NOTION_TOKEN) 
     engine = StockAutomationEngine()
     
@@ -152,14 +153,13 @@ def main():
         if not IS_FULL_UPDATE:
             query_params["filter"] = {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}}
         
-        # 'notion.databases.query' 대신 'client.databases.query' 사용
+        # [수정됨] AttributeError 방지를 위해 명확한 메서드 호출
         response = client.databases.query(**query_params) 
         pages = response.get("results", [])
         
         with ThreadPoolExecutor(max_workers=5) as executor:
             for page in pages:
-                # 함수 호출 시에도 바뀐 client 변수 전달
-                executor.submit(process_page, page, engine, client) 
+                executor.submit(process_page, page, engine, client)
                 time.sleep(0.3)
         
         if not response.get("has_more"): break
