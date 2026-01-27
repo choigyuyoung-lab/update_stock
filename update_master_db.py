@@ -140,20 +140,28 @@ def process_page(page, engine, notion):
         logger.error(f"❌ {raw_ticker} 업데이트 실패: {e}")
 
 def main():
-    notion, engine = Client(auth=NOTION_TOKEN), StockAutomationEngine()
+    # 변수명을 'notion' 대신 'client'로 변경하여 라이브러리 이름과의 혼동 방지
+    client = Client(auth=NOTION_TOKEN) 
+    engine = StockAutomationEngine()
+    
     cursor = None
     while True:
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query_params["start_cursor"] = cursor
+        
         if not IS_FULL_UPDATE:
             query_params["filter"] = {"property": "데이터 상태", "select": {"does_not_equal": "✅ 검증완료"}}
         
-        response = notion.databases.query(**query_params)
+        # 'notion.databases.query' 대신 'client.databases.query' 사용
+        response = client.databases.query(**query_params) 
         pages = response.get("results", [])
+        
         with ThreadPoolExecutor(max_workers=5) as executor:
             for page in pages:
-                executor.submit(process_page, page, engine, notion)
+                # 함수 호출 시에도 바뀐 client 변수 전달
+                executor.submit(process_page, page, engine, client) 
                 time.sleep(0.3)
+        
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
 
