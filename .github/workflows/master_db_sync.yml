@@ -3,7 +3,7 @@ name: Stock Master DB Automation
 on:
   repository_dispatch:
     types: [master_db_sync]
-  workflow_dispatch: # 직접 'Run workflow' 버튼 클릭 시 전체 업데이트
+  workflow_dispatch:
 
 jobs:
   build:
@@ -13,16 +13,15 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: '3.10' # 사용자 요청: 파이썬 3.10 이상 유지
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 성공을 위한 필수 패키지 설치
-        pip install notion-client==2.2.1 requests beautifulsoup4 pandas finance-datareader pykrx
+        # 크롤링(beautifulsoup4)과 데이터 분석(pandas, fdr, pykrx) 라이브러리 통합 설치
+        pip install notion-client requests beautifulsoup4 pandas finance-datareader pykrx lxml
     - name: Run Update Script
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-        # 버튼 클릭 시에만 'true'가 전달되어 전체 데이터를 갱신합니다. 
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db.py
