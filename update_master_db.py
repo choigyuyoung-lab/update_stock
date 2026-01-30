@@ -35,8 +35,8 @@ class StockAutomationEngine:
         
         # 1. 데이터 로드 (KRX-DESC, S&P500, NASDAQ, NYSE)
         logger.info("⏳ 주식 데이터셋 로딩 중...")
-        self.df_kr_desc = fdr.StockListing('KRX-DESC') # 한국 상세 (Sector/Industry 포함)
-        self.df_sp500 = fdr.StockListing('S&P500')     # 미국 우량 (정보 정확도 높음)
+        self.df_kr_desc = fdr.StockListing('KRX-DESC') # 한국 상세
+        self.df_sp500 = fdr.StockListing('S&P500')     # 미국 우량
         self.df_nasdaq = fdr.StockListing('NASDAQ')    # 미국 전체 1
         self.df_nyse = fdr.StockListing('NYSE')        # 미국 전체 2
         logger.info("✅ 데이터셋 로딩 완료")
@@ -66,31 +66,27 @@ class StockAutomationEngine:
         return []
 
     def _get_kglobal(self) -> List[str]:
-        """KOSDAQ GLOBAL 태그용 리스트"""
-        # KRX-DESC에도 Market 컬럼이 존재함
         target = self.df_kr_desc[self.df_kr_desc['Market'].str.contains('KOSDAQ GLOBAL', case=False, na=False)]
         col = 'Code' if 'Code' in target.columns else 'Symbol'
         return target[col].tolist()
 
-    def _get_val_from_headers(self, row, candidates: List[str]) -> str:
-        """여러 헤더 후보 중 값이 있는 것을 찾아 반환"""
+    def _get_val_from_headers(self, row, candidates: List[str]) -> Optional[str]:
+        """값이 있으면 문자열 반환, 없으면 None 반환 (노션 비우기용)"""
         for col in candidates:
             if col in row.index and pd.notna(row[col]) and str(row[col]).strip() != "":
                 return str(row[col]).strip()
-        return "-"
+        return None  # [변경] "-" 대신 None 반환
 
     def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
-        """
-        티커를 기반으로 한국/미국 주식 정보를 조회하여 
-        국가별 섹터/산업 정보를 반환 (ETF 로직 제거, 주식 중심 최적화)
-        """
+        """티커 기반 국가별 섹터/산업 조회 (해당 안 되는 국가는 None 유지)"""
+        # [변경] 기본값을 None으로 설정하여 노션 셀을 깨끗하게 비움
         res = {
             "name": "", "market": "기타", "origin": "",
-            "kr_sector": "-", "kr_ind": "-",
-            "us_sector": "-", "us_ind": "-"
+            "kr_sector": None, "kr_ind": None,
+            "us_sector": None, "us_ind": None
         }
 
-        # 1. 한국 주식 검색 (KRX-DESC)
+        # 1. 한국 주식 검색
         kr_match = self.df_kr_desc[self.df_kr_desc['Code'] == clean_t]
         if not kr_match.empty:
             row = kr_match.iloc[0]
@@ -102,25 +98,19 @@ class StockAutomationEngine:
                 "origin": "KR",
                 "kr_sector": self._get_val_from_headers(row, HEADERS['KR_SECTOR']),
                 "kr_ind": self._get_val_from_headers(row, HEADERS['KR_INDUSTRY'])
+                # US 정보는 None 상태 유지 -> 노션에서 빈 칸 됨
             })
             return res
 
-        # 2. 미국 주식 검색 (S&P500 -> NASDAQ -> NYSE 순차 검색)
-        # 검색 대상 리스트 (정확도/우선순위 순)
+        # 2. 미국 주식 검색
         search_targets = [self.df_sp500, self.df_nasdaq, self.df_nyse]
-        
         for df in search_targets:
             match = df[df['Symbol'] == clean_t]
             if not match.empty:
                 row = match.iloc[0]
-                
-                # Market 결정 (S&P500 리스트에는 Market 컬럼이 없을 수 있으므로 확인)
-                if clean_t in self.df_nasdaq['Symbol'].values:
-                    mkt = "NASDAQ"
-                elif clean_t in self.df_nyse['Symbol'].values:
-                    mkt = "NYSE"
-                else:
-                    mkt = "NYSE" # 기본값
+                if clean_t in self.df_nasdaq['Symbol'].values: mkt = "NASDAQ"
+                elif clean_t in self.df_nyse['Symbol'].values: mkt = "NYSE"
+                else: mkt = "NYSE"
 
                 res.update({
                     "name": row['Name'],
@@ -128,13 +118,13 @@ class StockAutomationEngine:
                     "origin": "US",
                     "us_sector": self._get_val_from_headers(row, HEADERS['US_SECTOR']),
                     "us_ind": self._get_val_from_headers(row, HEADERS['US_INDUSTRY'])
+                    # KR 정보는 None 상태 유지 -> 노션에서 빈 칸 됨
                 })
                 return res
 
         return res
 
     def clean_ticker(self, raw_ticker: str) -> str:
-        """티커 정제"""
         t = str(raw_ticker).strip().upper()
         if match := re.search(r'(\d{6})', t): return match.group(1)
         return re.split(r'[-.]', t)[0]
@@ -147,24 +137,25 @@ def process_page(page, engine, client):
     raw_ticker = ticker_rich[0]["plain_text"].strip()
     clean_t = engine.clean_ticker(raw_ticker)
 
-    # 상세 정보 조회 (최적화 로직 적용)
     info = engine.get_stock_detail(clean_t)
     
-    # 우량주 태그 계산
     bc_tags = [{"name": label} for label, lst in engine.blue_chip_map.items() if clean_t in lst]
 
-    # 노션 업데이트 프로퍼티 구성 (국가별 섹터/산업 분리)
+    # [핵심] 값이 있으면 텍스트 입력, 없으면(None) 빈 리스트[]를 보내 셀을 비움
+    def make_rich_text(text_val):
+        if text_val:
+            return {"rich_text": [{"text": {"content": text_val}}]}
+        return {"rich_text": []} # 빈 리스트 전송 = 노션 셀 비우기
+
     update_props = {
-        "종목명": {"rich_text": [{"text": {"content": info["name"]}}]},
+        "종목명": make_rich_text(info["name"]),
         "Market": {"select": {"name": info["market"]}},
         
-        # 한국 데이터
-        "KR_섹터": {"rich_text": [{"text": {"content": info["kr_sector"]}}]},
-        "KR_산업": {"rich_text": [{"text": {"content": info["kr_ind"]}}]},
+        "KR_섹터": make_rich_text(info["kr_sector"]),
+        "KR_산업": make_rich_text(info["kr_ind"]),
         
-        # 미국 데이터
-        "US_섹터": {"rich_text": [{"text": {"content": info["us_sector"]}}]},
-        "US_업종": {"rich_text": [{"text": {"content": info["us_ind"]}}]},
+        "US_섹터": make_rich_text(info["us_sector"]),
+        "US_업종": make_rich_text(info["us_ind"]),
         
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
@@ -206,7 +197,7 @@ def main():
         with ThreadPoolExecutor(max_workers=5) as executor:
             for page in pages:
                 executor.submit(process_page, page, engine, client)
-                time.sleep(0.1) # 대기 시간 단축
+                time.sleep(0.1)
         
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
