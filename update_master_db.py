@@ -131,24 +131,31 @@ class StockAutomationEngine:
 
 def process_page(page, engine, client):
     pid, props = page["id"], page["properties"]
-    ticker_rich = props.get("티커", {}).get("title", [])
-    if not ticker_rich: return
+    
+    # [수정됨] 티커가 '제목' 속성이든 '텍스트' 속성이든 모두 읽을 수 있게 변경
+    target_prop = props.get("티커", {})
+    ticker_rich = target_prop.get("title") or target_prop.get("rich_text")
+    
+    if not ticker_rich: 
+        return # 티커가 없으면 종료
     
     raw_ticker = ticker_rich[0]["plain_text"].strip()
     clean_t = engine.clean_ticker(raw_ticker)
 
+    # 1. 상세 정보 조회 (여기서 종목명(Name)도 함께 가져옵니다)
     info = engine.get_stock_detail(clean_t)
     
+    # 우량주 태그 계산
     bc_tags = [{"name": label} for label, lst in engine.blue_chip_map.items() if clean_t in lst]
 
-    # [핵심] 값이 있으면 텍스트 입력, 없으면(None) 빈 리스트[]를 보내 셀을 비움
     def make_rich_text(text_val):
         if text_val:
             return {"rich_text": [{"text": {"content": text_val}}]}
-        return {"rich_text": []} # 빈 리스트 전송 = 노션 셀 비우기
+        return {"rich_text": []} 
 
+    # 2. 노션 업데이트 (가져온 'info["name"]'을 종목명에 반영)
     update_props = {
-        "종목명": make_rich_text(info["name"]),
+        "종목명": make_rich_text(info["name"]), # 👈 여기가 종목명 업데이트 부분!
         "Market": {"select": {"name": info["market"]}},
         
         "KR_섹터": make_rich_text(info["kr_sector"]),
@@ -165,9 +172,11 @@ def process_page(page, engine, client):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료")
+        # 로그에 종목명도 같이 찍어서 확인
+        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료") 
     except Exception as e:
         logger.error(f"❌ {raw_ticker} 업데이트 실패: {e}")
+
 
 def main():
     client = Client(auth=NOTION_TOKEN) 
