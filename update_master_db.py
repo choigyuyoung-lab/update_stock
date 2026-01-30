@@ -33,9 +33,11 @@ class StockAutomationEngine:
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
         
-        # 1. 데이터 로드 (KRX-DESC, S&P500, NASDAQ, NYSE)
-        logger.info("⏳ 주식 데이터셋 로딩 중...")
-        self.df_kr_desc = fdr.StockListing('KRX-DESC') # 한국 상세
+        # 1. 데이터 로드
+        logger.info("⏳ 주식/ETF 데이터셋 로딩 중...")
+        self.df_kr_desc = fdr.StockListing('KRX-DESC') # 한국 주식 상세
+        self.df_kr_etf = fdr.StockListing('ETF/KR')    # [추가] 한국 ETF (이름 조회용)
+        
         self.df_sp500 = fdr.StockListing('S&P500')     # 미국 우량
         self.df_nasdaq = fdr.StockListing('NASDAQ')    # 미국 전체 1
         self.df_nyse = fdr.StockListing('NYSE')        # 미국 전체 2
@@ -71,22 +73,21 @@ class StockAutomationEngine:
         return target[col].tolist()
 
     def _get_val_from_headers(self, row, candidates: List[str]) -> Optional[str]:
-        """값이 있으면 문자열 반환, 없으면 None 반환 (노션 비우기용)"""
+        """값이 있으면 문자열 반환, 없으면 None 반환"""
         for col in candidates:
             if col in row.index and pd.notna(row[col]) and str(row[col]).strip() != "":
                 return str(row[col]).strip()
-        return None  # [변경] "-" 대신 None 반환
+        return None
 
     def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
-        """티커 기반 국가별 섹터/산업 조회 (해당 안 되는 국가는 None 유지)"""
-        # [변경] 기본값을 None으로 설정하여 노션 셀을 깨끗하게 비움
+        """티커 기반 국가별 상세 정보 조회"""
         res = {
             "name": "", "market": "기타", "origin": "",
             "kr_sector": None, "kr_ind": None,
             "us_sector": None, "us_ind": None
         }
 
-        # 1. 한국 주식 검색
+        # 1. 한국 주식 검색 (KRX-DESC)
         kr_match = self.df_kr_desc[self.df_kr_desc['Code'] == clean_t]
         if not kr_match.empty:
             row = kr_match.iloc[0]
@@ -98,11 +99,23 @@ class StockAutomationEngine:
                 "origin": "KR",
                 "kr_sector": self._get_val_from_headers(row, HEADERS['KR_SECTOR']),
                 "kr_ind": self._get_val_from_headers(row, HEADERS['KR_INDUSTRY'])
-                # US 정보는 None 상태 유지 -> 노션에서 빈 칸 됨
             })
             return res
 
-        # 2. 미국 주식 검색
+        # 2. [추가] 한국 ETF 검색 (KRX-DESC에 없을 경우)
+        etf_match = self.df_kr_etf[self.df_kr_etf['Symbol'] == clean_t]
+        if not etf_match.empty:
+            row = etf_match.iloc[0]
+            res.update({
+                "name": row['Name'],  # ETF 이름 확보
+                "market": "ETF",
+                "origin": "KR",
+                "kr_sector": "ETF",   # 섹터는 'ETF'로 단순 표기
+                "kr_ind": None        # 산업은 비워둠 (깔끔하게)
+            })
+            return res
+
+        # 3. 미국 주식 검색
         search_targets = [self.df_sp500, self.df_nasdaq, self.df_nyse]
         for df in search_targets:
             match = df[df['Symbol'] == clean_t]
@@ -118,7 +131,6 @@ class StockAutomationEngine:
                     "origin": "US",
                     "us_sector": self._get_val_from_headers(row, HEADERS['US_SECTOR']),
                     "us_ind": self._get_val_from_headers(row, HEADERS['US_INDUSTRY'])
-                    # KR 정보는 None 상태 유지 -> 노션에서 빈 칸 됨
                 })
                 return res
 
@@ -132,20 +144,20 @@ class StockAutomationEngine:
 def process_page(page, engine, client):
     pid, props = page["id"], page["properties"]
     
-    # [수정됨] 티커가 '제목' 속성이든 '텍스트' 속성이든 모두 읽을 수 있게 변경
+    # 티커 읽기 (Title, RichText 모두 호환)
     target_prop = props.get("티커", {})
     ticker_rich = target_prop.get("title") or target_prop.get("rich_text")
     
     if not ticker_rich: 
-        return # 티커가 없으면 종료
+        return
     
     raw_ticker = ticker_rich[0]["plain_text"].strip()
     clean_t = engine.clean_ticker(raw_ticker)
 
-    # 1. 상세 정보 조회 (여기서 종목명(Name)도 함께 가져옵니다)
+    # 정보 조회
     info = engine.get_stock_detail(clean_t)
     
-    # 우량주 태그 계산
+    # 우량주 태그
     bc_tags = [{"name": label} for label, lst in engine.blue_chip_map.items() if clean_t in lst]
 
     def make_rich_text(text_val):
@@ -153,9 +165,8 @@ def process_page(page, engine, client):
             return {"rich_text": [{"text": {"content": text_val}}]}
         return {"rich_text": []} 
 
-    # 2. 노션 업데이트 (가져온 'info["name"]'을 종목명에 반영)
     update_props = {
-        "종목명": make_rich_text(info["name"]), # 👈 여기가 종목명 업데이트 부분!
+        "종목명": make_rich_text(info["name"]),
         "Market": {"select": {"name": info["market"]}},
         
         "KR_섹터": make_rich_text(info["kr_sector"]),
@@ -172,11 +183,9 @@ def process_page(page, engine, client):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        # 로그에 종목명도 같이 찍어서 확인
-        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료") 
+        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료")
     except Exception as e:
         logger.error(f"❌ {raw_ticker} 업데이트 실패: {e}")
-
 
 def main():
     client = Client(auth=NOTION_TOKEN) 
