@@ -99,21 +99,52 @@ def main():
                         if is_valid(d['target_price']): upd["목표주가"] = {"number": d['target_price']}
                         if d['opinion']: upd["목표가 범위"] = {"rich_text": [{"text": {"content": d['opinion']}}]}
                     else:
+                        # --- 여기서부터 교체 시작 ---
                         stock = yf.Ticker(ticker)
                         info = stock.info
+                        
+                        # 1. 가격 및 52주 고저 수집
                         last_price = info.get('currentPrice') or info.get('regularMarketPrice')
                         if is_valid(last_price): upd["현재가"] = {"number": last_price}
                         if is_valid(info.get('fiftyTwoWeekHigh')): upd["52주 최고가"] = {"number": info.get('fiftyTwoWeekHigh')}
                         if is_valid(info.get('fiftyTwoWeekLow')): upd["52주 최저가"] = {"number": info.get('fiftyTwoWeekLow')}
                         
-                        # 미국 주식 포맷팅 반영 (소수점 2자리 및 $)
+                        # 2. 목표주가 처리
                         target_mean = info.get('targetMeanPrice')
                         if is_valid(target_mean): upd["목표주가"] = {"number": round(target_mean, 2)}
                         
-                        low, high = info.get('targetLowPrice'), info.get('targetHighPrice')
-                        if is_valid(low) and is_valid(high):
-                            range_str = f"${low:.2f} ~ ${high:.2f}"
-                            upd["목표가 범위"] = {"rich_text": [{"text": {"content": range_str}}]}
+                        # 3. 투자의견 번역 (recommendationKey 사용)
+                        rec_key = info.get('recommendationKey', '').lower()
+                        opinion_map = {
+                            "strong_buy": "강력매수",
+                            "buy": "매수",
+                            "hold": "보유",
+                            "underperform": "수익률하회",
+                            "sell": "매도"
+                        }
+                        
+                        # 매핑표에 있으면 한글로, 없으면 영어 원문 그대로 표시
+                        translated_opinion = opinion_map.get(rec_key, rec_key.upper())
+                        
+                        if translated_opinion:
+                            upd["목표가 범위"] = {"rich_text": [{"text": {"content": translated_opinion}}]}
+                        # --- 여기까지 교체 끝 ---
+                        
+                        # stock = yf.Ticker(ticker)
+                        # info = stock.info
+                        # last_price = info.get('currentPrice') or info.get('regularMarketPrice')
+                        # if is_valid(last_price): upd["현재가"] = {"number": last_price}
+                        # if is_valid(info.get('fiftyTwoWeekHigh')): upd["52주 최고가"] = {"number": info.get('fiftyTwoWeekHigh')}
+                        # if is_valid(info.get('fiftyTwoWeekLow')): upd["52주 최저가"] = {"number": info.get('fiftyTwoWeekLow')}
+                        
+                        # # 미국 주식 포맷팅 반영 (소수점 2자리 및 $)
+                        # target_mean = info.get('targetMeanPrice')
+                        # if is_valid(target_mean): upd["목표주가"] = {"number": round(target_mean, 2)}
+                         
+                        # low, high = info.get('targetLowPrice'), info.get('targetHighPrice')
+                        # if is_valid(low) and is_valid(high):
+                        #     range_str = f"${low:.2f} ~ ${high:.2f}"
+                        #     upd["목표가 범위"] = {"rich_text": [{"text": {"content": range_str}}]}
 
                     upd["마지막 업데이트"] = {"date": {"start": now_iso}}
                     notion.pages.update(page_id=page["id"], properties=upd)
