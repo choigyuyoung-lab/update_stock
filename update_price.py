@@ -55,8 +55,35 @@ def get_kr_stock_data(ticker):
             if td:
                 ems = td.find_all('em')
                 if ems: data['target_price'] = float(ems[-1].get_text(strip=True).replace(',', ''))
-                opinion_span = td.find('span', class_='f_up')
-                if opinion_span: data['opinion'] = opinion_span.get_text(strip=True)
+
+        # --- 한국 종목 투자의견 처리 (네이버 기준 반영) ---
+        opinion_span = td.find('span', class_='f_up')
+        if opinion_span:
+            raw_text = opinion_span.get_text(strip=True)
+            try:
+                # '4.00매수'에서 숫자만 추출
+                score_str = "".join([c for c in raw_text if c.isdigit() or c == '.'])
+                score = float(score_str)
+                
+                # 네이버 및 미국 주식 기준에 맞춘 5단계 변환
+                if score >= 4.5:
+                    clean_opinion = "강력매수"
+                elif score >= 3.5:
+                    clean_opinion = "매수"
+                elif score >= 3.0:      # 3.44 같은 '중립' 의견을 처리하는 구간
+                    clean_opinion = "중립"
+                elif score >= 2.0:
+                    clean_opinion = "수익률하회"
+                else:
+                    clean_opinion = "매도"
+            except:
+                # 점수 추출 실패 시 한글만 남김
+                clean_opinion = "".join([c for c in raw_text if not c.isdigit() and c != '.']).strip()
+            
+            data['opinion'] = clean_opinion
+        # --- 수정 끝 ---    
+#               opinion_span = td.find('span', class_='f_up')
+#               if opinion_span: data['opinion'] = opinion_span.get_text(strip=True)
     except Exception as e:
         print(f"   ⚠️ [Naver Error] {ticker}: {e}")
     return data
