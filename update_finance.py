@@ -35,8 +35,10 @@ def to_numeric(val_str):
 
 def format_value(key, val, is_kr):
     """
-    [디자인 적용] 12자리 고정 폭 우측 정렬 + 음수 처리
-    값이 없으면 None 반환
+    [디자인 적용]
+    1. 통화 기호, 천 단위 콤마, 음수 부호(-) 맨 앞 처리
+    2. [수정] PER, PBR: 소수점 1자리 + '배' (ex: 5.2배)
+    3. 일반 폰트 정렬을 위한 특수 공백(\\u00A0) 사용
     """
     if not is_valid(val):
         return None
@@ -60,12 +62,13 @@ def format_value(key, val, is_kr):
     elif key == "배당수익률":
         final_str = f"{sign}{val:.2f}%"
 
-    # 3. 일반 비율 (PER, PBR)
+    # 3. 일반 비율 (PER, PBR) -> [수정됨]
     else:
-        final_str = f"{sign}{val:.2f}"
+        # 소수점 1자리까지만 표시하고 뒤에 '배'를 붙임
+        final_str = f"{sign}{val:.1f}배"
     
-    # 12자리 확보 후 우측 정렬
-    return final_str.rjust(12)
+    # 12자리 확보 (특수 공백 사용)
+    return final_str.rjust(12, "\u00A0")
 
 # ---------------------------------------------------------------------------
 # 3. 데이터 수집 함수
@@ -85,7 +88,6 @@ def get_kr_fin(ticker):
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # 1. 일반 주식 Selector
         selectors = {
             "PER": "#_per", "EPS": "#_eps",
             "추정PER": "#_cns_per", "추정EPS": "#_cns_eps",
@@ -102,7 +104,6 @@ def get_kr_fin(ticker):
             else:
                 raw_data[key] = "N/A"
 
-        # BPS 별도 처리
         pbr_el = soup.select_one("#_pbr")
         if pbr_el:
             ems = pbr_el.find_parent("td").find_all("em")
@@ -111,7 +112,7 @@ def get_kr_fin(ticker):
             raw_data["BPS"] = "N/A"
 
         if not found_elements:
-            print(f"   ⚠️ [{ticker}] 데이터 태그 없음 (ETF/관리종목 가능성)")
+            print(f"   ⚠️ [{ticker}] 데이터 태그 없음")
 
         for key in data_keys:
             final_data[key] = to_numeric(raw_data.get(key))
@@ -156,7 +157,7 @@ def get_us_fin(ticker):
 def main():
     kst = timezone(timedelta(hours=9))
     now_iso = datetime.now(kst).isoformat()
-    print(f"📊 [재무 업데이트: 누락 데이터 공백 처리] 시작 - {datetime.now(kst)}")
+    print(f"📊 [재무 업데이트: 소수점 1자리 + '배' 적용] 시작 - {datetime.now(kst)}")
     
     next_cursor = None
     success_cnt = 0
@@ -190,15 +191,15 @@ def main():
             else:
                 fin_data = get_us_fin(ticker)
 
-            # 2. 노션 업데이트 준비 (공백 처리 로직 포함)
+            # 2. 노션 업데이트 준비
             upd = {}
-            log_details = []
+            valid_cnt = 0
 
             for key, val in fin_data.items():
                 formatted_text = format_value(key, val, is_kr)
                 
                 if formatted_text:
-                    # [값 있음] 정상 업데이트 (빨간색/기본색 적용)
+                    valid_cnt += 1
                     text_color = "default"
                     if is_valid(val) and val < 0:
                         text_color = "red"
@@ -208,33 +209,27 @@ def main():
                             {
                                 "type": "text",
                                 "text": {"content": formatted_text},
-                                "annotations": {"code": True, "color": text_color}
+                                # 회색 박스 없음(code: False), 글자 색상만 적용
+                                "annotations": {"color": text_color}
                             }
                         ]
                     }
-                    log_details.append(f"{key}:O") # 로그에 O 표시
                 else:
-                    # [값 없음] ⚠️ 빈 리스트([])를 보내서 노션 값을 강제로 지움
+                    # 데이터 없으면 공백 처리
                     upd[key] = {"rich_text": []}
-                    # 로그에는 X 표시 (너무 길어지면 생략 가능)
-                    # log_details.append(f"{key}:X") 
             
             if "마지막 업데이트" in props:
                 upd["마지막 업데이트"] = {"date": {"start": now_iso}}
             
             # 3. 전송
             try:
-                # 데이터가 하나라도 있거나, 공백 처리라도 해야 하면 업데이트 수행
                 if upd:
                     notion.pages.update(page_id=page["id"], properties=upd)
                     
-                    # 성공 로그 출력
-                    # (값이 있는 항목 개수와 없는 항목 개수를 파악)
-                    valid_count = len([v for v in fin_data.values() if is_valid(v)])
-                    if valid_count > 0:
-                         print(f"   ✅ [{ticker}] 업데이트 완료 ({valid_count}개 항목 성공)")
+                    if valid_cnt > 0:
+                         print(f"   ✅ [{ticker}] 완료")
                     else:
-                         print(f"   🧹 [{ticker}] 데이터 없음 -> 전체 공백(초기화) 처리 완료")
+                         print(f"   🧹 [{ticker}] 데이터 없음 -> 초기화")
                     
                     success_cnt += 1
                 else:
