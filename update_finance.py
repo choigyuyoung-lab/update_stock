@@ -27,7 +27,7 @@ def to_numeric(val_str):
     if not val_str: return None
     try:
         clean_str = str(val_str).replace(",", "").replace("원", "").replace("%", "").strip()
-        if clean_str.upper() == "N/A" or clean_str == "":
+        if clean_str.upper() in ["N/A", "-", "", "IFRS", "GAAP"]:
             return None
         return float(clean_str)
     except:
@@ -35,9 +35,8 @@ def to_numeric(val_str):
 
 def format_value(key, val, is_kr):
     """
-    [디자인 적용]
-    1. 통화 기호, 천 단위 콤마, 음수 부호(-) 맨 앞 처리
-    2. 12자리 고정 폭으로 우측 정렬
+    [디자인 적용] 12자리 고정 폭 우측 정렬 + 음수 처리
+    값이 없으면 None 반환
     """
     if not is_valid(val):
         return None
@@ -84,9 +83,9 @@ def get_kr_fin(ticker):
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'euc-kr'
         soup = BeautifulSoup(response.text, 'html.parser')
 
+        # 1. 일반 주식 Selector
         selectors = {
             "PER": "#_per", "EPS": "#_eps",
             "추정PER": "#_cns_per", "추정EPS": "#_cns_eps",
@@ -94,10 +93,16 @@ def get_kr_fin(ticker):
         }
         
         raw_data = {}
+        found_elements = False
         for key, sel in selectors.items():
             el = soup.select_one(sel)
-            raw_data[key] = el.get_text(strip=True) if el else "N/A"
+            if el:
+                raw_data[key] = el.get_text(strip=True)
+                found_elements = True
+            else:
+                raw_data[key] = "N/A"
 
+        # BPS 별도 처리
         pbr_el = soup.select_one("#_pbr")
         if pbr_el:
             ems = pbr_el.find_parent("td").find_all("em")
@@ -105,12 +110,15 @@ def get_kr_fin(ticker):
         else:
             raw_data["BPS"] = "N/A"
 
+        if not found_elements:
+            print(f"   ⚠️ [{ticker}] 데이터 태그 없음 (ETF/관리종목 가능성)")
+
         for key in data_keys:
             final_data[key] = to_numeric(raw_data.get(key))
 
         return final_data
     except Exception as e:
-        print(f"   [KR Error] {ticker}: {e}")
+        print(f"   ❌ [KR Error] {ticker}: {e}")
         return final_data
 
 def get_us_fin(ticker):
@@ -122,6 +130,10 @@ def get_us_fin(ticker):
         stock = yf.Ticker(ticker)
         info = stock.info
         
+        if not info or len(info) < 5:
+             print(f"   ⚠️ [{ticker}] 야후 정보 없음")
+             return final_data
+
         final_data["PER"] = info.get("trailingPE")
         final_data["추정PER"] = info.get("forwardPE")
         final_data["EPS"] = info.get("trailingEps")
@@ -135,7 +147,7 @@ def get_us_fin(ticker):
             
         return final_data
     except Exception as e:
-        print(f"   [US Error] {ticker}: {e}")
+        print(f"   ❌ [US Error] {ticker}: {e}")
         return final_data
 
 # ---------------------------------------------------------------------------
@@ -144,7 +156,7 @@ def get_us_fin(ticker):
 def main():
     kst = timezone(timedelta(hours=9))
     now_iso = datetime.now(kst).isoformat()
-    print(f"📊 [재무 업데이트: 음수 빨간색(Red) 적용] 시작 - {datetime.now(kst)}")
+    print(f"📊 [재무 업데이트: 누락 데이터 공백 처리] 시작 - {datetime.now(kst)}")
     
     next_cursor = None
     success_cnt = 0
@@ -178,13 +190,15 @@ def main():
             else:
                 fin_data = get_us_fin(ticker)
 
-            # 2. 노션 전송 준비
+            # 2. 노션 업데이트 준비 (공백 처리 로직 포함)
             upd = {}
+            log_details = []
+
             for key, val in fin_data.items():
                 formatted_text = format_value(key, val, is_kr)
                 
                 if formatted_text:
-                    # [핵심 로직] 값이 음수이면 빨간색, 아니면 기본색
+                    # [값 있음] 정상 업데이트 (빨간색/기본색 적용)
                     text_color = "default"
                     if is_valid(val) and val < 0:
                         text_color = "red"
@@ -194,35 +208,47 @@ def main():
                             {
                                 "type": "text",
                                 "text": {"content": formatted_text},
-                                # code: True (고정폭 박스), color: text_color (글자 색상)
                                 "annotations": {"code": True, "color": text_color}
                             }
                         ]
                     }
+                    log_details.append(f"{key}:O") # 로그에 O 표시
+                else:
+                    # [값 없음] ⚠️ 빈 리스트([])를 보내서 노션 값을 강제로 지움
+                    upd[key] = {"rich_text": []}
+                    # 로그에는 X 표시 (너무 길어지면 생략 가능)
+                    # log_details.append(f"{key}:X") 
             
             if "마지막 업데이트" in props:
                 upd["마지막 업데이트"] = {"date": {"start": now_iso}}
             
             # 3. 전송
             try:
+                # 데이터가 하나라도 있거나, 공백 처리라도 해야 하면 업데이트 수행
                 if upd:
                     notion.pages.update(page_id=page["id"], properties=upd)
                     
-                    log_items = [f"{k}:{v}" for k, v in fin_data.items() if is_valid(v)]
-                    print(f"   => [{ticker}] 완료")
+                    # 성공 로그 출력
+                    # (값이 있는 항목 개수와 없는 항목 개수를 파악)
+                    valid_count = len([v for v in fin_data.values() if is_valid(v)])
+                    if valid_count > 0:
+                         print(f"   ✅ [{ticker}] 업데이트 완료 ({valid_count}개 항목 성공)")
+                    else:
+                         print(f"   🧹 [{ticker}] 데이터 없음 -> 전체 공백(초기화) 처리 완료")
+                    
                     success_cnt += 1
                 else:
-                    print(f"   => [{ticker}] 업데이트 할 데이터 없음")
+                    print(f"   ⚠️ [{ticker}] 처리할 내용 없음")
                     
             except Exception as e:
-                print(f"   => [{ticker}] 전송 실패: {e}")
+                print(f"   ❌ [{ticker}] 전송 실패: {e}")
             
             time.sleep(0.5)
 
         if not res.get("has_more"): break
         next_cursor = res.get("next_cursor")
 
-    print(f"✨ 업데이트 종료. 총 {success_cnt}건 처리됨.")
+    print(f"\n✨ 종료. 총 {success_cnt}건 처리됨.")
 
 if __name__ == "__main__":
     main()
