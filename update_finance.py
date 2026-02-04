@@ -35,45 +35,58 @@ def to_numeric(val_str):
 
 def format_value(key, val, is_kr):
     """
-    [디자인 적용]
-    1. 통화 기호, 콤마, '배', '%' 포맷팅
-    2. [핵심] 대괄호 [ ] 안에 '피겨 스페이스(\\u2007)'를 채워
-       글자 너비를 숫자에 맞춰 강제로 일정하게 만듦 (정렬 효과 극대화)
+    [최종 디자인 적용: 회계 스타일]
+    1. 전체 폭 8자리 고정
+    2. 마이너스 부호 가시성 개선 ('−')
+    3. 배당수익률: 소수점 1자리
+    4. PER/PBR: 천 단위 콤마 + 소수점 1자리
+    5. 양쪽 정렬: [기호    숫자]
     """
     if not is_valid(val):
         return None
 
-    # 음수 처리
-    sign = ""
+    # [설정]
+    MINUS_CHAR = "−"  # 굵은 마이너스
+    FILL_CHAR = "\u2007" # 피겨 스페이스 (숫자 너비 공백)
+    TOTAL_WIDTH = 8     # 전체 폭
+
+    # 1. 부호 처리
+    sign_str = ""
     if val < 0:
-        sign = "-"
+        sign_str = MINUS_CHAR
         val = abs(val)
 
-    final_str = ""
+    # 2. 기호(prefix)와 숫자(value_str) 분리
+    prefix = ""
+    value_str = ""
 
-    # 1. 금액 (EPS, BPS)
+    # (1) 금액 (EPS, BPS)
     if key in ["EPS", "추정EPS", "BPS"]:
         if is_kr:
-            final_str = f"{sign}₩{int(val):,}"
+            prefix = "₩"
+            value_str = f"{sign_str}{int(val):,}"
         else:
-            final_str = f"{sign}${val:,.2f}"
+            prefix = "$"
+            value_str = f"{sign_str}{val:,.2f}"
 
-    # 2. 퍼센트 (배당수익률)
+    # (2) 퍼센트 (배당수익률) -> [수정] 소수점 1자리
     elif key == "배당수익률":
-        final_str = f"{sign}{val:.2f}%"
+        prefix = ""
+        value_str = f"{sign_str}{val:,.1f}%"
 
-    # 3. 일반 비율 (PER, PBR)
+    # (3) 일반 비율 (PER, PBR) -> [수정] 천 단위 콤마 + 소수점 1자리
     else:
-        final_str = f"{sign}{val:.1f}배"
+        prefix = ""
+        value_str = f"{sign_str}{val:,.1f}배"
     
-    # [정렬 로직 수정]
-    # \u2007 (Figure Space): 일반 공백이 아닌 '숫자와 동일한 너비'를 가진 특수 공백입니다.
-    # 이것을 사용해야 폰트가 달라도 [ 와 ] 의 위치가 수직으로 거의 일치하게 됩니다.
-    # 넉넉하게 12자리 확보
-    padded_str = final_str.rjust(12, "\u2007")
+    # 3. 정렬 로직 (양쪽 채우기)
+    # [prefix + 공백 + value_str]
+    padding_len = TOTAL_WIDTH - len(prefix) - len(value_str)
+    if padding_len < 0: padding_len = 0
     
-    # 양쪽에 대괄호 [ ] 씌우기
-    return f"[{padded_str}]"
+    padding_str = FILL_CHAR * padding_len
+    
+    return f"[{prefix}{padding_str}{value_str}]"
 
 # ---------------------------------------------------------------------------
 # 3. 데이터 수집 함수
@@ -162,7 +175,7 @@ def get_us_fin(ticker):
 def main():
     kst = timezone(timedelta(hours=9))
     now_iso = datetime.now(kst).isoformat()
-    print(f"📊 [재무 업데이트: 피겨스페이스(\u2007) 정렬] 시작 - {datetime.now(kst)}")
+    print(f"📊 [재무 업데이트: 최종 완성본] 시작 - {datetime.now(kst)}")
     
     next_cursor = None
     success_cnt = 0
@@ -205,7 +218,7 @@ def main():
                 
                 if formatted_text:
                     valid_cnt += 1
-                    # [색상 로직] 값 자체가 음수이면, 전체 텍스트(대괄호 포함)를 빨간색으로
+                    # 음수면 빨간색
                     text_color = "default"
                     if is_valid(val) and val < 0:
                         text_color = "red"
@@ -215,7 +228,6 @@ def main():
                             {
                                 "type": "text",
                                 "text": {"content": formatted_text},
-                                # Code: False로 하여 회색박스 제거, 순수 텍스트 색상만 적용
                                 "annotations": {"color": text_color}
                             }
                         ]
