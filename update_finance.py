@@ -33,60 +33,67 @@ def to_numeric(val_str):
     except:
         return None
 
-def format_value(key, val, is_kr):
+def format_value_raw(key, val, is_kr):
     """
-    [최종 디자인 적용: 회계 스타일]
-    1. 전체 폭 10자리 고정
-    2. 마이너스 부호 가시성 개선 ('−')
-    3. 배당수익률: 소수점 1자리
-    4. PER/PBR: 천 단위 콤마 + 소수점 1자리
-    5. 양쪽 정렬: [기호    숫자]
+    [데이터 전처리]
+    1. 마이너스 부호를 '숫자 바로 앞'에 붙임 (예: -1,000)
+    2. 통화 기호는 맨 왼쪽 고정 (예: ₩)
+    3. 사이를 공백으로 채움 -> [₩     -1,000]
     """
     if not is_valid(val):
         return None
 
     # [설정]
-    MINUS_CHAR = "−"  # 굵은 마이너스
-    FILL_CHAR = "\u2007" # 피겨 스페이스 (숫자 너비 공백)
-    TOTAL_WIDTH = 10     # 전체 폭
+    # 타자기체에서는 일반 하이픈(-)이 가장 깔끔합니다.
+    MINUS_CHAR = "-" 
+    TOTAL_WIDTH = 13  # 전체 폭 (타자기체는 글자가 커서 13~14 정도가 적당)
 
-    # 1. 부호 처리
-    sign_str = ""
-    if val < 0:
-        sign_str = MINUS_CHAR
-        val = abs(val)
-
-    # 2. 기호(prefix)와 숫자(value_str) 분리
-    prefix = ""
-    value_str = ""
-
+    # 1. 숫자 부분 포맷팅 (부호 포함)
+    # val 자체가 음수면 f-string 포맷팅에서 자동으로 앞에 -가 붙음
+    # 하지만 명시적으로 제어하기 위해 절대값 사용 후 붙임
+    is_negative = val < 0
+    abs_val = abs(val)
+    
+    number_part = ""
+    
     # (1) 금액 (EPS, BPS)
     if key in ["EPS", "추정EPS", "BPS"]:
         if is_kr:
-            prefix = "₩"
-            value_str = f"{sign_str}{int(val):,}"
+            number_part = f"{int(abs_val):,}"
         else:
-            prefix = "$"
-            value_str = f"{sign_str}{val:,.2f}"
+            number_part = f"{abs_val:,.2f}"
 
-    # (2) 퍼센트 (배당수익률) -> [수정] 소수점 1자리
+    # (2) 퍼센트 (배당수익률)
     elif key == "배당수익률":
-        prefix = ""
-        value_str = f"{sign_str}{val:,.1f}%"
+        number_part = f"{abs_val:,.1f}%"
 
-    # (3) 일반 비율 (PER, PBR) -> [수정] 천 단위 콤마 + 소수점 1자리
+    # (3) 일반 비율 (PER, PBR)
     else:
-        prefix = ""
-        value_str = f"{sign_str}{val:,.1f}배"
+        number_part = f"{abs_val:,.1f}배"
     
-    # 3. 정렬 로직 (양쪽 채우기)
-    # [prefix + 공백 + value_str]
-    padding_len = TOTAL_WIDTH - len(prefix) - len(value_str)
+    # 2. 마이너스 부호 결합 (숫자 바로 앞)
+    if is_negative:
+        number_part = f"{MINUS_CHAR}{number_part}"
+
+    # 3. 통화 기호(Symbol) 설정
+    symbol = ""
+    if key in ["EPS", "추정EPS", "BPS"]:
+        symbol = "₩" if is_kr else "$"
+    
+    # 4. 정렬 로직 (양쪽 채우기)
+    # [심볼] + [공백] + [숫자(부호포함)]
+    padding_len = TOTAL_WIDTH - len(symbol) - len(number_part)
+    
+    # 원화(₩) 보정: 타자기체에서도 원화는 약간 넓을 수 있음
+    if "₩" in symbol:
+        padding_len -= 1
+
     if padding_len < 0: padding_len = 0
     
-    padding_str = FILL_CHAR * padding_len
+    padding_str = " " * padding_len  # 일반 공백 (나중에 LaTeX ~로 변환)
     
-    return f"[{prefix}{padding_str}{value_str}]"
+    # 최종 문자열 형태 예시: "[₩       -1,000]"
+    return f"[{symbol}{padding_str}{number_part}]"
 
 # ---------------------------------------------------------------------------
 # 3. 데이터 수집 함수
@@ -95,10 +102,9 @@ def get_kr_fin(ticker):
     """한국 주식 데이터 수집"""
     url = f"https://finance.naver.com/item/main.naver?code={ticker}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0',
         'Referer': 'https://finance.naver.com/'
     }
-
     data_keys = ["PER", "추정PER", "EPS", "추정EPS", "PBR", "BPS", "배당수익률"]
     final_data = {k: None for k in data_keys}
 
@@ -113,14 +119,9 @@ def get_kr_fin(ticker):
         }
         
         raw_data = {}
-        found_elements = False
         for key, sel in selectors.items():
             el = soup.select_one(sel)
-            if el:
-                raw_data[key] = el.get_text(strip=True)
-                found_elements = True
-            else:
-                raw_data[key] = "N/A"
+            raw_data[key] = el.get_text(strip=True) if el else "N/A"
 
         pbr_el = soup.select_one("#_pbr")
         if pbr_el:
@@ -128,9 +129,6 @@ def get_kr_fin(ticker):
             raw_data["BPS"] = ems[1].get_text(strip=True) if len(ems) > 1 else "N/A"
         else:
             raw_data["BPS"] = "N/A"
-
-        if not found_elements:
-            print(f"   ⚠️ [{ticker}] 데이터 태그 없음")
 
         for key in data_keys:
             final_data[key] = to_numeric(raw_data.get(key))
@@ -175,7 +173,7 @@ def get_us_fin(ticker):
 def main():
     kst = timezone(timedelta(hours=9))
     now_iso = datetime.now(kst).isoformat()
-    print(f"📊 [재무 업데이트: 최종 완성본] 시작 - {datetime.now(kst)}")
+    print(f"📊 [재무 업데이트: 마이너스 숫자 앞 배치] 시작 - {datetime.now(kst)}")
     
     next_cursor = None
     success_cnt = 0
@@ -209,26 +207,36 @@ def main():
             else:
                 fin_data = get_us_fin(ticker)
 
-            # 2. 노션 업데이트 준비
+            # 2. 노션 업데이트 준비 (Equation 변환)
             upd = {}
             valid_cnt = 0
 
             for key, val in fin_data.items():
-                formatted_text = format_value(key, val, is_kr)
+                raw_str = format_value_raw(key, val, is_kr)
                 
-                if formatted_text:
+                if raw_str:
                     valid_cnt += 1
-                    # 음수면 빨간색
-                    text_color = "default"
+                    
+                    # [LaTeX 변환]
+                    tex_str = raw_str.replace("$", "\\$").replace("%", "\\%")
+                    # 공백을 LaTeX 공백(~)으로 변환 (화면엔 빈칸으로 나옴)
+                    tex_str = tex_str.replace(" ", "~") 
+                    
+                    # ₩ 처리
+                    tex_str = tex_str.replace("₩", "\\text{₩}")
+                    
+                    # 타자기체 적용
+                    expression = f"\\texttt{{{tex_str}}}"
+                    
+                    # 적자(음수)일 경우 빨간색 (전체 적용)
                     if is_valid(val) and val < 0:
-                        text_color = "red"
+                        expression = f"\\color{{red}}{expression}"
 
                     upd[key] = {
                         "rich_text": [
                             {
-                                "type": "text",
-                                "text": {"content": formatted_text},
-                                "annotations": {"color": text_color}
+                                "type": "equation",
+                                "equation": {"expression": expression}
                             }
                         ]
                     }
