@@ -36,7 +36,7 @@ def to_numeric(val_str):
 def format_value(key, val, is_kr):
     """
     [최종 디자인 적용: 회계 스타일]
-    1. 전체 폭 8자리 고정
+    1. 전체 폭 10자리 고정
     2. 마이너스 부호 가시성 개선 ('−')
     3. 배당수익률: 소수점 1자리
     4. PER/PBR: 천 단위 콤마 + 소수점 1자리
@@ -48,7 +48,7 @@ def format_value(key, val, is_kr):
     # [설정]
     MINUS_CHAR = "−"  # 굵은 마이너스
     FILL_CHAR = "\u2007" # 피겨 스페이스 (숫자 너비 공백)
-    TOTAL_WIDTH = 8     # 전체 폭
+    TOTAL_WIDTH = 10     # 전체 폭
 
     # 1. 부호 처리
     sign_str = ""
