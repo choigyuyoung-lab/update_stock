@@ -1,11 +1,8 @@
 name: Stock Price Update
 
 on:
-  # 외부(Cron-job.org)에서 보내는 '벨 소리'를 받겠다는 설정입니다.
   repository_dispatch:
-    types: [price_update] # 이 이름(run_update)은 리모컨 버튼 이름과 같습니다.
-  
-  # 수동 실행 버튼은 그대로 남겨두는 것이 좋습니다.
+    types: [price_update]
   workflow_dispatch:
 
 jobs:
@@ -21,9 +18,8 @@ jobs:
       - name: Upgrade pip & Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # [중요 수정] pandas 제거 -> beautifulsoup4 추가
-          # update_price.py가 bs4를 사용하여 네이버를 크롤링하기 때문입니다.
-          pip install "notion-client==2.2.1" "yfinance>=0.2.31" "requests" "beautifulsoup4"
+          # [수정됨] pandas, lxml, html5lib를 반드시 설치해야 합니다!
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" "requests" "beautifulsoup4" "pandas" "lxml" "html5lib"
 
       - name: Run Price Update
         env:
