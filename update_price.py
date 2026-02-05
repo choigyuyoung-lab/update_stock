@@ -3,13 +3,11 @@ import time
 import math
 import requests
 import yfinance as yf
+import pandas as pd  # [추가] 판다스
+from io import StringIO # [추가] StringIO
 from datetime import datetime, timedelta, timezone
 from notion_client import Client
 from bs4 import BeautifulSoup
-
-# [추가됨] 사용자님이 주신 성공 코드의 필수 라이브러리
-import pandas as pd
-from io import StringIO
 
 # ---------------------------------------------------------
 # 1. 환경 변수 및 설정
@@ -36,12 +34,12 @@ def is_valid(val):
         return False
 
 # ---------------------------------------------------------
-# [기존 함수] BeautifulSoup 사용 (가격, 등락폭, 의견 등)
+# [함수 1] 기존 코드: 기본 지표 추출 (BeautifulSoup)
 # ---------------------------------------------------------
 def get_kr_stock_data(ticker):
-    """한국 주식 데이터 추출 (네이버 금융) - BS4"""
+    """한국 주식 데이터 추출 (네이버 금융) - 5단계 의견 통일"""
     data = {'price': None, 'high': None, 'low': None, 'target_price': None, 'opinion': None}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
     try:
         url = f"https://finance.naver.com/item/main.naver?code={ticker}"
@@ -75,7 +73,7 @@ def get_kr_stock_data(ticker):
                 if ems: 
                     try:
                         data['target_price'] = float(ems[-1].get_text(strip=True).replace(',', ''))
-                    except: pass 
+                    except: pass
 
                 opinion_span = td.find('span', class_='f_up')
                 if opinion_span:
@@ -93,11 +91,12 @@ def get_kr_stock_data(ticker):
                     data['opinion'] = clean_opinion
 
     except Exception as e:
-        print(f"   ⚠️ [Naver Error] {ticker}: {e}")
+        print(f"   ⚠️ [Basic Info Error] {ticker}: {e}")
     return data
 
 # ---------------------------------------------------------
-# [추가된 함수] 사용자님이 주신 성공한 Pandas 코드 (그대로 복사)
+# [함수 2] 성공한 코드: 동일업종 PER 추출 (Pandas)
+# * 성공하셨던 코드를 그대로 가져왔습니다.
 # ---------------------------------------------------------
 def get_sector_per_pandas(item_code: str):
     url = f"https://finance.naver.com/item/main.naver?code={item_code}"
@@ -111,7 +110,7 @@ def get_sector_per_pandas(item_code: str):
     try:
         res = requests.get(url, headers=headers)
         
-        # 사용자님이 성공하신 방식 그대로 (StringIO + res.text)
+        # [핵심] 성공했던 방식: StringIO + euc-kr
         dfs = pd.read_html(StringIO(res.text), encoding='euc-kr')
 
         for df in dfs:
@@ -124,7 +123,8 @@ def get_sector_per_pandas(item_code: str):
                         break
                 break
     except Exception as e:
-        print(f"Pandas 추출 중 에러: {e}")
+        # lxml 미설치 시 여기서 에러 발생 가능
+        print(f"   ⚠️ [Pandas Error] {item_code}: {e}")
 
     return data
 
@@ -153,7 +153,6 @@ def main():
             ticker = ""
             is_kr = False
             
-            # 티커 추출
             for name in ["티커", "Ticker"]:
                 target = props.get(name)
                 if target:
@@ -169,9 +168,9 @@ def main():
                 upd = {}
                 opinion_val = None 
 
-                # --- [1] 한국 주식 (KR) ---
+                # --- 1. 한국 주식 처리 ---
                 if is_kr:
-                    # 1-1. 기존 함수 실행 (가격 등)
+                    # [1단계] 기본 정보 수집 (가격, 의견 등)
                     d = get_kr_stock_data(ticker)
                     
                     if is_valid(d['price']): upd["현재가"] = {"number": d['price']}
@@ -180,19 +179,19 @@ def main():
                     if is_valid(d['target_price']): upd["목표주가"] = {"number": d['target_price']}
                     if d['opinion']: opinion_val = d['opinion']
 
-                    # 1-2. [추가] Pandas 함수 실행 (동일업종 PER) - 섞지 않고 따로 호출
+                    # [2단계] 동일업종 PER 수집 (Pandas 함수 호출)
                     per_data = get_sector_per_pandas(ticker)
                     per_val = per_data.get("동일업종PER")
-                    
-                    # 값이 유효하면 노션 업데이트 목록에 추가
+
+                    # 값이 유효하면 업데이트 목록에 추가
                     if per_val and per_val != "N/A":
                         try:
-                            # 콤마 제거 후 실수형 변환
+                            # 쉼표 제거 후 숫자 변환
                             upd["동일업종 PER"] = {"number": float(per_val.replace(',', ''))}
                         except:
                             pass
 
-                # --- [2] 미국 주식 (US) ---
+                # --- 2. 미국 주식 처리 ---
                 else:
                     stock = yf.Ticker(ticker)
                     info = stock.info
@@ -206,15 +205,12 @@ def main():
                     if is_valid(target_mean): upd["목표주가"] = {"number": round(target_mean, 2)}
                     
                     rec_key = info.get('recommendationKey', '').lower()
-                    opinion_map = {
-                        "strong_buy": "적극매수", "buy": "매수", "hold": "중립",
-                        "underperform": "매도", "sell": "적극매도"
-                    }
+                    opinion_map = {"strong_buy": "적극매수", "buy": "매수", "hold": "중립", "underperform": "매도", "sell": "적극매도"}
                     translated_opinion = opinion_map.get(rec_key, rec_key.upper())
                     if translated_opinion and translated_opinion != "NONE":
                         opinion_val = translated_opinion
 
-                # --- [3] 공통 업데이트 ---
+                # --- 3. 공통 업데이트 ---
                 if opinion_val:
                     upd["목표가 범위"] = {"select": {"name": opinion_val}}
 
@@ -223,9 +219,9 @@ def main():
                 notion.pages.update(page_id=page["id"], properties=upd)
                 processed_count += 1
                 
-                # 로그 확인용 (업종PER이 잘 들어갔는지 화면에 표시)
-                per_check = upd.get("동일업종 PER", {}).get("number", "없음")
-                print(f"   ✅ [{ticker}] 완료 ({'KR' if is_kr else 'US'}) - 의견: {opinion_val}, PER: {per_check}")
+                # 로그 출력 (PER 수집 확인)
+                per_log = upd.get("동일업종 PER", {}).get("number", "N/A") if is_kr else "-"
+                print(f"   ✅ [{ticker}] 완료 ({'KR' if is_kr else 'US'}) - 의견: {opinion_val}, PER: {per_log}")
 
             except Exception as e:
                 print(f"   ❌ [{ticker}] 실패: {e}")
