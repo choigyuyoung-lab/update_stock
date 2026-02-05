@@ -3,8 +3,8 @@ import time
 import math
 import requests
 import yfinance as yf
-import pandas as pd  # [추가] 성공한 코드 로직용
-from io import StringIO # [추가] 성공한 코드 로직용
+import pandas as pd  # [추가]
+from io import StringIO # [추가]
 from datetime import datetime, timedelta, timezone
 from notion_client import Client
 from bs4 import BeautifulSoup
@@ -33,27 +33,18 @@ def is_valid(val):
     except:
         return False
 
+# ---------------------------------------------------------
+# [기존 함수 유지] 한국 주식 가격/의견 데이터 추출 (BeautifulSoup)
+# ---------------------------------------------------------
 def get_kr_stock_data(ticker):
-    """한국 주식 데이터 추출 - BS4(기본) + Pandas(동일업종PER 성공로직 병합)"""
-    
-    # 데이터를 담을 그릇 (sector_per 추가)
-    data = {
-        'price': None, 'high': None, 'low': None, 
-        'target_price': None, 'opinion': None, 'sector_per': None
-    }
-    
+    """한국 주식 데이터 추출 (네이버 금융) - 가격, 등락폭, 의견 등"""
+    data = {'price': None, 'high': None, 'low': None, 'target_price': None, 'opinion': None}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     
     try:
         url = f"https://finance.naver.com/item/main.naver?code={ticker}"
         res = requests.get(url, headers=headers, timeout=10)
-        
-        # [중요] 성공했던 코드 설정 그대로: euc-kr 강제 지정
-        res.encoding = 'euc-kr' 
-        
-        # -------------------------------------------------------
-        # [기존 로직] BeautifulSoup (가격, 의견 등)
-        # -------------------------------------------------------
+        res.encoding = res.apparent_encoding 
         soup = BeautifulSoup(res.text, 'html.parser')
         
         # 1. 현재가
@@ -82,8 +73,10 @@ def get_kr_stock_data(ticker):
                 if ems: 
                     try:
                         data['target_price'] = float(ems[-1].get_text(strip=True).replace(',', ''))
-                    except: pass
+                    except:
+                        pass 
 
+                # 투자의견 5단계 변환
                 opinion_span = td.find('span', class_='f_up')
                 if opinion_span:
                     raw_text = opinion_span.get_text(strip=True)
@@ -97,38 +90,46 @@ def get_kr_stock_data(ticker):
                         else: clean_opinion = "적극매도"
                     except:
                         clean_opinion = "".join([c for c in raw_text if not c.isdigit() and c != '.']).strip()
+                    
                     data['opinion'] = clean_opinion
 
-        # -------------------------------------------------------
-        # [성공 로직 병합] Pandas + StringIO (동일업종 PER)
-        # * 사용자님이 성공했다고 한 코드를 그대로 붙여넣었습니다 *
-        # -------------------------------------------------------
-        try:
-            # res.text에는 이미 euc-kr로 변환된 텍스트가 들어있음
-            dfs = pd.read_html(StringIO(res.text), encoding='euc-kr')
-
-            for df in dfs:
-                if "동일업종 PER" in df.to_string():
-                    for idx, row in df.iterrows():
-                        row_str = str(row.values)
-                        if "동일업종 PER" in row_str:
-                            # 행의 맨 마지막 값 추출 (성공 로직)
-                            raw_val = str(row.iloc[-1])
-                            
-                            # '배' 제거 및 공백 제거
-                            clean_val = raw_val.replace('배', '').strip()
-                            
-                            # 숫자로 변환
-                            data['sector_per'] = float(clean_val.replace(',', ''))
-                            break
-                    break
-        except Exception as e:
-            # Pandas 부분에서 에러가 나도 다른 데이터는 살리기 위해 pass
-            pass
-
     except Exception as e:
-        print(f"   ⚠️ [Naver Error] {ticker}: {e}")
-    
+        print(f"   ⚠️ [Naver Price Error] {ticker}: {e}")
+    return data
+
+# ---------------------------------------------------------
+# [추가된 함수] 성공한 코드 (Pandas): 동일업종 PER 추출
+# * 요청하신 대로 별도 가공 없이 그대로 추가했습니다 *
+# ---------------------------------------------------------
+def get_sector_per_pandas(item_code: str):
+    url = f"https://finance.naver.com/item/main.naver?code={item_code}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://finance.naver.com/'
+    }
+
+    data = {"동일업종PER": "N/A"}
+
+    try:
+        res = requests.get(url, headers=headers)
+        
+        # 사용자님이 성공하신 방식 그대로 (StringIO + res.text)
+        dfs = pd.read_html(StringIO(res.text), encoding='euc-kr')
+
+        for df in dfs:
+            if "동일업종 PER" in df.to_string():
+                for idx, row in df.iterrows():
+                    row_str = str(row.values)
+                    if "동일업종 PER" in row_str:
+                        raw_val = str(row.iloc[-1])
+                        data["동일업종PER"] = raw_val.replace('배', '').strip()
+                        break
+                break
+    except Exception as e:
+        # 로그는 너무 시끄러울 수 있으니 주석 처리하거나 필요시 해제
+        # print(f"Pandas 추출 중 에러: {e}")
+        pass
+
     return data
 
 # ---------------------------------------------------------
@@ -137,7 +138,7 @@ def get_kr_stock_data(ticker):
 def main():
     kst = timezone(timedelta(hours=9))
     now_iso = datetime.now(kst).isoformat()
-    print(f"💰 [주가 업데이트] 최종 병합 버전 시작 - {datetime.now(kst)}")
+    print(f"💰 [주가 업데이트] 분리형 통합 버전 시작 - {datetime.now(kst)}")
     
     next_cursor = None
     processed_count = 0
@@ -156,6 +157,7 @@ def main():
             ticker = ""
             is_kr = False
             
+            # 티커 추출
             for name in ["티커", "Ticker"]:
                 target = props.get(name)
                 if target:
@@ -173,18 +175,27 @@ def main():
 
                 # --- 1. 한국 주식 처리 ---
                 if is_kr:
+                    # [함수 1] 기존 로직 (가격, 의견) 호출
                     d = get_kr_stock_data(ticker)
                     
                     if is_valid(d['price']): upd["현재가"] = {"number": d['price']}
                     if is_valid(d['high']): upd["52주 최고가"] = {"number": d['high']}
                     if is_valid(d['low']): upd["52주 최저가"] = {"number": d['low']}
                     if is_valid(d['target_price']): upd["목표주가"] = {"number": d['target_price']}
-                    
-                    # [추가됨] 동일업종 PER가 있으면 업데이트 목록에 추가
-                    if is_valid(d['sector_per']): 
-                        upd["동일업종 PER"] = {"number": d['sector_per']}
-                    
                     if d['opinion']: opinion_val = d['opinion']
+
+                    # [함수 2] 추가된 Pandas 로직 (동일업종 PER) 별도 호출
+                    # *섞지 않고 따로 실행합니다*
+                    sector_data = get_sector_per_pandas(ticker)
+                    
+                    # 결과값이 있고 "N/A"가 아니면 노션에 추가
+                    s_per = sector_data.get("동일업종PER")
+                    if s_per and s_per != "N/A":
+                        try:
+                            # 쉼표 제거 후 float 변환
+                            upd["동일업종 PER"] = {"number": float(s_per.replace(',', ''))}
+                        except:
+                            pass
 
                 # --- 2. 미국 주식 처리 ---
                 else:
@@ -214,9 +225,13 @@ def main():
                 notion.pages.update(page_id=page["id"], properties=upd)
                 processed_count += 1
                 
-                # 로그 출력 (업종 PER 수집 확인용)
-                per_msg = f" / 업종PER: {d.get('sector_per')}" if is_kr and d.get('sector_per') else ""
-                print(f"   ✅ [{ticker}] 완료 ({'KR' if is_kr else 'US'}) - 의견: {opinion_val}{per_msg}")
+                # 로그 출력 (KR일 경우 업종 PER 수집 여부 표시)
+                per_log = ""
+                if is_kr:
+                    s_val = upd.get("동일업종 PER", {}).get("number", "N/A")
+                    per_log = f", 업종PER: {s_val}"
+                
+                print(f"   ✅ [{ticker}] 완료 ({'KR' if is_kr else 'US'}) - 의견: {opinion_val}{per_log}")
 
             except Exception as e:
                 print(f"   ❌ [{ticker}] 실패: {e}")
