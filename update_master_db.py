@@ -36,11 +36,14 @@ class StockAutomationEngine:
         # 1. 데이터 로드
         logger.info("⏳ 주식/ETF 데이터셋 로딩 중...")
         self.df_kr_desc = fdr.StockListing('KRX-DESC') # 한국 주식 상세
-        self.df_kr_etf = fdr.StockListing('ETF/KR')    # [추가] 한국 ETF (이름 조회용)
+        self.df_kr_etf = fdr.StockListing('ETF/KR')    # 한국 ETF
         
+        # [수정] 미국 ETF 및 AMEX 데이터 추가 로드
+        self.df_us_etf = fdr.StockListing('ETF/US')    # 미국 ETF (자산군 정보용)
         self.df_sp500 = fdr.StockListing('S&P500')     # 미국 우량
         self.df_nasdaq = fdr.StockListing('NASDAQ')    # 미국 전체 1
         self.df_nyse = fdr.StockListing('NYSE')        # 미국 전체 2
+        self.df_amex = fdr.StockListing('AMEX')        # [추가] 미국 전체 3 (AMEX)
         logger.info("✅ 데이터셋 로딩 완료")
         
         # 2. 우량주 맵 구축
@@ -80,14 +83,17 @@ class StockAutomationEngine:
         return None
 
     def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
-        """티커 기반 국가별 상세 정보 조회"""
+        """티커 기반 국가별 상세 정보 조회 (ETF/AMEX 분류 로직 개선)"""
         res = {
             "name": "", "market": "기타", "origin": "",
             "kr_sector": None, "kr_ind": None,
             "us_sector": None, "us_ind": None
         }
 
-        # 1. 한국 주식 검색 (KRX-DESC)
+        # ---------------------------------------------------------
+        # 1. 한국 주식/ETF 검색
+        # ---------------------------------------------------------
+        # 먼저 주식 리스트(KRX-DESC)에서 기본 정보를 찾습니다.
         kr_match = self.df_kr_desc[self.df_kr_desc['Code'] == clean_t]
         if not kr_match.empty:
             row = kr_match.iloc[0]
@@ -100,34 +106,74 @@ class StockAutomationEngine:
                 "kr_sector": self._get_val_from_headers(row, HEADERS['KR_SECTOR']),
                 "kr_ind": self._get_val_from_headers(row, HEADERS['KR_INDUSTRY'])
             })
-            return res
+            # 여기서 바로 리턴하지 않고, ETF 리스트에 있는지도 확인합니다.
 
-        # 2. [추가] 한국 ETF 검색 (KRX-DESC에 없을 경우)
+        # 한국 ETF 리스트 확인 (있으면 덮어쓰기)
         etf_match = self.df_kr_etf[self.df_kr_etf['Symbol'] == clean_t]
         if not etf_match.empty:
             row = etf_match.iloc[0]
+            # 카테고리가 있으면 쓰고, 없으면 'ETF'
+            cat = str(row['Category']) if 'Category' in row.index else "ETF"
+            
             res.update({
-                "name": row['Name'],  # ETF 이름 확보
-                "market": "ETF",
+                "name": row['Name'],
+                "market": "ETF(KR)",   # [변경] 명확한 구분
                 "origin": "KR",
-                "kr_sector": "ETF",   # 섹터는 'ETF'로 단순 표기
-                "kr_ind": None        # 산업은 비워둠 (깔끔하게)
+                "kr_sector": cat,      # 카테고리를 섹터로 활용
+                "kr_ind": "ETF"
             })
             return res
 
-        # 3. 미국 주식 검색
-        search_targets = [self.df_sp500, self.df_nasdaq, self.df_nyse]
-        for df in search_targets:
+        # 한국 주식으로 판명났으면 리턴 (ETF 아님)
+        if res["origin"] == "KR":
+            return res
+
+        # ---------------------------------------------------------
+        # 2. 미국 ETF 검색 (주식보다 우선 검색)
+        # ---------------------------------------------------------
+        us_etf_match = self.df_us_etf[self.df_us_etf['Symbol'] == clean_t]
+        if not us_etf_match.empty:
+            row = us_etf_match.iloc[0]
+            # 미국 ETF는 Category(Equity, Bond 등) 정보가 있음
+            cat = row['Category'] if 'Category' in row.index else "US_ETF"
+            
+            res.update({
+                "name": row['Name'],
+                "market": "ETF(US)",  # [변경] 명확한 구분
+                "origin": "US",
+                "us_sector": cat,     # 자산군 정보 활용
+                "us_ind": "ETF"
+            })
+            return res
+
+        # ---------------------------------------------------------
+        # 3. 미국 주식 검색 (S&P500 -> NASDAQ -> NYSE -> AMEX)
+        # ---------------------------------------------------------
+        search_targets = [
+            (self.df_sp500, "S&P500"),
+            (self.df_nasdaq, "NASDAQ"),
+            (self.df_nyse, "NYSE"),
+            (self.df_amex, "AMEX")      # [추가] AMEX 검색
+        ]
+        
+        for df, mkt_label in search_targets:
             match = df[df['Symbol'] == clean_t]
             if not match.empty:
                 row = match.iloc[0]
-                if clean_t in self.df_nasdaq['Symbol'].values: mkt = "NASDAQ"
-                elif clean_t in self.df_nyse['Symbol'].values: mkt = "NYSE"
-                else: mkt = "NYSE"
+                
+                final_mkt = mkt_label
+                # S&P500은 실제 시장(NASDAQ/NYSE) 확인
+                if mkt_label == "S&P500":
+                    if clean_t in self.df_nasdaq['Symbol'].values: final_mkt = "NASDAQ"
+                    else: final_mkt = "NYSE"
+                
+                # NYSE 데이터에 AMEX가 섞여있을 수 있으므로 AMEX 리스트로 교차 검증
+                if final_mkt == "NYSE" and clean_t in self.df_amex['Symbol'].values:
+                    final_mkt = "AMEX"
 
                 res.update({
                     "name": row['Name'],
-                    "market": mkt,
+                    "market": final_mkt,
                     "origin": "US",
                     "us_sector": self._get_val_from_headers(row, HEADERS['US_SECTOR']),
                     "us_ind": self._get_val_from_headers(row, HEADERS['US_INDUSTRY'])
@@ -183,7 +229,7 @@ def process_page(page, engine, client):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료")
+        logger.info(f"✅ {raw_ticker} ({info['name']}) 업데이트 완료 [{info['market']}]")
     except Exception as e:
         logger.error(f"❌ {raw_ticker} 업데이트 실패: {e}")
 
