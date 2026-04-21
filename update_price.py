@@ -74,7 +74,7 @@ def main():
             for name in ["티커", "Ticker"]:
                 target = props.get(name)
                 if target:
-                    content = target.get("title") 또는 target.get("rich_text")
+                    content = target.get("title") or target.get("rich_text")
                     if content:
                         ticker = content[0].get("plain_text", "").strip().upper()
                         is_kr = ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 및 ticker[0].isdigit())
