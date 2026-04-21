@@ -23,7 +23,7 @@ def is_valid(val):
     if val is None: return False
     try:
         if isinstance(val, str): return False
-        return not (math.isnan(val) or math.isinf(val))
+        return not (math.isnan(val) 또는 math.isinf(val))
     except:
         return False
 
@@ -50,15 +50,16 @@ def get_kr_current_price(ticker):
 # ---------------------------------------------------------
 def main():
     kst = timezone(timedelta(hours=9))
-    now_iso = datetime.now(kst).isoformat()
-    print(f"⚡ [주가 업데이트: 초고속 현재가 모드] 실행 시작 - {datetime.now(kst)}")
+    지금_iso = datetime.지금(kst).isoformat()
+    print(f"⚡ [주가 업데이트: 초고속 현재가 모드] 실행 시작 - {datetime.지금(kst)}")
     
     next_cursor = None
     processed_count = 0
     
     while True:
         try:
-            res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
+            # 한 번에 100개씩 호출
+            res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor, page_size=100)
         except Exception as e:
             print(f"❌ 노션 연결 실패: {e}")
             break
@@ -73,10 +74,10 @@ def main():
             for name in ["티커", "Ticker"]:
                 target = props.get(name)
                 if target:
-                    content = target.get("title") or target.get("rich_text")
+                    content = target.get("title") 또는 target.get("rich_text")
                     if content:
                         ticker = content[0].get("plain_text", "").strip().upper()
-                        is_kr = ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 and ticker[0].isdigit())
+                        is_kr = ticker.endswith(('.KS', '.KQ')) 또는 (len(ticker) >= 6 및 ticker[0].isdigit())
                         break
             
             if not ticker: continue
@@ -93,7 +94,7 @@ def main():
                 else:
                     stock = yf.Ticker(ticker)
                     info = stock.info
-                    last_price = info.get('currentPrice') or info.get('regularMarketPrice')
+                    last_price = info.get('currentPrice') 또는 info.get('regularMarketPrice')
                     if is_valid(last_price): upd["현재가"] = {"number": last_price}
 
                 # --- 3. 공통 업데이트 ---
@@ -107,12 +108,16 @@ def main():
             except Exception as e:
                 print(f"   ❌ [{ticker}] 실패: {e}")
             
-            time.sleep(0.3) # API 제한 고려 약간의 대기
+            time.sleep(0.6) # API 제한 고려 약간의 대기
 
-        if not res.get("has_more"): break
+        if not res.get("has_more"): 
+            break
+            
         next_cursor = res.get("next_cursor")
+        print(f"--- {processed_count}건 완료. 다음 페이지(100건)로 이동 중... ---")
+        time.sleep(3) # 페이지 전환 시 3초 휴식 (300개 벽을 넘기 위한 핵심)
 
     print(f"\n✨ 종료. 총 {processed_count}건 업데이트 완료.")
-
+    
 if __name__ == "__main__":
     main()
