@@ -1,10 +1,8 @@
 name: Stock Master DB Automation
 
-：:
-  # 외부 cron-job 신호를 받기 위한 설정
+on:
   repository_dispatch:
     types: [master_db_sync]
-  # 깃허브에서 직접 'Run workflow' 버튼으로 실행하기 위한 설정
   workflow_dispatch:
 
 jobs:
