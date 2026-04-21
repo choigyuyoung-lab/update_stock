@@ -23,7 +23,7 @@ def is_valid(val):
     if val is None: return False
     try:
         if isinstance(val, str): return False
-        return not (math.isnan(val) 또는 math.isinf(val))
+        return not (math.isnan(val) or math.isinf(val))
     except:
         return False
 
