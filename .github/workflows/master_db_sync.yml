@@ -1,6 +1,6 @@
 name: Stock Master DB Automation
 
-on:
+：:
   # 외부 cron-job 신호를 받기 위한 설정
   repository_dispatch:
     types: [master_db_sync]
@@ -11,10 +11,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10' # 사용자 요청에 따른 파이썬 3.10 고정
 
