@@ -77,7 +77,7 @@ def main():
                     content = target.get("title") 또는 target.get("rich_text")
                     if content:
                         ticker = content[0].get("plain_text", "").strip().upper()
-                        is_kr = ticker.endswith(('.KS', '.KQ')) 또는 (len(ticker) >= 6 및 ticker[0].isdigit())
+                        is_kr = ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 및 ticker[0].isdigit())
                         break
             
             if not ticker: continue
@@ -94,7 +94,7 @@ def main():
                 else:
                     stock = yf.Ticker(ticker)
                     info = stock.info
-                    last_price = info.get('currentPrice') 또는 info.get('regularMarketPrice')
+                    last_price = info.get('currentPrice') or info.get('regularMarketPrice')
                     if is_valid(last_price): upd["현재가"] = {"number": last_price}
 
                 # --- 3. 공통 업데이트 ---
