@@ -50,8 +50,8 @@ def get_kr_current_price(ticker):
 # ---------------------------------------------------------
 def main():
     kst = timezone(timedelta(hours=9))
-    지금_iso = datetime.지금(kst).isoformat()
-    print(f"⚡ [주가 업데이트: 초고속 현재가 모드] 실행 시작 - {datetime.지금(kst)}")
+    now_iso = datetime.now(kst).isoformat()
+    print(f"⚡ [주가 업데이트: 초고속 현재가 모드] 실행 시작 - {datetime.now(kst)}")
     
     next_cursor = None
     processed_count = 0
