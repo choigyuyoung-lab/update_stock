@@ -1,6 +1,6 @@
 name: Stock Master DB Automation
 
-on：#
+：
   # 외부 cron-job 신호를 받기 위한 설정
   repository_dispatch:
     types: [master_db_sync]
