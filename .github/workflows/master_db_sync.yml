@@ -1,6 +1,6 @@
 name: Stock Master DB Automation
 
-：
+：:
   # 외부 cron-job 신호를 받기 위한 설정
   repository_dispatch:
     types: [master_db_sync]
@@ -11,26 +11,28 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10' # 사용자 요청에 따른 파이썬 3.10 고정
+        # 사용자 요청에 따른 파이썬 3.10 고정 및 Node.js 24 호환 버전
+        python-version: '3.10'
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # [핵심] AttributeError 방지를 위해 기존의 잘못된 패키지를 삭제합니다.
+        # AttributeError 방지를 위해 기존의 잘못된 패키지 삭제
         pip uninstall notion -y 
-        # 공식 SDK인 notion-client와 크롤링/데이터 분석에 필요한 필수 라이브러리를 설치합니다.
+        # 공식 SDK 및 크롤링/데이터 분석 필수 라이브러리 설치
         pip install notion-client==2.2.1 requests beautifulsoup4 pandas finance-datareader pykrx lxml
 
     - name: Run Update Script
       env:
-        # 깃허브 Secrets에 저장된 정보를 환경 변수로 불러옵니다.
+        # 깃허브 Secrets 환경 변수
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-        # 수동 버튼 실행 시에만 전체 업데이트(true) 모드로 작동합니다.
+        # 수동 버튼 실행(workflow_dispatch) 시에만 전체 업데이트 수행
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db.py
