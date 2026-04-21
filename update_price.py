@@ -77,7 +77,7 @@ def main():
                     content = target.get("title") or target.get("rich_text")
                     if content:
                         ticker = content[0].get("plain_text", "").strip().upper()
-                        is_kr = ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 및 ticker[0].isdigit())
+                        is_kr = ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 or ticker[0].isdigit())
                         break
             
             if not ticker: continue
