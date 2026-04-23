@@ -85,11 +85,11 @@ def main():
             if not ticker or is_kr: continue # 미국 주식이 아니면 패스
 
             fin_data = get_us_fin(ticker)
-            fin_data["동일업종 PER"] = None
+            fin_data["업종PER"] = None
 
             upd = {}
             valid_cnt = 0
-            for key in number_keys + ["동일업종 PER"]:
+            for key in number_keys + ["업종PER"]:
                 val = fin_data.get(key)
                 if is_valid(val):
                     valid_cnt += 1
