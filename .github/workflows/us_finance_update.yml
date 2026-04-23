@@ -1,0 +1,24 @@
+name: US Finance Update
+
+on:
+  repository_dispatch:
+    types: [us_finance] # cron-job.org에 등록할 신호 이름
+  workflow_dispatch:
+
+jobs:
+  update-us-finance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31"
+      - name: Run US Finance Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_finance_us.py
