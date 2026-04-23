@@ -29,16 +29,16 @@ def is_valid(val):
 def get_sector_per_pandas(item_code: str):
     url = f"https://finance.naver.com/item/main.naver?code={item_code}"
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/'}
-    data = {"동일업종PER": None}
+    data = {"업종PER": None}
     try:
         res = requests.get(url, headers=headers)
         dfs = pd.read_html(StringIO(res.text), encoding='euc-kr')
         for df in dfs:
-            if "동일업종 PER" in df.to_string():
+            if "업종 PER" in df.to_string():
                 for idx, row in df.iterrows():
-                    if "동일업종 PER" in str(row.values):
+                    if "업종 PER" in str(row.values):
                         raw_val = str(row.iloc[-1])
-                        try: data["동일업종PER"] = float(raw_val.replace('배', '').replace(',', '').strip())
+                        try: data["업종PER"] = float(raw_val.replace('배', '').replace(',', '').strip())
                         except: pass
                         break
                 break
@@ -133,11 +133,11 @@ def main():
 
             fin_data = get_kr_fin(ticker)
             per_data = get_sector_per_pandas(ticker)
-            fin_data["동일업종 PER"] = per_data.get("동일업종PER")
+            fin_data["업종PER"] = per_data.get("업종PER")
 
             upd = {}
             valid_cnt = 0
-            for key in number_keys + ["동일업종 PER"]:
+            for key in number_keys + ["업종PER"]:
                 val = fin_data.get(key)
                 if is_valid(val):
                     valid_cnt += 1
