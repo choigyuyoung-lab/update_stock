@@ -111,7 +111,11 @@ def main():
 
     while True:
         try:
-            res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
+            # [수정 전]
+            # res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor)
+            
+            # 🌟 [수정 후] 100개씩 가져오라고 명확히 지시 (page_size=100 추가)
+            res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor, page_size=100)
         except Exception as e:
             break
 
@@ -164,8 +168,17 @@ def main():
                 print(f"   ❌ [{ticker}] 전송 실패: {e}")
             time.sleep(0.5)
 
-        if not res.get("has_more"): break
+        # [수정 전]
+        # if not res.get("has_more"): break
+        # next_cursor = res.get("next_cursor")
+
+        # 🌟 [수정 후] 페이지를 넘길 때 진행 상황을 출력하고 3초간 달콤한 휴식
+        if not res.get("has_more"): 
+            break
+            
         next_cursor = res.get("next_cursor")
+        print(f"--- 현재까지 {success_cnt}건 완료. 다음 페이지로 이동 전 3초 휴식 ---")
+        time.sleep(3) # API 과부하를 막는 핵심 방어막
 
     print(f"\n✨ 종료. 총 {success_cnt}건 처리됨.")
 
