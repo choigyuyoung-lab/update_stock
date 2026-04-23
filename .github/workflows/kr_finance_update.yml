@@ -1,0 +1,24 @@
+name: KR Finance Update
+
+on:
+  repository_dispatch:
+    types: [kr_finance] # cron-job.org에 등록할 신호 이름
+  workflow_dispatch:
+
+jobs:
+  update-kr-finance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "notion-client==2.2.1" "requests" "pandas" "beautifulsoup4" "lxml" "html5lib"
+      - name: Run KR Finance Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_finance_kr.py
