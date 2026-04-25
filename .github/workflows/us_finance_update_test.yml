@@ -1,0 +1,32 @@
+name: US Finance Update
+
+on:
+  repository_dispatch:
+    types: [us_finance]
+  workflow_dispatch:
+
+jobs:
+  update-us-finance:
+    runs-on: ubuntu-latest
+    
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Node.js 경고 제거
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          # cache: 'pip' # 영수증 파일이 생기면 활성화 가능
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # lxml을 추가하여 yfinance 내부 속도를 개선합니다.
+          pip install "notion-client==2.2.1" "yfinance>=0.2.31" "lxml"
+
+      - name: Run US Finance Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_finance_us.py
