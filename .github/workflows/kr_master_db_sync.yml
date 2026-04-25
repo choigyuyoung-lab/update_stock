@@ -24,5 +24,9 @@ jobs:
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
+        # 🌟 [여기!] 이전에 뺐던 KRX 로그인 정보를 다시 넣어줍니다.
+        KRX_ID: ${{ secrets.KRX_ID }}
+        KRX_PW: ${{ secrets.KRX_PW }}
+        
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db_kr.py
