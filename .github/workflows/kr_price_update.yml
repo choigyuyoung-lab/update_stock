@@ -2,12 +2,16 @@ name: KR Stock Price Update
 
 on:
   repository_dispatch:
-    types: [kr_update] # cron-job.org에서 이 이름으로 신호를 보낼 거예요
+    types: [kr_update]
   workflow_dispatch:
 
 jobs:
   update-kr:
     runs-on: ubuntu-latest
+    
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Node.js 경고 제거
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,7 +20,8 @@ jobs:
       - name: Upgrade pip & Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "notion-client==2.2.1" "requests" "beautifulsoup4"
+          # lxml을 추가하여 데이터 처리 속도를 높입니다
+          pip install "notion-client==2.2.1" "requests" "beautifulsoup4" "lxml"
       - name: Run KR Price Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
