@@ -56,7 +56,9 @@ def main():
                     content = target.get("title") or target.get("rich_text")
                     if content:
                         ticker = content[0].get("plain_text", "").strip().upper()
-                        is_kr = ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 and ticker[0].isdigit())
+                        # 🌟 [수정된 로직] 기본적으로 한국 주식 조건을 만족하더라도, 
+                        # 끝이 .T(일본), .TA 또는 .TW(대만)로 끝나면 한국 주식이 '아닌' 것으로 강력하게 제외!
+                        is_kr = (ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 and ticker[0].isdigit())) and not ticker.endswith(('.T', '.TA', '.TW'))
                         break
             
             if not ticker or is_kr: continue # 한국 주식이면 건너뜀 (미국 주식 전용 문지기)
