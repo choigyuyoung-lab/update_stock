@@ -1,24 +1,30 @@
-name: KR Stock Price Update
+name: KR Finance Update (Test)
 
 on:
-  repository_dispatch:
-    types: [kr_update] # cron-job.org에서 이 이름으로 신호를 보낼 거예요
-  workflow_dispatch:
+  workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
-  update-kr:
+  test-kr-finance:
     runs-on: ubuntu-latest
+    
+    # 🌟 [수정 1] Node.js 20 경고 메시지를 완전히 없애주는 마법의 한 줄!
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Upgrade pip & Install dependencies
+          # 🌟 [수정 2] requirements.txt 파일이 없으므로 cache: 'pip' 줄은 삭제했습니다.
+          
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "notion-client==2.2.1" "requests" "beautifulsoup4"
-      - name: Run KR Price Update
+          pip install "notion-client==2.2.1" "requests" "beautifulsoup4" "lxml"
+          
+      - name: Run Optimized Script
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_price_kr.py
+        run: python update_finance_kr_test.py
