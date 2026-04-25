@@ -84,9 +84,9 @@ class StockAutomationEngineKR:
         if clean_t in self.etf_map:
             item = self.etf_map[clean_t]
             res.update({
-                "name": item.get('Name', ''),
+                "name": str(item.get('Name', '')),
                 "market": "ETF(KR)",
-                "kr_sector": item.get('Category', 'ETF'), # 이 부분이 숫자 7을 반환함
+                "kr_sector": str(item.get('Category', 'ETF')), # 🌟 숫자가 들어와도 문자로 변환!
                 "kr_ind": "ETF"
             })
             
@@ -117,10 +117,10 @@ def process_page_kr(page, engine, client):
     bc_tags = [{"name": label} for label, lst in engine.blue_chip_map.items() if clean_t in lst]
 
     update_props = {
-        "종목명": {"rich_text": [{"text": {"content": info["name"]}}]},
-        "Market": {"select": {"name": info["market"]}},
-        "KR_섹터": {"rich_text": [{"text": {"content": info["kr_sector"]}}]} if info["kr_sector"] else {"rich_text": []},
-        "KR_산업": {"rich_text": [{"text": {"content": info["kr_ind"]}}]} if info["kr_ind"] else {"rich_text": []},
+        "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, # 🌟 str() 추가
+        "Market": {"select": {"name": str(info["market"])}}, # 🌟 str() 추가
+        "KR_섹터": {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]} if info["kr_sector"] else {"rich_text": []}, # 🌟 str() 추가
+        "KR_산업": {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]} if info["kr_ind"] else {"rich_text": []}, # 🌟 str() 추가
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
     if "우량주" in props: update_props["우량주"] = {"multi_select": bc_tags}
