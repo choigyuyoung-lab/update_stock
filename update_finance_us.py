@@ -79,7 +79,8 @@ def main():
                     content = props.get(name, {}).get("title") or props.get(name, {}).get("rich_text")
                     if content:
                         ticker = content[0].get("plain_text", "").strip().upper()
-                        is_kr = ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 and ticker[0].isdigit())
+                        # 🌟 끝이 .T(일본), .TA(이스라엘), .TW(대만)로 끝나면 무조건 한국 주식에서 제외!
+                        is_kr = (ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 and ticker[0].isdigit())) and not ticker.endswith(('.T', '.TA', '.TW'))
                         break
             
             if not ticker or is_kr: continue # 미국 주식이 아니면 패스
