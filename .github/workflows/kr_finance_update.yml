@@ -1,0 +1,32 @@
+name: KR Finance Update
+
+on:
+  repository_dispatch:
+    types: [kr_finance] # cron-job.org에서 보내는 신호 이름
+  workflow_dispatch:      # 필요할 때 버튼 눌러서 직접 실행 가능
+
+jobs:
+  update-kr-finance:
+    runs-on: ubuntu-latest
+    
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Node.js 경고 제거
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          # 여기서 cache는 제외했습니다 (영수증 파일이 없으므로)
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 최적화 코드에 맞춰 pandas 등을 빼고 lxml만 설치하여 속도 향상
+          pip install "notion-client==2.2.1" "requests" "beautifulsoup4" "lxml"
+
+      - name: Run KR Finance Update
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        run: python update_finance_kr.py
