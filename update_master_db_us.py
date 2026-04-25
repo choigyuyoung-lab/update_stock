@@ -9,6 +9,9 @@ import yfinance as yf
 import FinanceDataReader as fdr
 from notion_client import Client
 
+# ---------------------------------------------------------
+# 1. 환경 변수 및 설정
+# ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 IS_FULL_UPDATE = os.environ.get("IS_FULL_UPDATE", "False").lower() == "true"
@@ -28,6 +31,7 @@ class StockAutomationEngineUS:
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
         
         logger.info("⏳ 미국 주식/ETF 데이터셋 로딩 중...")
+        # FinanceDataReader 데이터셋 (미국)
         self.df_us_etf = fdr.StockListing('ETF/US')    
         self.df_sp500 = fdr.StockListing('S&P500')     
         self.df_nasdaq = fdr.StockListing('NASDAQ')    
@@ -41,13 +45,21 @@ class StockAutomationEngineUS:
         }
 
     def _get_nas100(self) -> List[str]:
+        """위키피디아에서 나스닥 100 종목 리스트 추출"""
         try:
             url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
             res = self.session.get(url, timeout=10)
-            df = pd.read_html(io.StringIO(res.text))[4]
-            col = 'Ticker' if 'Ticker' in df.columns else 'Symbol'
-            return df[col].tolist()
-        except: return []
+            # lxml 엔진을 명시적으로 사용하여 속도와 안정성 확보
+            dfs = pd.read_html(io.StringIO(res.text), flavor='lxml')
+            # 보통 4번째 혹은 5번째 테이블에 종목 정보가 있음
+            for df in dfs:
+                if 'Ticker' in df.columns or 'Symbol' in df.columns:
+                    col = 'Ticker' if 'Ticker' in df.columns else 'Symbol'
+                    return df[col].tolist()
+            return []
+        except Exception as e:
+            logger.warning(f"⚠️ 나스닥 100 리스트 수집 실패: {e}")
+            return []
 
     def _get_val_from_headers(self, row, candidates: List[str]) -> Optional[str]:
         for col in candidates:
@@ -56,9 +68,10 @@ class StockAutomationEngineUS:
         return None
 
     def get_stock_detail(self, clean_t: str, raw_ticker: str) -> Dict[str, Any]:
+        """티커 기반 국가별 상세 정보 조회"""
         res = {"name": "", "market": "기타", "us_sector": None, "us_ind": None}
 
-        # 1. 미국 ETF
+        # 1. 미국 ETF 검색
         us_etf_match = self.df_us_etf[self.df_us_etf['Symbol'] == clean_t]
         if not us_etf_match.empty:
             row = us_etf_match.iloc[0]
@@ -66,8 +79,12 @@ class StockAutomationEngineUS:
             res.update({"name": row['Name'], "market": "ETF(US)", "us_sector": cat, "us_ind": "ETF"})
             return res
 
-        # 2. 미국 주식
-        search_targets = [(self.df_sp500, "S&P500"), (self.df_nasdaq, "NASDAQ"), (self.df_nyse, "NYSE"), (self.df_amex, "AMEX")]
+        # 2. 미국 주식 검색 (S&P500 -> NASDAQ -> NYSE -> AMEX)
+        search_targets = [
+            (self.df_sp500, "S&P500"), (self.df_nasdaq, "NASDAQ"),
+            (self.df_nyse, "NYSE"), (self.df_amex, "AMEX")
+        ]
+        
         for df, mkt_label in search_targets:
             match = df[df['Symbol'] == clean_t]
             if not match.empty:
@@ -85,23 +102,29 @@ class StockAutomationEngineUS:
                 })
                 return res
 
-        # 3. 글로벌/기타 (일본, 대만 등) - Yahoo Finance
+        # 3. 글로벌/기타 (일본, 대만 등) - Yahoo Finance 활용
         try:
-            stock_info = yf.Ticker(raw_ticker).info
-            if stock_info and ('shortName' in stock_info or 'longName' in stock_info):
-                res.update({
-                    "name": stock_info.get('longName') or stock_info.get('shortName'),
-                    "market": "기타",
-                    "us_sector": stock_info.get("sector"),
-                    "us_ind": stock_info.get("industry")
-                })
+            # 세션을 사용하여 차단 방지 및 속도 향상
+            stock = yf.Ticker(raw_ticker, session=self.session)
+            stock_info = stock.info
+            if stock_info:
+                name = stock_info.get('longName') or stock_info.get('shortName') or stock_info.get('name')
+                if name:
+                    res.update({
+                        "name": name,
+                        "market": "기타",
+                        "us_sector": stock_info.get("sector"),
+                        "us_ind": stock_info.get("industry")
+                    })
         except Exception as e:
             logger.debug(f"Yahoo Finance 검색 실패 ({raw_ticker}): {e}")
 
         return res
 
     def clean_ticker(self, raw_ticker: str) -> str:
+        """FinanceDataReader 조회용 티커 정제"""
         t = str(raw_ticker).strip().upper()
+        # .T, .TW 등 접미사 제거
         return re.split(r'[-.]', t)[0]
 
 def process_page_us(page, engine, client):
@@ -113,7 +136,7 @@ def process_page_us(page, engine, client):
     
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     
-    # 🌟 한국 주식이면 바로 통과
+    # 🌟 한국 주식 판별 (건너뛰기)
     is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
     if is_kr: return
 
@@ -122,6 +145,7 @@ def process_page_us(page, engine, client):
     
     if not info["name"]: return
 
+    # 우량주 태그 (S&P 500, 나스닥 100)
     bc_tags = [{"name": label} for label, lst in engine.blue_chip_map.items() if clean_t in lst]
 
     update_props = {
@@ -131,22 +155,25 @@ def process_page_us(page, engine, client):
         "US_업종": {"rich_text": [{"text": {"content": info["us_ind"]}}]} if info["us_ind"] else {"rich_text": []},
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
-    if "우량주" in props: update_props["우량주"] = {"multi_select": bc_tags}
+    if "우량주" in props: 
+        update_props["우량주"] = {"multi_select": bc_tags}
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"   ✅ [Global] {raw_ticker} ({info['name']}) 업데이트 완료")
+        logger.info(f"   ✅ [Global] {raw_ticker} ({info['name']}) 업데이트 완료 [{info['market']}]")
     except Exception as e:
         logger.error(f"   ❌ [Global] {raw_ticker} 실패: {e}")
 
 def main():
     client = Client(auth=NOTION_TOKEN) 
     engine = StockAutomationEngineUS()
-    cursor = None
     
+    cursor = None
     while True:
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query_params["start_cursor"] = cursor
+        
+        # '종목명'이 비어있는 것만 업데이트하거나(자동), 전체 업데이트(수동)
         if not IS_FULL_UPDATE:
             query_params["filter"] = {"property": "종목명", "rich_text": {"is_empty": True}}
         
@@ -157,7 +184,7 @@ def main():
         with ThreadPoolExecutor(max_workers=5) as executor:
             for page in pages:
                 executor.submit(process_page_us, page, engine, client)
-                time.sleep(0.1)
+                time.sleep(0.1) # 노션 API 속도 제한 준수
         
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
