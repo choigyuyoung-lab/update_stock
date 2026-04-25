@@ -86,7 +86,7 @@ class StockAutomationEngineKR:
             res.update({
                 "name": item.get('Name', ''),
                 "market": "ETF(KR)",
-                "kr_sector": item.get('Category', 'ETF'),
+                "kr_sector": item.get('Category', 'ETF'), # 이 부분이 숫자 7을 반환함
                 "kr_ind": "ETF"
             })
             
