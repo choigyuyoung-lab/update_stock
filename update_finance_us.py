@@ -45,6 +45,8 @@ def get_us_fin_optimized(ticker):
                 "PBR": info.get("priceToBook"),
                 "BPS": info.get("bookValue"),
                 "목표주가": info.get('targetMeanPrice')
+                "52주 최고가": info.get("fiftyTwoWeekHigh"),
+                "52주 최저가": info.get("fiftyTwoWeekLow")
             })
             if info.get("dividendYield"):
                 res["배당수익률"] = info.get("dividendYield") * 100
