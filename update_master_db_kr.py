@@ -9,6 +9,7 @@ import FinanceDataReader as fdr
 from pykrx import stock
 from notion_client import Client
 
+# 1. 환경 변수 및 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 IS_FULL_UPDATE = os.environ.get("IS_FULL_UPDATE", "False").lower() == "true"
@@ -27,52 +28,67 @@ class StockAutomationEngineKR:
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
         
-        logger.info("⏳ 한국 주식/ETF 데이터셋 로딩 중...")
-        self.df_kr_desc = fdr.StockListing('KRX-DESC') 
-        self.df_kr_etf = fdr.StockListing('ETF/KR')    
-        logger.info("✅ 데이터셋 로딩 완료")
+        logger.info("⏳ 데이터셋 로딩 및 인덱싱 중...")
+        # 🌟 [최적화] 데이터를 가져온 후 즉시 딕셔너리로 변환하여 검색 속도 극대화
+        df_desc = fdr.StockListing('KRX-DESC')
+        self.desc_map = df_desc.set_index('Code').to_dict('index')
+        
+        df_etf = fdr.StockListing('ETF/KR')
+        self.etf_map = df_etf.set_index('Symbol').to_dict('index')
+        
+        logger.info(f"✅ 로딩 완료 (주식: {len(self.desc_map)}건, ETF: {len(self.etf_map)}건)")
         
         self.blue_chip_map = {
             "KOSPI 200": self._get_ks200(),
-            "KOSDAQ GLOBAL": self._get_kglobal() 
+            "KOSDAQ GLOBAL": self._get_kglobal(df_desc) 
         }
 
     def _get_ks200(self) -> List[str]:
+        """KOSPI 200 종목 리스트 추출"""
         for i in range(10):
             date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-            res = stock.get_index_portfolio_deposit_file("1028", date)
-            if len(res) > 0: return res
+            try:
+                res = stock.get_index_portfolio_deposit_file("1028", date)
+                if res: return res
+            except: continue
         return []
 
-    def _get_kglobal(self) -> List[str]:
-        target = self.df_kr_desc[self.df_kr_desc['Market'].str.contains('KOSDAQ GLOBAL', case=False, na=False)]
-        col = 'Code' if 'Code' in target.columns else 'Symbol'
-        return target[col].tolist()
+    def _get_kglobal(self, df_desc) -> List[str]:
+        """KOSDAQ GLOBAL 종목 리스트 추출"""
+        target = df_desc[df_desc['Market'].str.contains('KOSDAQ GLOBAL', case=False, na=False)]
+        return target['Code'].tolist()
 
-    def _get_val_from_headers(self, row, candidates: List[str]) -> Optional[str]:
+    def _get_val(self, data_dict: dict, candidates: List[str]) -> Optional[str]:
         for col in candidates:
-            if col in row.index and pd.notna(row[col]) and str(row[col]).strip() != "":
-                return str(row[col]).strip()
+            val = data_dict.get(col)
+            if pd.notna(val) and str(val).strip() != "":
+                return str(val).strip()
         return None
 
     def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
+        """🌟 [최적화] 필터링 없이 딕셔너리 키로 즉시 조회 (O(1))"""
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
 
-        kr_match = self.df_kr_desc[self.df_kr_desc['Code'] == clean_t]
-        if not kr_match.empty:
-            row = kr_match.iloc[0]
-            mkt = "KOSDAQ" if "KOSDAQ" in str(row['Market']) else str(row['Market'])
+        # 1. 주식 정보 확인
+        if clean_t in self.desc_map:
+            item = self.desc_map[clean_t]
+            mkt = "KOSDAQ" if "KOSDAQ" in str(item.get('Market', '')) else str(item.get('Market', '기타'))
             res.update({
-                "name": row['Name'], "market": mkt,
-                "kr_sector": self._get_val_from_headers(row, HEADERS['KR_SECTOR']),
-                "kr_ind": self._get_val_from_headers(row, HEADERS['KR_INDUSTRY'])
+                "name": item.get('Name', ''),
+                "market": mkt,
+                "kr_sector": self._get_val(item, HEADERS['KR_SECTOR']),
+                "kr_ind": self._get_val(item, HEADERS['KR_INDUSTRY'])
             })
 
-        etf_match = self.df_kr_etf[self.df_kr_etf['Symbol'] == clean_t]
-        if not etf_match.empty:
-            row = etf_match.iloc[0]
-            cat = str(row['Category']) if 'Category' in row.index else "ETF"
-            res.update({"name": row['Name'], "market": "ETF(KR)", "kr_sector": cat, "kr_ind": "ETF"})
+        # 2. ETF 정보 확인 (있으면 덮어쓰기)
+        if clean_t in self.etf_map:
+            item = self.etf_map[clean_t]
+            res.update({
+                "name": item.get('Name', ''),
+                "market": "ETF(KR)",
+                "kr_sector": item.get('Category', 'ETF'),
+                "kr_ind": "ETF"
+            })
             
         return res
 
@@ -83,14 +99,13 @@ class StockAutomationEngineKR:
 
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
-    
-    target_prop = props.get("티커", {})
-    ticker_rich = target_prop.get("title") or target_prop.get("rich_text")
+    ticker_prop = props.get("티커", {})
+    ticker_rich = ticker_prop.get("title") or ticker_prop.get("rich_text")
     if not ticker_rich: return
     
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     
-    # 🌟 한국 주식이 아니면 바로 통과
+    # 한국 주식 판별 (기존 로직 유지)
     is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
     if not is_kr: return
 
@@ -112,7 +127,7 @@ def process_page_kr(page, engine, client):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"   ✅ [KR] {raw_ticker} ({info['name']}) 업데이트 완료")
+        logger.info(f"   ✅ [KR] {raw_ticker} 업데이트 완료")
     except Exception as e:
         logger.error(f"   ❌ [KR] {raw_ticker} 실패: {e}")
 
@@ -134,7 +149,7 @@ def main():
         with ThreadPoolExecutor(max_workers=5) as executor:
             for page in pages:
                 executor.submit(process_page_kr, page, engine, client)
-                time.sleep(0.1)
+                time.sleep(0.05) # [최적화] 대기 시간 소폭 단축
         
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
