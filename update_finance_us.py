@@ -44,7 +44,7 @@ def get_us_fin_optimized(ticker):
                 "추정EPS": info.get("forwardEps"),
                 "PBR": info.get("priceToBook"),
                 "BPS": info.get("bookValue"),
-                "목표주가": info.get('targetMeanPrice')
+                "목표주가": info.get('targetMeanPrice'),
                 "52주 최고가": info.get("fiftyTwoWeekHigh"),
                 "52주 최저가": info.get("fiftyTwoWeekLow")
             })
