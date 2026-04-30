@@ -38,12 +38,25 @@ class StockAutomationEngineKR:
         
         logger.info(f"✅ 로딩 완료 (주식: {len(self.desc_map)}건, ETF: {len(self.etf_map)}건)")
         
+        # ... 클래스 생성자 내부 ...
         self.blue_chip_map = {
             "KOSPI 200": self._get_ks200(),
-            "KOSDAQ 150": self._get_kq150(), # 추가됨
+            "KOSDAQ 150": self._get_kq150(),
             "KOSDAQ GLOBAL": self._get_kglobal(df_desc) 
         }
 
+        # 🔍 [검증 코드 추가] 지수 간 데이터 혼선 확인
+        ks200_set = set(self.blue_chip_map["KOSPI 200"])
+        kq150_set = set(self.blue_chip_map["KOSDAQ 150"])
+        
+        common = ks200_set & kq150_set # 두 지수에 공통으로 포함된 종목 추출
+        
+        logger.info(f"📊 지수 로드 결과 - KOSPI 200: {len(ks200_set)}개, KOSDAQ 150: {len(kq150_set)}개")
+        
+        if common:
+            logger.error(f"🚨 데이터 혼선 발생! 두 지수에 공통 포함된 종목({len(common)}개): {common}")
+        else:
+            logger.info("✅ 지수 간 종목 중복 없음. 데이터가 깨끗합니다.")
     def _get_ks200(self) -> List[str]:
         """KOSPI 200 종목 리스트 추출"""
         for i in range(10):
