@@ -49,10 +49,17 @@ class StockAutomationEngineKR:
             indices = stock.get_index_ticker_list(market_name)
             target_code = None
             
-            # 정확한 지수명 매칭
+            # 🌟 검색어 정규화 (공백 제거 및 대문자 변환)
+            search_target = index_name.replace(" ", "").upper()
+            search_target_en = search_target.replace("코스닥", "KOSDAQ").replace("코스피", "KOSPI")
+            
+            # 유연한 지수명 매칭
             for code in indices:
                 name = stock.get_index_ticker_name(code)
-                if name == index_name:
+                name_clean = name.replace(" ", "").upper()
+                
+                # "코스닥150" 또는 "KOSDAQ150"과 완전히 일치하는지 확인
+                if name_clean == search_target or name_clean == search_target_en:
                     target_code = code
                     break
             
