@@ -40,6 +40,7 @@ class StockAutomationEngineKR:
         
         self.blue_chip_map = {
             "KOSPI 200": self._get_ks200(),
+            "KOSDAQ 150": self._get_kq150(), # 추가됨
             "KOSDAQ GLOBAL": self._get_kglobal(df_desc) 
         }
 
@@ -53,6 +54,18 @@ class StockAutomationEngineKR:
             except: continue
         return []
 
+    def _get_kq150(self) -> List[str]:
+        """KOSDAQ 150 종목 리스트 추출"""
+        for i in range(10):  # 최근 10일 중 가장 가까운 영업일 데이터 탐색
+            date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+            try:
+                # 1035는 KOSDAQ 150 지수의 고유 코드입니다.
+                res = stock.get_index_portfolio_deposit_file("1035", date)
+                if res: return res
+            except: continue
+        return []
+
+    
     def _get_kglobal(self, df_desc) -> List[str]:
         """KOSDAQ GLOBAL 종목 리스트 추출"""
         target = df_desc[df_desc['Market'].str.contains('KOSDAQ GLOBAL', case=False, na=False)]
