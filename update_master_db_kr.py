@@ -44,12 +44,13 @@ class StockAutomationEngineKR:
         }
 
     def _get_dynamic_index(self, market_name: str, index_name: str) -> List[str]:
-        """고유 코드를 우선 시도하고, 실패 시 시장에서 동적으로 찾는 로직"""
+        """고유 코드를 우선 시도하고, 실패 시 시장에서 동적으로 찾는 무적 로직"""
         target_codes = []
         if "코스피 200" in index_name:
             target_codes = ["1028"]
         elif "코스닥 150" in index_name:
-            target_codes = ["2035", "1035"]
+            # 2035: 코스닥150 주요 코드, 1035: 구형 코드, 2056: 코스닥150(PR)
+            target_codes = ["2035", "1035", "2056"] 
 
         # 1. 하드코딩된 코드로 찌르기
         for code in target_codes:
@@ -67,23 +68,29 @@ class StockAutomationEngineKR:
         logger.warning(f"🚨 {index_name} 기본 코드가 작동하지 않아 이름 검색을 시도합니다.")
         try:
             indices = stock.get_index_ticker_list(market_name)
-            search_target = index_name.replace(" ", "").upper()
-            search_target_en = search_target.replace("코스닥", "KOSDAQ").replace("코스피", "KOSPI")
             
             for code in indices:
                 name = stock.get_index_ticker_name(code)
                 name_clean = name.replace(" ", "").upper()
                 
-                is_kq150 = "150" in name_clean and ("코스닥" in name_clean or "KOSDAQ" in name_clean)
-                is_ks200 = "200" in name_clean and ("코스피" in name_clean or "KOSPI" in name_clean)
+                # 🌟 요청한 지수(index_name)에 맞는 것만 정확히 필터링
+                is_match = False
+                if "코스닥 150" in index_name:
+                    is_match = "150" in name_clean and ("코스닥" in name_clean or "KOSDAQ" in name_clean)
+                elif "코스피 200" in index_name:
+                    is_match = "200" in name_clean and ("코스피" in name_clean or "KOSPI" in name_clean)
                 
-                if (is_kq150 or is_ks200) and not any(x in name_clean for x in ["선물", "인버스", "레버리지", "TR", "PR"]):
+                # 파생상품(선물, 인버스 등)을 제외하고 매칭된 경우만 데이터 추출
+                if is_match and not any(x in name_clean for x in ["선물", "인버스", "레버리지", "TR", "PR"]):
                     for i in range(10):
                         date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-                        res = stock.get_index_portfolio_deposit_file(code, date)
-                        if res and len(res) > 100: 
-                            logger.info(f"✅ {index_name} 검색 로드 성공 (코드: {code}, 종목수: {len(res)})")
-                            return res
+                        try:
+                            res = stock.get_index_portfolio_deposit_file(code, date)
+                            if res and len(res) > 100: 
+                                logger.info(f"✅ {index_name} 검색 로드 성공 (코드: {code}, 종목수: {len(res)})")
+                                return res
+                        except:
+                            continue
         except Exception as e:
             logger.error(f"🚨 {index_name} 검색 중 오류: {e}")
             
