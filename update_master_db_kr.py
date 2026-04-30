@@ -49,8 +49,8 @@ class StockAutomationEngineKR:
         if "코스피 200" in index_name:
             target_codes = ["1028"]
         elif "코스닥 150" in index_name:
-            # 2035: 코스닥150 주요 코드, 1035: 구형 코드, 2056: 코스닥150(PR)
-            target_codes = ["2035", "1035", "2056"] 
+            # 💡 1035는 KOSPI 50이었습니다! 코스닥 150의 실제 pykrx 코드는 '203' 입니다.
+            target_codes = ["203", "2046"] 
 
         # 1. 하드코딩된 코드로 찌르기
         for code in target_codes:
@@ -64,7 +64,7 @@ class StockAutomationEngineKR:
                 except:
                     continue
 
-        # 2. 거래소가 코드를 바꿨을 경우 검색 (최후의 보루)
+        # 2. 거래소가 코드를 바꿨을 경우 검색 (디버깅 강화)
         logger.warning(f"🚨 {index_name} 기본 코드가 작동하지 않아 이름 검색을 시도합니다.")
         try:
             indices = stock.get_index_ticker_list(market_name)
@@ -73,22 +73,25 @@ class StockAutomationEngineKR:
                 name = stock.get_index_ticker_name(code)
                 name_clean = name.replace(" ", "").upper()
                 
-                # 🌟 요청한 지수(index_name)에 맞는 것만 정확히 필터링
                 is_match = False
                 if "코스닥 150" in index_name:
                     is_match = "150" in name_clean and ("코스닥" in name_clean or "KOSDAQ" in name_clean)
                 elif "코스피 200" in index_name:
                     is_match = "200" in name_clean and ("코스피" in name_clean or "KOSPI" in name_clean)
                 
-                # 파생상품(선물, 인버스 등)을 제외하고 매칭된 경우만 데이터 추출
                 if is_match and not any(x in name_clean for x in ["선물", "인버스", "레버리지", "TR", "PR"]):
+                    logger.info(f"🔍 후보 지수 발견: {name} (코드: {code}) - 데이터 추출 시도 중...")
                     for i in range(10):
                         date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
                         try:
                             res = stock.get_index_portfolio_deposit_file(code, date)
-                            if res and len(res) > 100: 
-                                logger.info(f"✅ {index_name} 검색 로드 성공 (코드: {code}, 종목수: {len(res)})")
-                                return res
+                            if res:
+                                if len(res) > 100:
+                                    logger.info(f"✅ {index_name} 검색 로드 성공 (코드: {code}, 종목수: {len(res)})")
+                                    return res
+                                else:
+                                    # 🚨 왜 실패했는지 로그에 남깁니다.
+                                    logger.warning(f"⚠️ {name}({code}) 추출 결과 종목수가 {len(res)}개로 100개 미만이라 패스합니다.")
                         except:
                             continue
         except Exception as e:
