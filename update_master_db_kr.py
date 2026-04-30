@@ -47,10 +47,10 @@ class StockAutomationEngineKR:
         """고유 코드를 우선 시도하고, 실패 시 시장에서 동적으로 찾는 무적 로직"""
         target_codes = []
         if "코스피 200" in index_name:
-            target_codes = ["1028"]
+            target_codes = ["1001"]
         elif "코스닥 150" in index_name:
             # 💡 1035는 KOSPI 50이었습니다! 코스닥 150의 실제 pykrx 코드는 '203' 입니다.
-            target_codes = ["203", "2046"] 
+            target_codes = ["2001"] 
 
         # 1. 하드코딩된 코드로 찌르기
         for code in target_codes:
