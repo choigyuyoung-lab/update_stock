@@ -1,4 +1,4 @@
-import os, re, time, logging, io
+import os, re, time, logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, Any, List
@@ -29,7 +29,6 @@ class StockAutomationEngineKR:
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
         
         logger.info("⏳ 데이터셋 로딩 및 인덱싱 중...")
-        # 🌟 [최적화] 데이터를 가져온 후 즉시 딕셔너리로 변환하여 검색 속도 극대화
         df_desc = fdr.StockListing('KRX-DESC')
         self.desc_map = df_desc.set_index('Code').to_dict('index')
         
@@ -38,51 +37,40 @@ class StockAutomationEngineKR:
         
         logger.info(f"✅ 로딩 완료 (주식: {len(self.desc_map)}건, ETF: {len(self.etf_map)}건)")
         
-        # ... 클래스 생성자 내부 ...
+        # 🌟 지수 데이터 동적 로드 (KOSPI 200, KOSDAQ 150)
         self.blue_chip_map = {
-            "KOSPI 200": self._get_ks200(),
-            "KOSDAQ 150": self._get_kq150(),
-            "KOSDAQ GLOBAL": self._get_kglobal(df_desc) 
+            "KOSPI 200": self._get_dynamic_index("KOSPI", "코스피 200"),
+            "KOSDAQ 150": self._get_dynamic_index("KOSDAQ", "코스닥 150")
         }
 
-        # 🔍 [검증 코드 추가] 지수 간 데이터 혼선 확인
-        ks200_set = set(self.blue_chip_map["KOSPI 200"])
-        kq150_set = set(self.blue_chip_map["KOSDAQ 150"])
-        
-        common = ks200_set & kq150_set # 두 지수에 공통으로 포함된 종목 추출
-        
-        logger.info(f"📊 지수 로드 결과 - KOSPI 200: {len(ks200_set)}개, KOSDAQ 150: {len(kq150_set)}개")
-        
-        if common:
-            logger.error(f"🚨 데이터 혼선 발생! 두 지수에 공통 포함된 종목({len(common)}개): {common}")
-        else:
-            logger.info("✅ 지수 간 종목 중복 없음. 데이터가 깨끗합니다.")
-    def _get_ks200(self) -> List[str]:
-        """KOSPI 200 종목 리스트 추출"""
-        for i in range(10):
-            date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-            try:
-                res = stock.get_index_portfolio_deposit_file("1028", date)
-                if res: return res
-            except: continue
-        return []
+    def _get_dynamic_index(self, market_name: str, index_name: str) -> List[str]:
+        """주어진 시장(KOSPI/KOSDAQ)에서 지수명으로 고유 코드를 찾아 종목 리스트 반환"""
+        try:
+            indices = stock.get_index_ticker_list(market_name)
+            target_code = None
+            
+            # 정확한 지수명 매칭
+            for code in indices:
+                name = stock.get_index_ticker_name(code)
+                if name == index_name:
+                    target_code = code
+                    break
+            
+            if not target_code:
+                logger.error(f"🚨 '{index_name}' 지수 코드를 {market_name} 시장에서 찾을 수 없습니다.")
+                return []
 
-    def _get_kq150(self) -> List[str]:
-        """KOSDAQ 150 종목 리스트 추출"""
-        for i in range(10):  # 최근 10일 중 가장 가까운 영업일 데이터 탐색
-            date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-            try:
-                # 1035는 KOSDAQ 150 지수의 고유 코드입니다.
-                res = stock.get_index_portfolio_deposit_file("1035", date)
-                if res: return res
-            except: continue
+            # 가장 최근 영업일 데이터 추출
+            for i in range(10):
+                date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+                res = stock.get_index_portfolio_deposit_file(target_code, date)
+                if res: 
+                    logger.info(f"✅ {index_name} 동적 로드 성공 (코드: {target_code}, 종목수: {len(res)})")
+                    return res
+        except Exception as e:
+            logger.error(f"🚨 {index_name} 데이터 추출 중 오류 발생: {e}")
+            
         return []
-
-    
-    def _get_kglobal(self, df_desc) -> List[str]:
-        """KOSDAQ GLOBAL 종목 리스트 추출"""
-        target = df_desc[df_desc['Market'].str.contains('KOSDAQ GLOBAL', case=False, na=False)]
-        return target['Code'].tolist()
 
     def _get_val(self, data_dict: dict, candidates: List[str]) -> Optional[str]:
         for col in candidates:
@@ -92,10 +80,9 @@ class StockAutomationEngineKR:
         return None
 
     def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
-        """🌟 [최적화] 필터링 없이 딕셔너리 키로 즉시 조회 (O(1))"""
+        """필터링 없이 딕셔너리 키로 즉시 조회 (O(1))"""
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
 
-        # 1. 주식 정보 확인
         if clean_t in self.desc_map:
             item = self.desc_map[clean_t]
             mkt = "KOSDAQ" if "KOSDAQ" in str(item.get('Market', '')) else str(item.get('Market', '기타'))
@@ -106,13 +93,12 @@ class StockAutomationEngineKR:
                 "kr_ind": self._get_val(item, HEADERS['KR_INDUSTRY'])
             })
 
-        # 2. ETF 정보 확인 (있으면 덮어쓰기)
         if clean_t in self.etf_map:
             item = self.etf_map[clean_t]
             res.update({
                 "name": str(item.get('Name', '')),
                 "market": "ETF(KR)",
-                "kr_sector": str(item.get('Category', 'ETF')), # 🌟 숫자가 들어와도 문자로 변환!
+                "kr_sector": str(item.get('Category', 'ETF')), 
                 "kr_ind": "ETF"
             })
             
@@ -131,7 +117,6 @@ def process_page_kr(page, engine, client):
     
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     
-    # 한국 주식 판별 (기존 로직 유지)
     is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
     if not is_kr: return
 
@@ -140,13 +125,21 @@ def process_page_kr(page, engine, client):
     
     if not info["name"]: return
 
-    bc_tags = [{"name": label} for label, lst in engine.blue_chip_map.items() if clean_t in lst]
+    # 🌟 물리적 방어 로직 (시장 교차 검증)
+    bc_tags = []
+    for label, lst in engine.blue_chip_map.items():
+        if clean_t in lst:
+            if "KOSDAQ" in label and info["market"] != "KOSDAQ":
+                continue
+            if "KOSPI" in label and info["market"] != "KOSPI":
+                continue
+            bc_tags.append({"name": label})
 
     update_props = {
-        "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, # 🌟 str() 추가
-        "Market": {"select": {"name": str(info["market"])}}, # 🌟 str() 추가
-        "KR_섹터": {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]} if info["kr_sector"] else {"rich_text": []}, # 🌟 str() 추가
-        "KR_산업": {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]} if info["kr_ind"] else {"rich_text": []}, # 🌟 str() 추가
+        "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, 
+        "Market": {"select": {"name": str(info["market"])}}, 
+        "KR_섹터": {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]} if info["kr_sector"] else {"rich_text": []}, 
+        "KR_산업": {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]} if info["kr_ind"] else {"rich_text": []}, 
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
     if "우량주" in props: update_props["우량주"] = {"multi_select": bc_tags}
@@ -175,7 +168,7 @@ def main():
         with ThreadPoolExecutor(max_workers=5) as executor:
             for page in pages:
                 executor.submit(process_page_kr, page, engine, client)
-                time.sleep(0.05) # [최적화] 대기 시간 소폭 단축
+                time.sleep(0.05) 
         
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
