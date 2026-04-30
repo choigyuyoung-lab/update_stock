@@ -37,67 +37,25 @@ class StockAutomationEngineKR:
         
         logger.info(f"✅ 로딩 완료 (주식: {len(self.desc_map)}건, ETF: {len(self.etf_map)}건)")
         
-        # 지수 데이터 로드
+        # 최적화: 고정된 코드로 즉시 데이터 로드
         self.blue_chip_map = {
-            "KOSPI 200": self._get_dynamic_index("KOSPI", "코스피 200"),
-            "KOSDAQ 150": self._get_dynamic_index("KOSDAQ", "코스닥 150")
+            "KOSPI 200": self._get_index_by_code("코스피 200", "1001"),
+            "KOSDAQ 150": self._get_index_by_code("코스닥 150", "2001")
         }
 
-    def _get_dynamic_index(self, market_name: str, index_name: str) -> List[str]:
-        """고유 코드를 우선 시도하고, 실패 시 시장에서 동적으로 찾는 무적 로직"""
-        target_codes = []
-        if "코스피 200" in index_name:
-            target_codes = ["1001"]
-        elif "코스닥 150" in index_name:
-            # 💡 1035는 KOSPI 50이었습니다! 코스닥 150의 실제 pykrx 코드는 '203' 입니다.
-            target_codes = ["2001"] 
+    def _get_index_by_code(self, index_name: str, target_code: str) -> List[str]:
+        """고유 코드를 사용하여 빠르고 정확하게 종목 리스트를 추출"""
+        for i in range(10):
+            date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+            try:
+                res = stock.get_index_portfolio_deposit_file(target_code, date)
+                if res and len(res) > 100: 
+                    logger.info(f"✅ {index_name} 로드 성공 (종목수: {len(res)})")
+                    return res
+            except:
+                continue
 
-        # 1. 하드코딩된 코드로 찌르기
-        for code in target_codes:
-            for i in range(10):
-                date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-                try:
-                    res = stock.get_index_portfolio_deposit_file(code, date)
-                    if res and len(res) > 100: 
-                        logger.info(f"✅ {index_name} 직접 로드 성공 (코드: {code}, 종목수: {len(res)})")
-                        return res
-                except:
-                    continue
-
-        # 2. 거래소가 코드를 바꿨을 경우 검색 (디버깅 강화)
-        logger.warning(f"🚨 {index_name} 기본 코드가 작동하지 않아 이름 검색을 시도합니다.")
-        try:
-            indices = stock.get_index_ticker_list(market_name)
-            
-            for code in indices:
-                name = stock.get_index_ticker_name(code)
-                name_clean = name.replace(" ", "").upper()
-                
-                is_match = False
-                if "코스닥 150" in index_name:
-                    is_match = "150" in name_clean and ("코스닥" in name_clean or "KOSDAQ" in name_clean)
-                elif "코스피 200" in index_name:
-                    is_match = "200" in name_clean and ("코스피" in name_clean or "KOSPI" in name_clean)
-                
-                if is_match and not any(x in name_clean for x in ["선물", "인버스", "레버리지", "TR", "PR"]):
-                    logger.info(f"🔍 후보 지수 발견: {name} (코드: {code}) - 데이터 추출 시도 중...")
-                    for i in range(10):
-                        date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-                        try:
-                            res = stock.get_index_portfolio_deposit_file(code, date)
-                            if res:
-                                if len(res) > 100:
-                                    logger.info(f"✅ {index_name} 검색 로드 성공 (코드: {code}, 종목수: {len(res)})")
-                                    return res
-                                else:
-                                    # 🚨 왜 실패했는지 로그에 남깁니다.
-                                    logger.warning(f"⚠️ {name}({code}) 추출 결과 종목수가 {len(res)}개로 100개 미만이라 패스합니다.")
-                        except:
-                            continue
-        except Exception as e:
-            logger.error(f"🚨 {index_name} 검색 중 오류: {e}")
-            
-        logger.error(f"🚨 {index_name} 추출 최종 실패. 데이터를 가져오지 못했습니다.")
+        logger.error(f"🚨 {index_name} 추출 실패. 데이터를 가져오지 못했습니다.")
         return []
 
     def _get_val(self, data_dict: dict, candidates: List[str]) -> Optional[str]:
@@ -153,7 +111,7 @@ def process_page_kr(page, engine, client):
     
     if not info["name"]: return
 
-    # 🌟 물리적 방어 로직 (시장 교차 검증)
+    # 시장 교차 검증 (안전장치 유지)
     bc_tags = []
     for label, lst in engine.blue_chip_map.items():
         if clean_t in lst:
