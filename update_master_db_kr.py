@@ -37,36 +37,33 @@ class StockAutomationEngineKR:
         
         logger.info(f"✅ 로딩 완료 (주식: {len(self.desc_map)}건, ETF: {len(self.etf_map)}건)")
         
-        # 🌟 지수 데이터 동적 로드 (KOSPI 200, KOSDAQ 150)
+        # 지수 데이터 로드
         self.blue_chip_map = {
             "KOSPI 200": self._get_dynamic_index("KOSPI", "코스피 200"),
             "KOSDAQ 150": self._get_dynamic_index("KOSDAQ", "코스닥 150")
         }
 
-def _get_dynamic_index(self, market_name: str, index_name: str) -> List[str]:
-        """고유 코드를 우선 시도하고, 실패 시 시장에서 동적으로 찾는 무적 로직"""
-        
-        # 1. 🌟 가장 확실한 고유 코드로 먼저 데이터 직접 가져오기 (에러 원천 차단)
+    def _get_dynamic_index(self, market_name: str, index_name: str) -> List[str]:
+        """고유 코드를 우선 시도하고, 실패 시 시장에서 동적으로 찾는 로직"""
         target_codes = []
         if "코스피 200" in index_name:
             target_codes = ["1028"]
         elif "코스닥 150" in index_name:
-            target_codes = ["2035", "1035"] # 코스닥 150의 실제 코드 후보들
+            target_codes = ["2035", "1035"]
 
-        # 하드코딩된 코드로 찌르기
+        # 1. 하드코딩된 코드로 찌르기
         for code in target_codes:
-            for i in range(10): # 최근 10일 이내 영업일 찾기
+            for i in range(10):
                 date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
                 try:
                     res = stock.get_index_portfolio_deposit_file(code, date)
-                    # 50개짜리 엉뚱한 하위 지수(예: 코스피 50)를 걸러내기 위해 종목 수 검증
                     if res and len(res) > 100: 
                         logger.info(f"✅ {index_name} 직접 로드 성공 (코드: {code}, 종목수: {len(res)})")
                         return res
                 except:
                     continue
 
-        # 2. 거래소가 코드를 바꿨을 경우에만 이름으로 시장 전체 검색 (최후의 보루)
+        # 2. 거래소가 코드를 바꿨을 경우 검색 (최후의 보루)
         logger.warning(f"🚨 {index_name} 기본 코드가 작동하지 않아 이름 검색을 시도합니다.")
         try:
             indices = stock.get_index_ticker_list(market_name)
@@ -77,7 +74,6 @@ def _get_dynamic_index(self, market_name: str, index_name: str) -> List[str]:
                 name = stock.get_index_ticker_name(code)
                 name_clean = name.replace(" ", "").upper()
                 
-                # 레버리지, 인버스 등이 아닌 본래 지수 찾기
                 is_kq150 = "150" in name_clean and ("코스닥" in name_clean or "KOSDAQ" in name_clean)
                 is_ks200 = "200" in name_clean and ("코스피" in name_clean or "KOSPI" in name_clean)
                 
