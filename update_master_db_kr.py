@@ -39,8 +39,8 @@ class StockAutomationEngineKR:
         
         # 최적화: 고정된 코드로 즉시 데이터 로드
         self.blue_chip_map = {
-            "KOSPI 200": self._get_index_by_code("코스피 200", "1001"),
-            "KOSDAQ 150": self._get_index_by_code("코스닥 150", "2001")
+            "KOSPI 200": self._get_index_by_code("코스피 200", "1028"),
+            "KOSDAQ 150": self._get_index_by_code("코스닥 150", "2154")
         }
 
     def _get_index_by_code(self, index_name: str, target_code: str) -> List[str]:
