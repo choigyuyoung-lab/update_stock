@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("📡 한국 주식 엔진 시작 (심플 로직 버전)")
+        logger.info("📡 한국 주식 엔진 시작")
         df_desc = fdr.StockListing('KRX-DESC')
         self.desc_map = df_desc.set_index('Code').to_dict('index')
         
@@ -67,7 +67,7 @@ class StockAutomationEngineKR:
         return re.split(r'[-.]', t)[0]
 
 # ---------------------------------------------------------
-# 3. 페이지 처리 로직 (가장 직관적인 IF-THEN)
+# 3. 페이지 처리 로직 (직관적인 우량주 판별)
 # ---------------------------------------------------------
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
@@ -83,21 +83,24 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-    # 🌟 [가장 단순한 우량주 & 벤치마크 판별 로직]
     target_tag = None
     target_benchmark_id = None
 
+    # KOSPI 200 판별
     if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         target_tag = "KOSPI 200"
         target_benchmark_id = BENCHMARK_IDS["KOSPI 200"]
     
+    # KOSDAQ 150 판별
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
         target_tag = "KOSDAQ 150"
         target_benchmark_id = BENCHMARK_IDS["KOSDAQ 150"]
     
+    # 일반 KOSPI 판별
     elif info["market"] == "KOSPI":
-        # 우량주가 아닌 일반 KOSPI 종목
         target_benchmark_id = BENCHMARK_IDS["KOSPI_TOTAL"]
+
+    # (일반 KOSDAQ은 target_benchmark_id가 None이므로 빈칸 유지)
 
     # 업데이트 속성 구성
     update_props = {
@@ -111,7 +114,6 @@ def process_page_kr(page, engine, client):
     if info["kr_ind"] and str(info["kr_ind"]).strip() != "None": 
         update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 태그와 벤치마크 세팅 (조건에 맞으면 넣고, 아니면 비움)
     if "우량주" in props: 
         update_props["우량주"] = {"multi_select": [{"name": target_tag}] if target_tag else []}
         
@@ -125,18 +127,22 @@ def process_page_kr(page, engine, client):
         logger.error(f"   ❌ [KR] {raw_ticker} 실패: {e}")
 
 # ---------------------------------------------------------
-# 4. 메인 실행부
+# 4. 메인 실행부 (🌟 데이터 밀림 방지를 위한 선 수집 후 처리)
 # ---------------------------------------------------------
 def main():
     client = Client(auth=NOTION_TOKEN) 
     engine = StockAutomationEngineKR()
+    
+    logger.info("🔍 노션에서 업데이트할 종목을 끝까지 수집 중입니다. 잠시만 기다려주세요...")
+    
+    all_pages = []
     cursor = None
     
+    # 단계 1: 업데이트 대상 '모두' 수집 (이 과정에서는 노션 데이터를 수정하지 않음)
     while True:
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query_params["start_cursor"] = cursor
         
-        # 필터 로직: 종목명이 비었거나, 시장 벤치마크가 비어있는 항목 무조건 업데이트
         if not IS_FULL_UPDATE:
             query_params["filter"] = {
                 "or": [
@@ -147,17 +153,21 @@ def main():
         
         response = client.databases.query(**query_params) 
         pages = response.get("results", [])
-        if not pages: break
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            for page in pages:
-                executor.submit(process_page_kr, page, engine, client)
-                time.sleep(0.05) 
+        all_pages.extend(pages)
         
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
 
-    logger.info("✨ 완료되었습니다.")
+    logger.info(f"🎯 총 {len(all_pages)}개의 종목을 찾아 업데이트를 시작합니다.")
+
+    # 단계 2: 수집된 종목을 안전하게 일괄 업데이트
+    if all_pages:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            for page in all_pages:
+                executor.submit(process_page_kr, page, engine, client)
+                time.sleep(0.05) 
+    
+    logger.info("✨ 모든 업데이트가 완료되었습니다.")
 
 if __name__ == "__main__":
     main()
