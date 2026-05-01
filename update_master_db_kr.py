@@ -1,7 +1,6 @@
 import os, re, time, logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict, Any, List
 
 import requests
 import pandas as pd
@@ -25,74 +24,41 @@ BENCHMARK_IDS = {
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-HEADERS = {
-    "KR_SECTOR": ['Sector', 'WICS 업종명', '업종'],
-    "KR_INDUSTRY": ['Industry', '주요제품', 'WICS 제품']
-}
-
 # ---------------------------------------------------------
 # 2. 한국 주식 데이터 엔진
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info(f"📡 한국 주식 엔진 시작 (수동 모드: {IS_FULL_UPDATE})")
-        self.session = requests.Session()
-        self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
-        
-        logger.info("⏳ 데이터셋 로딩 및 인덱싱 중...")
+        logger.info("📡 한국 주식 엔진 시작 (심플 로직 버전)")
         df_desc = fdr.StockListing('KRX-DESC')
         self.desc_map = df_desc.set_index('Code').to_dict('index')
         
         df_etf = fdr.StockListing('ETF/KR')
         self.etf_map = df_etf.set_index('Symbol').to_dict('index')
         
-        logger.info("✅ 로딩 완료")
-        
-        self.blue_chip_map = {
-            "KOSPI 200": self._get_index_by_code("코스피 200", "1028"),
-            "KOSDAQ 150": self._get_index_by_code("코스닥 150", "2203")
-        }
+        # 최신 KOSPI 200, KOSDAQ 150 명단 확보
+        self.kospi_200_list = self._get_index_by_code("코스피 200", "1028")
+        self.kosdaq_150_list = self._get_index_by_code("코스닥 150", "2203")
 
-    def _get_index_by_code(self, index_name: str, target_code: str) -> List[str]:
+    def _get_index_by_code(self, index_name: str, target_code: str) -> list:
         for i in range(10):
             date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
             try:
                 res = stock.get_index_portfolio_deposit_file(target_code, date)
-                if res and len(res) > 100: 
-                    return res
+                if res and len(res) > 100: return res
             except:
                 continue
-        logger.error(f"🚨 {index_name} 추출 실패.")
         return []
 
-    def _get_val(self, data_dict: dict, candidates: List[str]) -> Optional[str]:
-        for col in candidates:
-            val = data_dict.get(col)
-            if pd.notna(val) and str(val).strip() != "":
-                return str(val).strip()
-        return None
-
-    def get_stock_detail(self, clean_t: str) -> Dict[str, Any]:
+    def get_stock_detail(self, clean_t: str) -> dict:
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
         if clean_t in self.desc_map:
             item = self.desc_map[clean_t]
-            # 시장(Market) 분류를 엄격하게 파싱
-            raw_market = str(item.get('Market', '')).strip().upper()
-            if "KOSDAQ" in raw_market: mkt = "KOSDAQ"
-            elif "KOSPI" in raw_market: mkt = "KOSPI"
-            else: mkt = raw_market
-            
-            res.update({
-                "name": item.get('Name', ''), "market": mkt,
-                "kr_sector": self._get_val(item, HEADERS['KR_SECTOR']),
-                "kr_ind": self._get_val(item, HEADERS['KR_INDUSTRY'])
-            })
-        if clean_t in self.etf_map:
-            item = self.etf_map[clean_t]
-            res.update({
-                "name": str(item.get('Name', '')), "market": "ETF(KR)",
-                "kr_sector": str(item.get('Category', 'ETF')), "kr_ind": "ETF"
-            })
+            market_raw = str(item.get('Market', '')).upper()
+            res["market"] = "KOSDAQ" if "KOSDAQ" in market_raw else ("KOSPI" if "KOSPI" in market_raw else market_raw)
+            res["name"] = item.get('Name', '')
+            res["kr_sector"] = item.get('Sector') or item.get('WICS 업종명') or item.get('업종')
+            res["kr_ind"] = item.get('Industry') or item.get('주요제품') or item.get('WICS 제품')
         return res
 
     def clean_ticker(self, raw_ticker: str) -> str:
@@ -101,7 +67,7 @@ class StockAutomationEngineKR:
         return re.split(r'[-.]', t)[0]
 
 # ---------------------------------------------------------
-# 3. 페이지 처리 로직
+# 3. 페이지 처리 로직 (가장 직관적인 IF-THEN)
 # ---------------------------------------------------------
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
@@ -111,55 +77,50 @@ def process_page_kr(page, engine, client):
     if not ticker_rich: return
     
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
-    is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
-    if not is_kr: return
+    if not (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())): return
 
     clean_t = engine.clean_ticker(raw_ticker)
     info = engine.get_stock_detail(clean_t)
-    market_str = str(info["market"]).upper()
+    if not info["name"]: return
 
-    # 1. 노션 수동 태그 + KRX 최신 태그 병합 (싱크로율 100%)
-    notion_tags = [t["name"] for t in props.get("우량주", {}).get("multi_select", [])]
-    krx_tags = [label for label, lst in engine.blue_chip_map.items() if clean_t in lst]
-    final_tags = list(set(notion_tags + krx_tags))
-
-    bc_tags = []
+    # 🌟 [가장 단순한 우량주 & 벤치마크 판별 로직]
+    target_tag = None
     target_benchmark_id = None
 
-    # 2. 우량주 판별 및 벤치마크 할당
-    if "KOSPI 200" in final_tags and "KOSPI" in market_str:
-        target_benchmark_id = BENCHMARK_IDS.get("KOSPI 200")
-        bc_tags.append({"name": "KOSPI 200"})
-    elif "KOSDAQ 150" in final_tags and "KOSDAQ" in market_str:
-        target_benchmark_id = BENCHMARK_IDS.get("KOSDAQ 150")
-        bc_tags.append({"name": "KOSDAQ 150"})
+    if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
+        target_tag = "KOSPI 200"
+        target_benchmark_id = BENCHMARK_IDS["KOSPI 200"]
+    
+    elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
+        target_tag = "KOSDAQ 150"
+        target_benchmark_id = BENCHMARK_IDS["KOSDAQ 150"]
+    
+    elif info["market"] == "KOSPI":
+        # 우량주가 아닌 일반 KOSPI 종목
+        target_benchmark_id = BENCHMARK_IDS["KOSPI_TOTAL"]
 
-    # 3. 🌟 KOSPI 일반 종목을 위한 안전망 로직 (위에서 할당 안 된 KOSPI 종목 전부)
-    if not target_benchmark_id and "KOSPI" == market_str:
-        target_benchmark_id = BENCHMARK_IDS.get("KOSPI_TOTAL")
-
-    # 4. 업데이트 프로퍼티 강제 구성
+    # 업데이트 속성 구성
     update_props = {
-        "Market": {"select": {"name": market_str}}, 
+        "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, 
+        "Market": {"select": {"name": str(info["market"])}}, 
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
     
-    # 종목명이 비어있을 때만 새로 채우기 (기존 데이터 보존)
-    if info["name"] and not props.get("종목명", {}).get("rich_text", []):
-        update_props["종목명"] = {"rich_text": [{"text": {"content": str(info["name"])}}]}
+    if info["kr_sector"] and str(info["kr_sector"]).strip() != "None": 
+        update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
+    if info["kr_ind"] and str(info["kr_ind"]).strip() != "None": 
+        update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
+    
+    # 태그와 벤치마크 세팅 (조건에 맞으면 넣고, 아니면 비움)
+    if "우량주" in props: 
+        update_props["우량주"] = {"multi_select": [{"name": target_tag}] if target_tag else []}
         
-    if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
-    if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
-    
-    if "우량주" in props: update_props["우량주"] = {"multi_select": bc_tags}
-    
-    # 벤치마크를 무조건 덮어씌움
     if "시장 벤치마크" in props:
         update_props["시장 벤치마크"] = {"relation": [{"id": target_benchmark_id}] if target_benchmark_id else []}
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"   ✅ [KR] {raw_ticker} -> 벤치마크 연결됨 ({target_benchmark_id if target_benchmark_id else '없음/KOSDAQ일반'})")
+        logger.info(f"   ✅ [KR] {raw_ticker}({info['name']}) -> 태그: {target_tag or '없음'}, 벤치마크: {target_benchmark_id or '없음'}")
     except Exception as e:
         logger.error(f"   ❌ [KR] {raw_ticker} 실패: {e}")
 
@@ -175,7 +136,7 @@ def main():
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query_params["start_cursor"] = cursor
         
-        # 🌟 핵심 수정: '종목명'이 비었거나 OR '시장 벤치마크'가 비어있는 모든 항목을 사냥합니다.
+        # 필터 로직: 종목명이 비었거나, 시장 벤치마크가 비어있는 항목 무조건 업데이트
         if not IS_FULL_UPDATE:
             query_params["filter"] = {
                 "or": [
@@ -196,7 +157,7 @@ def main():
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
 
-    logger.info("✨ 모든 업데이트가 완료되었습니다.")
+    logger.info("✨ 완료되었습니다.")
 
 if __name__ == "__main__":
     main()
