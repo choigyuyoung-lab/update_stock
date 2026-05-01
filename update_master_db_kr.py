@@ -158,6 +158,8 @@ def process_page_kr(page, engine, client):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
+        # target_benchmark_id가 정상적으로 생성되는지 확인하는 로그 추가
+        logger.info(f"   🔍 [{raw_ticker}] 매칭된 지수 ID: {target_benchmark_id}")
         logger.info(f"   ✅ [KR] {raw_ticker} ({info['name']}) 업데이트 완료")
     except Exception as e:
         logger.error(f"   ❌ [KR] {raw_ticker} 실패: {e}")
