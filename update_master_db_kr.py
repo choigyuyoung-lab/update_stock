@@ -46,7 +46,7 @@ class StockAutomationEngineKR:
         df_etf = fdr.StockListing('ETF/KR')
         self.etf_map = df_etf.set_index('Symbol').to_dict('index')
         
-        logger.info(f"✅ 로딩 완료")
+        logger.info("✅ 로딩 완료")
         
         self.blue_chip_map = {
             "KOSPI 200": self._get_index_by_code("코스피 200", "1028"),
@@ -76,7 +76,12 @@ class StockAutomationEngineKR:
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
         if clean_t in self.desc_map:
             item = self.desc_map[clean_t]
-            mkt = "KOSDAQ" if "KOSDAQ" in str(item.get('Market', '')) else str(item.get('Market', '기타'))
+            # 시장(Market) 분류를 엄격하게 파싱
+            raw_market = str(item.get('Market', '')).strip().upper()
+            if "KOSDAQ" in raw_market: mkt = "KOSDAQ"
+            elif "KOSPI" in raw_market: mkt = "KOSPI"
+            else: mkt = raw_market
+            
             res.update({
                 "name": item.get('Name', ''), "market": mkt,
                 "kr_sector": self._get_val(item, HEADERS['KR_SECTOR']),
@@ -96,7 +101,7 @@ class StockAutomationEngineKR:
         return re.split(r'[-.]', t)[0]
 
 # ---------------------------------------------------------
-# 3. 페이지 처리 로직 (100% 동기화 로직 적용)
+# 3. 페이지 처리 로직
 # ---------------------------------------------------------
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
@@ -111,64 +116,50 @@ def process_page_kr(page, engine, client):
 
     clean_t = engine.clean_ticker(raw_ticker)
     info = engine.get_stock_detail(clean_t)
-    
-    # 만약 파이썬 API 문제로 종목명을 못 가져왔더라도, 기존 노션 이름을 살려 업데이트를 강행합니다.
-    if not info["name"]:
-        existing_name = props.get("종목명", {}).get("rich_text", [])
-        if existing_name:
-            info["name"] = existing_name[0]["plain_text"]
-        else:
-            return
+    market_str = str(info["market"]).upper()
 
-    # 🌟 1. 사용자님 아이디어 적용: 노션에 이미 적힌 '우량주' 태그를 강제로 가져옴
-    notion_tags = []
-    if "우량주" in props:
-        notion_tags = [t["name"] for t in props["우량주"].get("multi_select", [])]
-
-    # 🌟 2. 파이썬(pykrx)에서 새로 가져온 태그 확인
-    krx_tags = []
-    for label, lst in engine.blue_chip_map.items():
-        if clean_t in lst:
-            krx_tags.append(label)
-
-    # 🌟 3. 노션 태그와 최신 태그를 합침 (둘 중 하나라도 'KOSDAQ 150'이 있으면 인정)
-    final_tag_names = list(set(notion_tags + krx_tags))
+    # 1. 노션 수동 태그 + KRX 최신 태그 병합 (싱크로율 100%)
+    notion_tags = [t["name"] for t in props.get("우량주", {}).get("multi_select", [])]
+    krx_tags = [label for label, lst in engine.blue_chip_map.items() if clean_t in lst]
+    final_tags = list(set(notion_tags + krx_tags))
 
     bc_tags = []
     target_benchmark_id = None
 
-    for tag in final_tag_names:
-        # 시장 교차 검증 (안전장치 유지)
-        if "KOSDAQ" in tag and info["market"] != "KOSDAQ": continue
-        if "KOSPI" in tag and info["market"] != "KOSPI": continue
-        
-        bc_tags.append({"name": tag})
-        
-        # 🌟 4. [핵심] 확정된 태그를 바탕으로 벤치마크 무조건 할당 (오류 원천 차단)
-        if tag == "KOSPI 200":
-            target_benchmark_id = BENCHMARK_IDS.get("KOSPI 200")
-        elif tag == "KOSDAQ 150":
-            target_benchmark_id = BENCHMARK_IDS.get("KOSDAQ 150")
+    # 2. 우량주 판별 및 벤치마크 할당
+    if "KOSPI 200" in final_tags and "KOSPI" in market_str:
+        target_benchmark_id = BENCHMARK_IDS.get("KOSPI 200")
+        bc_tags.append({"name": "KOSPI 200"})
+    elif "KOSDAQ 150" in final_tags and "KOSDAQ" in market_str:
+        target_benchmark_id = BENCHMARK_IDS.get("KOSDAQ 150")
+        bc_tags.append({"name": "KOSDAQ 150"})
 
-    # 🌟 5. 우량주가 아닌(없음) 코스피 종목 처리
-    if not target_benchmark_id and info["market"] == "KOSPI":
+    # 3. 🌟 KOSPI 일반 종목을 위한 안전망 로직 (위에서 할당 안 된 KOSPI 종목 전부)
+    if not target_benchmark_id and "KOSPI" == market_str:
         target_benchmark_id = BENCHMARK_IDS.get("KOSPI_TOTAL")
 
-    # 업데이트 프로퍼티 강제 구성 (이름이 조금이라도 틀리면 튕기도록 하여 조용히 누락되는 것 방지)
+    # 4. 업데이트 프로퍼티 강제 구성
     update_props = {
-        "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, 
-        "Market": {"select": {"name": str(info["market"])}}, 
-        "우량주": {"multi_select": bc_tags},
-        "시장 벤치마크": {"relation": [{"id": target_benchmark_id}] if target_benchmark_id else []},
+        "Market": {"select": {"name": market_str}}, 
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
     
+    # 종목명이 비어있을 때만 새로 채우기 (기존 데이터 보존)
+    if info["name"] and not props.get("종목명", {}).get("rich_text", []):
+        update_props["종목명"] = {"rich_text": [{"text": {"content": str(info["name"])}}]}
+        
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
+    
+    if "우량주" in props: update_props["우량주"] = {"multi_select": bc_tags}
+    
+    # 벤치마크를 무조건 덮어씌움
+    if "시장 벤치마크" in props:
+        update_props["시장 벤치마크"] = {"relation": [{"id": target_benchmark_id}] if target_benchmark_id else []}
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"   ✅ [KR] {raw_ticker} ({info['name']}) -> 벤치마크 연결 완료")
+        logger.info(f"   ✅ [KR] {raw_ticker} -> 벤치마크 연결됨 ({target_benchmark_id if target_benchmark_id else '없음/KOSDAQ일반'})")
     except Exception as e:
         logger.error(f"   ❌ [KR] {raw_ticker} 실패: {e}")
 
@@ -184,8 +175,14 @@ def main():
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query_params["start_cursor"] = cursor
         
+        # 🌟 핵심 수정: '종목명'이 비었거나 OR '시장 벤치마크'가 비어있는 모든 항목을 사냥합니다.
         if not IS_FULL_UPDATE:
-            query_params["filter"] = {"property": "종목명", "rich_text": {"is_empty": True}}
+            query_params["filter"] = {
+                "or": [
+                    {"property": "종목명", "rich_text": {"is_empty": True}},
+                    {"property": "시장 벤치마크", "relation": {"is_empty": True}}
+                ]
+            }
         
         response = client.databases.query(**query_params) 
         pages = response.get("results", [])
