@@ -16,11 +16,11 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 IS_FULL_UPDATE = os.environ.get("IS_FULL_UPDATE", "False").lower() == "true"
 
-# 🌟 [필수 설정] 노션에서 만든 각 지수 페이지의 32자리 ID를 입력하세요[cite: 14]
+# 🌟 사용자님이 확보하신 벤치마크 페이지 ID 적용 완료[cite: 2]
 BENCHMARK_IDS = {
-    "KOSPI 200": "2f0f59dbdb5b81b98fecc95376dbc921",     # 티커 069500 페이지 ID
-    "KOSDAQ 150": "2f8f59dbdb5b80dc984ccb32f316dd1f",   # 티커 229200 페이지 ID
-    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759"  # 티커 226490(KODEX 코스피) 등 페이지 ID
+    "KOSPI 200": "2f0f59dbdb5b81b98fecc95376dbc921",
+    "KOSDAQ 150": "2f8f59dbdb5b80dc984ccb32f316dd1f",
+    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759"
 }
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -49,7 +49,7 @@ class StockAutomationEngineKR:
         
         logger.info(f"✅ 로딩 완료 (주식: {len(self.desc_map)}건, ETF: {len(self.etf_map)}건)")
         
-        # 최적화: 고정된 코드로 즉시 데이터 로드
+        # 최적화: 고정된 코드로 즉시 데이터 로드[cite: 2]
         self.blue_chip_map = {
             "KOSPI 200": self._get_index_by_code("코스피 200", "1028"),
             "KOSDAQ 150": self._get_index_by_code("코스닥 150", "2203")
@@ -104,14 +104,14 @@ class StockAutomationEngineKR:
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
     
-    # 🌟 [수정] 티커가 페이지 제목(Title)인 경우를 최우선으로 처리
+    # 🌟 티커가 페이지 제목(Title)인 경우 최우선 처리[cite: 2]
     ticker_prop = props.get("티커", {}) or props.get("Ticker", {})
     ticker_rich = ticker_prop.get("title") or ticker_prop.get("rich_text")
     if not ticker_rich: return
     
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     
-    # 한국 주식 판별[cite: 2, 11]
+    # 한국 주식 판별
     is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
     if not is_kr: return
 
@@ -119,25 +119,30 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-    # 1. 우량주 태그 및 벤치마크 ID 판단
+    # 1. 🌟 [핵심] 우량주 태그와 벤치마크 ID를 단일 로직으로 동시 판단[cite: 2]
     bc_tags = []
     target_benchmark_id = None
     
     for label, lst in engine.blue_chip_map.items():
         if clean_t in lst:
-            # 시장 교차 검증[cite: 6]
+            # 시장 교차 검증 (안전장치)
             if "KOSDAQ" in label and info["market"] != "KOSDAQ": continue
             if "KOSPI" in label and info["market"] != "KOSPI": continue
             
+            # 우량주 태그와 벤치마크 ID 동시 설정
             bc_tags.append({"name": label})
-            target_benchmark_id = BENCHMARK_IDS.get(label) # KOSPI 200 또는 KOSDAQ 150 매칭[cite: 14]
+            target_benchmark_id = BENCHMARK_IDS.get(label)
+            
+            # 🔍 예외 처리: 태그는 찾았으나 ID 매핑에 실패한 경우
+            if not target_benchmark_id:
+                logger.warning(f"   ⚠️ [{raw_ticker}] '{label}' 소속은 확인되었으나, BENCHMARK_IDS에서 ID를 찾을 수 없습니다.")
             break
 
-    # 2. 우량주가 아닌 KOSPI 종목은 'KOSPI 전체'로 매칭 (KOSDAQ 전체는 제외)[cite: 6]
+    # 2. 우량주가 아닌 KOSPI 종목은 'KOSPI 전체'로 매칭 (KOSDAQ 전체는 제외)[cite: 2]
     if not target_benchmark_id and info["market"] == "KOSPI":
         target_benchmark_id = BENCHMARK_IDS.get("KOSPI_TOTAL")
 
-    # 3. 업데이트 프로퍼티 구성[cite: 11, 14, 15]
+    # 3. 업데이트 프로퍼티 구성[cite: 2]
     update_props = {
         "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, 
         "Market": {"select": {"name": str(info["market"])}}, 
@@ -146,21 +151,25 @@ def process_page_kr(page, engine, client):
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
     
-    # 우량주 멀티 셀렉트 업데이트[cite: 6]
+    # 4. 구성된 데이터를 최종적으로 딕셔너리에 삽입[cite: 2]
+    # 우량주 열이 노션에 존재한다면, 새로운 태그를 덮어씌움 (편출입 반영)
     if "우량주" in props: 
         update_props["우량주"] = {"multi_select": bc_tags}
     
-    # 🌟 [핵심] '시장 벤치마크' 관계형 자동 설정[cite: 14]
+    # 시장 벤치마크 열이 노션에 존재한다면, 관계형 덮어씌움
     if "시장 벤치마크" in props:
         update_props["시장 벤치마크"] = {
             "relation": [{"id": target_benchmark_id}] if target_benchmark_id else []
         }
 
+    # 5. 노션 서버에 업데이트 실행[cite: 2]
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        # target_benchmark_id가 정상적으로 생성되는지 확인하는 로그 추가
-        logger.info(f"   🔍 [{raw_ticker}] 매칭된 지수 ID: {target_benchmark_id}")
         logger.info(f"   ✅ [KR] {raw_ticker} ({info['name']}) 업데이트 완료")
+        
+        # 디버깅용 로그 (필요 시 주석 처리 가능)[cite: 2]
+        if target_benchmark_id:
+            logger.info(f"      🔗 벤치마크 연결됨: {target_benchmark_id}")
     except Exception as e:
         logger.error(f"   ❌ [KR] {raw_ticker} 실패: {e}")
 
@@ -176,7 +185,7 @@ def main():
         query_params = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query_params["start_cursor"] = cursor
         
-        # '종목명'이 비어있는 것만 업데이트(자동)하거나 전체 업데이트(수동)[cite: 15]
+        # '종목명'이 비어있는 것만 업데이트(자동)하거나 전체 업데이트(수동)[cite: 2]
         if not IS_FULL_UPDATE:
             query_params["filter"] = {"property": "종목명", "rich_text": {"is_empty": True}}
         
