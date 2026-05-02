@@ -14,6 +14,7 @@ from notion_client import Client
 # ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
+# 🌟 전체 업데이트가 필요하다면 True로 변경해서 한 번 실행하세요.
 IS_FULL_UPDATE = os.environ.get("IS_FULL_UPDATE", "False").lower() == "true"
 
 # [시장 벤치마크 ID]
@@ -23,7 +24,7 @@ BENCHMARK_IDS = {
     "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759"
 }
 
-# 🌟 [산업 벤치마크 ID] ETF 갯수가 늘어나도 안전하게 처리됩니다.[cite: 2]
+# 🌟 [산업 벤치마크 ID]
 INDUSTRY_ETF_MAP = {
     "102970": "2f8f59dbdb5b8001a863e3b0d6c9f5e3",  # KODEX 증권
     "466920": "313f59dbdb5b80c688f2daed09ab727b",  # SOL 조선TOP3플러스
@@ -42,24 +43,28 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. 한국 주식 데이터 엔진 (하이브리드 정보 수집 및 분할 처리)
+# 2. 한국 주식 데이터 엔진 (3중 하이브리드 엔진)
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("📡 주식 엔진 가동 (하이브리드 수집 및 분할 처리 모드)")
+        logger.info("📡 주식 엔진 가동 (3중 하이브리드 수집 & 분할 처리)")
         
-        # 1. KRX 전체 목록 (ETF 이름 확보용)
+        # 1. KRX 전체 목록 (기본 이름 확보용)
         df_all = fdr.StockListing('KRX')
         self.all_map = df_all.set_index('Code').to_dict('index')
         
-        # 2. KRX-DESC 목록 (일반 기업의 섹터/산업 정보 확보용)[cite: 2]
+        # 2. KRX-DESC 목록 (일반 기업의 섹터/산업 정보)
         df_desc = fdr.StockListing('KRX-DESC')
         self.desc_map = df_desc.set_index('Code').to_dict('index')
+        
+        # 3. ETF/KR 목록 (🌟 Source 4 통합: ETF 전용 예쁜 데이터 덮어쓰기용)
+        df_etf = fdr.StockListing('ETF/KR')
+        self.etf_map = df_etf.set_index('Symbol').to_dict('index')
         
         self.kospi_200_list = self._get_index_by_code("1028")
         self.kosdaq_150_list = self._get_index_by_code("2203")
         
-        # ⚡ 10개 이상의 ETF를 안전하게 분할 수집
+        # ⚡ 안전한 5개씩 분할 수집 (Source 5 통합)
         self.industry_lookup = self._build_industry_lookup_chunked()
 
     def _get_index_by_code(self, target_code: str) -> list:
@@ -72,7 +77,6 @@ class StockAutomationEngineKR:
         return []
 
     def _fetch_etf_data(self, ticker, n_id):
-        """개별 ETF의 비중 데이터를 가져옵니다.[cite: 2]"""
         try:
             pdf = stock.get_etf_portfolio_deposit_file(ticker)
             if pdf is not None and not pdf.empty:
@@ -83,50 +87,50 @@ class StockAutomationEngineKR:
         return []
 
     def _build_industry_lookup_chunked(self):
-        """🌟 ETF 리스트를 5개씩 쪼개어 분할 수집합니다 (Connection Pool 경고 방지)"""
-        logger.info(f"⚡ 총 {len(INDUSTRY_ETF_MAP)}개 산업군 데이터 수집을 시작합니다 (5개씩 분할 진행)...")
+        logger.info(f"⚡ 총 {len(INDUSTRY_ETF_MAP)}개 산업군 데이터 수집을 시작합니다 (5개씩 분할)...")
         temp_mapping = {}
         etf_items = list(INDUSTRY_ETF_MAP.items())
-        chunk_size = 5  # 통신망 과부하 방지를 위한 묶음 크기
+        chunk_size = 5 
 
         for i in range(0, len(etf_items), chunk_size):
             chunk = etf_items[i:i + chunk_size]
-            logger.info(f"   ⏳ {i+1} ~ {min(i+chunk_size, len(etf_items))}번째 ETF 그룹 수집 중...")
-            
-            # 각 청크(묶음) 내에서만 병렬 처리 수행[cite: 2]
             with ThreadPoolExecutor(max_workers=len(chunk)) as executor:
                 futures = {executor.submit(self._fetch_etf_data, t, i_id): t for t, i_id in chunk}
                 for future in as_completed(futures):
-                    results = future.result()
-                    for ticker, (n_id, weight) in results:
+                    for ticker, (n_id, weight) in future.result():
                         if ticker not in temp_mapping or weight > temp_mapping[ticker][1]:
                             temp_mapping[ticker] = (n_id, weight)
-            
-            # 네트워크 휴식 부여 (연결 풀 리셋)
-            time.sleep(1.0) 
+            time.sleep(1.0) # 통신망 휴식
         
         return {t: d[0] for t, d in temp_mapping.items()}
 
     def get_stock_detail(self, clean_t: str) -> dict:
-        """KRX(전체)와 KRX-DESC(상세) 데이터를 교차 검증하여 완벽한 정보를 구성합니다."""
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
         
-        # 1단계: ETF를 포함한 모든 종목에서 정확한 이름과 시장(Market) 정보 확인
+        # 1단계: 전체 종목에서 이름과 기본 시장 정보
         if clean_t in self.all_map:
             item = self.all_map[clean_t]
             m_raw = str(item.get('Market', '')).upper()
             res["market"] = "KOSDAQ" if "KOSDAQ" in m_raw else ("KOSPI" if "KOSPI" in m_raw else m_raw)
             res["name"] = item.get('Name', '')
 
-        # 2단계: 기업 상세 정보에서 WICS 등 산업 분류 정보 덧붙이기[cite: 2]
+        # 2단계: 일반 기업 상세 정보에서 섹터/산업 추가
         if clean_t in self.desc_map:
             desc_item = self.desc_map[clean_t]
-            if not res["name"]:  # (예외 처리) 혹시 1단계에서 이름을 못 찾은 경우
+            if not res["name"]: 
                 res["name"] = desc_item.get('Name', '')
                 m_raw = str(desc_item.get('Market', '')).upper()
                 res["market"] = "KOSDAQ" if "KOSDAQ" in m_raw else ("KOSPI" if "KOSPI" in m_raw else m_raw)
             res["kr_sector"] = desc_item.get('Sector') or desc_item.get('WICS 업종명')
             res["kr_ind"] = desc_item.get('Industry') or desc_item.get('WICS 제품')
+            
+        # 🌟 3단계(핵심): ETF 목록에 있다면 정보를 깔끔하게 덮어쓰기 (Source 4 로직)
+        if clean_t in self.etf_map:
+            etf_item = self.etf_map[clean_t]
+            res["name"] = str(etf_item.get('Name', res["name"]))
+            res["market"] = "ETF(KR)"
+            res["kr_sector"] = str(etf_item.get('Category', 'ETF'))
+            res["kr_ind"] = "ETF"
             
         return res
 
@@ -152,7 +156,7 @@ def process_page_kr(page, engine, client):
     if not info["name"]: 
         return
 
-    # 시장 벤치마크 및 산업 벤치마크 결정[cite: 2]
+    # 시장 벤치마크 및 산업 벤치마크(산업BM) 결정
     tag, m_id = None, None
     if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
@@ -163,7 +167,7 @@ def process_page_kr(page, engine, client):
 
     ind_id = engine.industry_lookup.get(clean_t)
 
-    # 업데이트 데이터 패키징[cite: 2]
+    # 업데이트 데이터 패키징
     update_props = {
         "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, 
         "Market": {"select": {"name": str(info["market"])}}, 
@@ -172,13 +176,15 @@ def process_page_kr(page, engine, client):
     
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
+    
+    # 노션 속성명 (스크린샷 기준)
     if "우량주" in props: update_props["우량주"] = {"multi_select": [{"name": tag}] if tag else []}
-    if "시장 벤치마크" in props: update_props["시장 벤치마크"] = {"relation": [{"id": m_id}] if m_id else []}
-    if "산업 벤치마크" in props: update_props["산업 벤치마크"] = {"relation": [{"id": ind_id}] if ind_id else []}
+    if "시장BM" in props: update_props["시장BM"] = {"relation": [{"id": m_id}] if m_id else []}
+    if "산업BM" in props: update_props["산업BM"] = {"relation": [{"id": ind_id}] if ind_id else []}
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t})")
+        logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t}) -> Market: {info['market']}")
     except Exception as e:
         logger.error(f"   ❌ [FAIL] {clean_t}: {e}")
 
@@ -196,19 +202,23 @@ def main():
         query = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query["start_cursor"] = cursor
         
-        # 종목명이나 벤치마크가 없는 행 수집[cite: 2]
+        # 종목명이나 산업BM이 비어있는 행 우선 수집
         if not IS_FULL_UPDATE:
             query["filter"] = {
                 "or": [
                     {"property": "종목명", "rich_text": {"is_empty": True}},
-                    {"property": "산업 벤치마크", "relation": {"is_empty": True}}
+                    {"property": "산업BM", "relation": {"is_empty": True}}
                 ]
             }
         
-        response = client.databases.query(**query) 
-        all_pages.extend(response.get("results", []))
-        if not response.get("has_more"): break
-        cursor = response.get("next_cursor")
+        try:
+            response = client.databases.query(**query) 
+            all_pages.extend(response.get("results", []))
+            if not response.get("has_more"): break
+            cursor = response.get("next_cursor")
+        except Exception as e:
+            logger.error(f"🚨 노션 DB 조회 실패: {e}")
+            break
 
     logger.info(f"🎯 총 {len(all_pages)}개 종목 분석 및 업데이트를 시작합니다.")
 
@@ -218,7 +228,7 @@ def main():
                 executor.submit(process_page_kr, page, engine, client)
                 time.sleep(0.05) 
     
-    logger.info("✨ 모든 주도주 벤치마크 데이터 업데이트가 완료되었습니다.")
+    logger.info("✨ 모든 주도주 및 ETF 벤치마크 데이터 업데이트가 완료되었습니다.")
 
 if __name__ == "__main__":
     main()
