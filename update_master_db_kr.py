@@ -29,7 +29,12 @@ INDUSTRY_ETF_MAP = {
     "455850": "324f59dbdb5b809f9791f696ad2bc7d9",  # SOL AI반도체소부장
     "396500": "354f59dbdb5b80afb3cfc82a7f037603",  # TIGER 반도체TOP10
     "487240": "2f0f59dbdb5b8188b60dd5784982ec23",  # KODEX AI전력핵심설비
-    "0091P0": "334f59dbdb5b804d8216df3dce96aac0"   # TIGER 코리아원자력
+    "0091P0": "334f59dbdb5b804d8216df3dce96aac0",   # TIGER 코리아원자력
+    "305720": "353f59dbdb5b8021aba5e9a6eeb6af6e",   # KODEX 2차전지산업
+    "244580": "354f59dbdb5b8015b207d14edc1118b7",   # KODEX 바이오
+    "091170": "353f59dbdb5b80eda374ced58bdbc1b8",   # KODEX 은행
+    "117700": "354f59dbdb5b8069bdc7e38f4cd66cb6",   # KODEX 건설
+    "385510": "354f59dbdb5b80c1afd4f70f8f471215"   # KODEX 신재생에너지액티브
 }
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
