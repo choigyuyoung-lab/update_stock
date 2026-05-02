@@ -23,7 +23,7 @@ BENCHMARK_IDS = {
     "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759"
 }
 
-# 🌟 [산업 벤치마크 ID] 사용자님이 제공하신 티커 그대로 유지
+# 🌟 [산업 벤치마크 ID] ETF 갯수가 늘어나도 안전하게 처리됩니다.[cite: 2]
 INDUSTRY_ETF_MAP = {
     "102970": "2f8f59dbdb5b8001a863e3b0d6c9f5e3",  # KODEX 증권
     "466920": "313f59dbdb5b80c688f2daed09ab727b",  # SOL 조선TOP3플러스
@@ -42,20 +42,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. 한국 주식 데이터 엔진 (병렬 처리 고도화)
+# 2. 한국 주식 데이터 엔진 (하이브리드 정보 수집 및 분할 처리)
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("📡 주식 엔진 가동 (병렬 데이터 수집 모드)")
-        # WICS 분류 및 종목 마스터 데이터 수집[cite: 1, 2]
+        logger.info("📡 주식 엔진 가동 (하이브리드 수집 및 분할 처리 모드)")
+        
+        # 1. KRX 전체 목록 (ETF 이름 확보용)
+        df_all = fdr.StockListing('KRX')
+        self.all_map = df_all.set_index('Code').to_dict('index')
+        
+        # 2. KRX-DESC 목록 (일반 기업의 섹터/산업 정보 확보용)[cite: 2]
         df_desc = fdr.StockListing('KRX-DESC')
         self.desc_map = df_desc.set_index('Code').to_dict('index')
         
         self.kospi_200_list = self._get_index_by_code("1028")
         self.kosdaq_150_list = self._get_index_by_code("2203")
         
-        # ⚡ 산업 벤치마크 병렬 분석
-        self.industry_lookup = self._build_industry_lookup_parallel()
+        # ⚡ 10개 이상의 ETF를 안전하게 분할 수집
+        self.industry_lookup = self._build_industry_lookup_chunked()
 
     def _get_index_by_code(self, target_code: str) -> list:
         for i in range(5):
@@ -67,43 +72,62 @@ class StockAutomationEngineKR:
         return []
 
     def _fetch_etf_data(self, ticker, n_id):
-        """개별 ETF의 비중 데이터를 안전하게 가져옵니다."""
+        """개별 ETF의 비중 데이터를 가져옵니다.[cite: 2]"""
         try:
             pdf = stock.get_etf_portfolio_deposit_file(ticker)
             if pdf is not None and not pdf.empty:
                 w_col = '비중' if '비중' in pdf.columns else pdf.columns[0]
                 return [(t, (n_id, r[w_col])) for t, r in pdf.iterrows()]
         except Exception:
-            # 티커가 일치하지 않더라도 프로그램이 중단되지 않도록 예외 처리
             return []
         return []
 
-    def _build_industry_lookup_parallel(self):
-        """ThreadPool을 활용해 11개 ETF 정보를 동시에 분석합니다.[cite: 2]"""
-        logger.info(f"⚡ {len(INDUSTRY_ETF_MAP)}개 산업군 데이터 병렬 로드 중...")
+    def _build_industry_lookup_chunked(self):
+        """🌟 ETF 리스트를 5개씩 쪼개어 분할 수집합니다 (Connection Pool 경고 방지)"""
+        logger.info(f"⚡ 총 {len(INDUSTRY_ETF_MAP)}개 산업군 데이터 수집을 시작합니다 (5개씩 분할 진행)...")
         temp_mapping = {}
-        
-        with ThreadPoolExecutor(max_workers=11) as executor:
-            futures = {executor.submit(self._fetch_etf_data, t, i): t for t, i in INDUSTRY_ETF_MAP.items()}
-            for future in as_completed(futures):
-                results = future.result()
-                for ticker, (n_id, weight) in results:
-                    # 중복 종목 시 비중이 더 큰 산업군을 선택[cite: 2]
-                    if ticker not in temp_mapping or weight > temp_mapping[ticker][1]:
-                        temp_mapping[ticker] = (n_id, weight)
+        etf_items = list(INDUSTRY_ETF_MAP.items())
+        chunk_size = 5  # 통신망 과부하 방지를 위한 묶음 크기
+
+        for i in range(0, len(etf_items), chunk_size):
+            chunk = etf_items[i:i + chunk_size]
+            logger.info(f"   ⏳ {i+1} ~ {min(i+chunk_size, len(etf_items))}번째 ETF 그룹 수집 중...")
+            
+            # 각 청크(묶음) 내에서만 병렬 처리 수행[cite: 2]
+            with ThreadPoolExecutor(max_workers=len(chunk)) as executor:
+                futures = {executor.submit(self._fetch_etf_data, t, i_id): t for t, i_id in chunk}
+                for future in as_completed(futures):
+                    results = future.result()
+                    for ticker, (n_id, weight) in results:
+                        if ticker not in temp_mapping or weight > temp_mapping[ticker][1]:
+                            temp_mapping[ticker] = (n_id, weight)
+            
+            # 네트워크 휴식 부여 (연결 풀 리셋)
+            time.sleep(1.0) 
         
         return {t: d[0] for t, d in temp_mapping.items()}
 
     def get_stock_detail(self, clean_t: str) -> dict:
+        """KRX(전체)와 KRX-DESC(상세) 데이터를 교차 검증하여 완벽한 정보를 구성합니다."""
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
-        if clean_t in self.desc_map:
-            item = self.desc_map[clean_t]
+        
+        # 1단계: ETF를 포함한 모든 종목에서 정확한 이름과 시장(Market) 정보 확인
+        if clean_t in self.all_map:
+            item = self.all_map[clean_t]
             m_raw = str(item.get('Market', '')).upper()
             res["market"] = "KOSDAQ" if "KOSDAQ" in m_raw else ("KOSPI" if "KOSPI" in m_raw else m_raw)
             res["name"] = item.get('Name', '')
-            # WICS 정보를 우선적으로 채택
-            res["kr_sector"] = item.get('Sector') or item.get('WICS 업종명')
-            res["kr_ind"] = item.get('Industry') or item.get('WICS 제품')
+
+        # 2단계: 기업 상세 정보에서 WICS 등 산업 분류 정보 덧붙이기[cite: 2]
+        if clean_t in self.desc_map:
+            desc_item = self.desc_map[clean_t]
+            if not res["name"]:  # (예외 처리) 혹시 1단계에서 이름을 못 찾은 경우
+                res["name"] = desc_item.get('Name', '')
+                m_raw = str(desc_item.get('Market', '')).upper()
+                res["market"] = "KOSDAQ" if "KOSDAQ" in m_raw else ("KOSPI" if "KOSPI" in m_raw else m_raw)
+            res["kr_sector"] = desc_item.get('Sector') or desc_item.get('WICS 업종명')
+            res["kr_ind"] = desc_item.get('Industry') or desc_item.get('WICS 제품')
+            
         return res
 
     def clean_ticker(self, raw_ticker: str) -> str:
@@ -124,9 +148,11 @@ def process_page_kr(page, engine, client):
     raw_t = ticker_rich[0]["plain_text"].strip().upper()
     clean_t = engine.clean_ticker(raw_t)
     info = engine.get_stock_detail(clean_t)
-    if not info["name"]: return
+    
+    if not info["name"]: 
+        return
 
-    # 시장 벤치마크 및 산업 벤치마크 결정[cite: 1, 2]
+    # 시장 벤치마크 및 산업 벤치마크 결정[cite: 2]
     tag, m_id = None, None
     if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
@@ -137,7 +163,7 @@ def process_page_kr(page, engine, client):
 
     ind_id = engine.industry_lookup.get(clean_t)
 
-    # 업데이트 데이터 패키징[cite: 1]
+    # 업데이트 데이터 패키징[cite: 2]
     update_props = {
         "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, 
         "Market": {"select": {"name": str(info["market"])}}, 
@@ -170,7 +196,7 @@ def main():
         query = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query["start_cursor"] = cursor
         
-        # 최적화 필터: 종목명이나 산업 벤치마크가 비어있는 행만 수집[cite: 2]
+        # 종목명이나 벤치마크가 없는 행 수집[cite: 2]
         if not IS_FULL_UPDATE:
             query["filter"] = {
                 "or": [
