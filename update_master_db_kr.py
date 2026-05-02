@@ -36,7 +36,10 @@ INDUSTRY_ETF_MAP = {
     "244580": "354f59dbdb5b8015b207d14edc1118b7",  # KODEX 바이오
     "091170": "353f59dbdb5b80eda374ced58bdbc1b8",  # KODEX 은행
     "117700": "354f59dbdb5b8069bdc7e38f4cd66cb6",  # KODEX 건설
-    "385510": "354f59dbdb5b80c1afd4f70f8f471215"   # KODEX 신재생에너지액티브
+    "385510": "354f59dbdb5b80c1afd4f70f8f471215",   # KODEX 신재생에너지액티브
+    "449450": "313f59dbdb5b80b49b3ae15f74d0c264",   # PLUS K방산
+    "091180": "353f59dbdb5b801c9161c510d2c33986",   # KODEX 자동차
+    "139260": "354f59dbdb5b80f8a75ae3942eb6c502"   # TIGER 200IT
 }
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
