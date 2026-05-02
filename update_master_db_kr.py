@@ -24,12 +24,12 @@ BENCHMARK_IDS = {
 
 # 🌟 [산업 벤치마크 ID] 사용자님이 제공하신 노션 페이지 ID 매핑
 INDUSTRY_ETF_MAP = {
-    "091220": "2f8f59dbdb5b8001a863e3b0d6c9f5e3",  # KODEX 증권
-    "466910": "313f59dbdb5b80c688f2daed09ab727b",  # SOL 조선TOP3플러스
-    "455840": "324f59dbdb5b809f9791f696ad2bc7d9",  # SOL AI반도체소부장
+    "102970": "2f8f59dbdb5b8001a863e3b0d6c9f5e3",  # KODEX 증권
+    "466920": "313f59dbdb5b80c688f2daed09ab727b",  # SOL 조선TOP3플러스
+    "455850": "324f59dbdb5b809f9791f696ad2bc7d9",  # SOL AI반도체소부장
     "396500": "354f59dbdb5b80afb3cfc82a7f037603",  # TIGER 반도체TOP10
-    "482060": "2f0f59dbdb5b8188b60dd5784982ec23",  # KODEX AI전력핵심설비
-    "385530": "334f59dbdb5b804d8216df3dce96aac0"   # TIGER 코리아원자력
+    "487240": "2f0f59dbdb5b8188b60dd5784982ec23",  # KODEX AI전력핵심설비
+    "0091P0": "334f59dbdb5b804d8216df3dce96aac0"   # TIGER 코리아원자력
 }
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
