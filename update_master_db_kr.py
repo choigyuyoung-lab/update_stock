@@ -21,7 +21,8 @@ IS_FULL_UPDATE = os.environ.get("IS_FULL_UPDATE", "False").lower() == "true"
 BENCHMARK_IDS = {
     "KOSPI 200": "2f0f59dbdb5b81b98fecc95376dbc921",
     "KOSDAQ 150": "2f8f59dbdb5b80dc984ccb32f316dd1f",
-    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759"
+    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759",
+    "KODEX_300": "355f59dbdb5b802a9ecbf4a8eef99f2f"
 }
 
 # 🌟 [산업 벤치마크 ID] (14개 대표 ETF)
@@ -128,7 +129,10 @@ def process_page_kr(page, engine, client):
     if not info["name"]: return
 
     tag, m_id = None, None
-    if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
+    if info["market"] == "ETF(KR)":
+        # 🌟 ETF는 무조건 KODEX 300(통합시장)을 벤치마크로 설정
+        m_id = BENCHMARK_IDS["KODEX_300"]
+    elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
         tag, m_id = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"]
