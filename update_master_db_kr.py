@@ -15,7 +15,7 @@ from notion_client import Client
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 # 🌟 시장BM이 비어있는 기존 종목들을 보강하려면 IS_FULL_UPDATE를 False로 두어도 작동합니다.
-IS_FULL_UPDATE = os.environ.get("IS_FULL_UPDATE", "False").lower() == "true"
+IS_FULL_UPDATE = True
 
 # [시장 벤치마크 ID]
 BENCHMARK_IDS = {
