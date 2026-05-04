@@ -5,14 +5,11 @@ import FinanceDataReader as fdr
 from pykrx import stock
 from notion_client import Client
 
-# ---------------------------------------------------------
 # 1. 환경 변수 및 설정
-# ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 IS_FULL_UPDATE = True 
 
-# 🌟 업데이트 제외 지표 티커 4개 (KODEX 200, 코스닥150, KODEX 300, 코스피 지수)
 EXCLUDE_TICKERS = {"069500", "233740", "291680", "226490"}
 
 BENCHMARK_IDS = {
@@ -35,16 +32,13 @@ INDUSTRY_ETF_MAP = {
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------
-# 2. 데이터 엔진 (Python 3.10+ 및 StringIO 방식)[cite: 1]
-# ---------------------------------------------------------
+# 2. 데이터 엔진 (Python 3.10+ 기준)
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("📡 주식 엔진 가동 (로직 완전 분리 모드)")
+        logger.info("📡 주식 엔진 가동 (시장별 로직 엄격 분리)")
         self.all_map = fdr.StockListing('KRX').set_index('Code').to_dict('index')
         self.desc_map = fdr.StockListing('KRX-DESC').set_index('Code').to_dict('index')
         self.etf_map = fdr.StockListing('ETF/KR').set_index('Symbol').to_dict('index')
-        
         self.kospi_200_list = self._get_index_by_code("1028")
         self.kosdaq_150_list = self._get_index_by_code("2203")
         self.industry_lookup = self._build_industry_lookup_chunked()
@@ -89,7 +83,6 @@ class StockAutomationEngineKR:
         if clean_t in self.all_map:
             item = self.all_map[clean_t]
             m_raw = str(item.get('Market', '')).upper()
-            # KOSPI 판별 강화 (STK 등 포함)
             res["market"] = "KOSPI" if any(x in m_raw for x in ["KOSPI", "STK"]) else ("KOSDAQ" if "KOSDAQ" in m_raw else m_raw)
             res["name"] = str(item.get('Name', ''))
         if clean_t in self.desc_map:
@@ -99,9 +92,7 @@ class StockAutomationEngineKR:
             res["kr_ind"] = str(desc_item.get('Industry') or desc_item.get('WICS 제품') or "")
         return res
 
-# ---------------------------------------------------------
 # 3. 로직 분기 핸들러
-# ---------------------------------------------------------
 def format_notion_id(uid):
     if not uid: return None
     u = str(uid).replace("-", "")
@@ -117,22 +108,24 @@ def get_base_props(info):
     if info["kr_ind"]: props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     return props
 
-# 🌟 [핸들러 A] 일반 주식 로직 (지수 및 일반 코스피)
 def handle_stock_update(page, info, engine, client, clean_t, props):
     tag, m_id, m_reason = None, None, "유지"
+    market = info["market"]
+
+    # 🌟 시장별 조건 엄격 분리
+    if market == "KOSPI":
+        if clean_t in engine.kospi_200_list:
+            tag, m_id, m_reason = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"], "KOSPI 200 기록"
+        else:
+            m_id, m_reason = BENCHMARK_IDS["KOSPI_TOTAL"], "일반 KOSPI -> KODEX 코스피 기록"
     
-    # 1. KOSPI 200 판별
-    if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
-        tag, m_id, m_reason = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"], "KOSPI 200 기록"
-    # 2. KOSDAQ 150 판별
-    elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
-        tag, m_id, m_reason = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"], "KOSDAQ 150 기록"
-    # 3. 일반 KOSPI 판별 (KOSPI 200 제외 모든 코스피)
-    elif info["market"] == "KOSPI":
-        m_id, m_reason = BENCHMARK_IDS["KOSPI_TOTAL"], "일반 KOSPI -> KODEX 코스피 기록"
+    elif market == "KOSDAQ":
+        if clean_t in engine.kosdaq_150_list:
+            tag, m_id, m_reason = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"], "KOSDAQ 150 기록"
+        else:
+            m_reason = "일반 KOSDAQ -> 기존 데이터 유지" # m_id가 None이므로 시장BM 업데이트 제외
 
     update_data = get_base_props(info)
-    # 🌟 값이 존재할 때만 딕셔너리에 추가 (삭제 방지)
     if tag: update_data["우량주"] = {"multi_select": [{"name": tag}]}
     if m_id: update_data["시장BM"] = {"relation": [{"id": format_notion_id(m_id)}]}
     
@@ -142,7 +135,6 @@ def handle_stock_update(page, info, engine, client, clean_t, props):
     client.pages.update(page_id=page["id"], properties=update_data)
     logger.info(f"✅ [STOCK] {info['name']}({clean_t}) | {m_reason}")
 
-# 🌟 [핸들러 B] ETF 전용 로직
 def handle_etf_update(page, info, engine, client, clean_t, props):
     m_id = BENCHMARK_IDS["KODEX_300"]
     update_data = get_base_props(info)
@@ -154,9 +146,7 @@ def handle_etf_update(page, info, engine, client, clean_t, props):
     client.pages.update(page_id=page["id"], properties=update_data)
     logger.info(f"✅ [ETF] {info['name']}({clean_t}) | KODEX 300 기록")
 
-# ---------------------------------------------------------
-# 4. 페이지 처리 (분배 및 제외)
-# ---------------------------------------------------------
+# 4. 페이지 처리 핸들러
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
     ticker_prop = props.get("티커") or props.get("Ticker")
@@ -167,16 +157,13 @@ def process_page_kr(page, engine, client):
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     clean_t = str(re.search(r'(\d{6})', raw_ticker).group(1)) if re.search(r'(\d{6})', raw_ticker) else raw_ticker[:6]
     
-    # 🌟 지표 티커 제외 (업데이트 근처에도 못 오게 차단)
-    if clean_t in EXCLUDE_TICKERS:
-        logger.info(f"⏭️ [SKIP] 지표 제외: {clean_t}")
-        return
+    if clean_t in EXCLUDE_TICKERS: return
 
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
     try:
-        # 🌟 입구에서 ETF 여부에 따라 핸들러를 완전히 분리하여 중복 실행 차단
+        # 🌟 입구에서 ETF와 일반 주식을 완벽히 분리하여 간섭 차단
         if info["is_etf"] or info["market"] == "ETF(KR)":
             handle_etf_update(page, info, engine, client, clean_t, props)
         else:
@@ -184,9 +171,7 @@ def process_page_kr(page, engine, client):
     except Exception as e:
         logger.error(f"❌ {info['name']}({clean_t}) 오류: {e}")
 
-# ---------------------------------------------------------
 # 5. 메인 실행
-# ---------------------------------------------------------
 def main():
     client = Client(auth=NOTION_TOKEN)
     engine = StockAutomationEngineKR()
@@ -205,7 +190,7 @@ def main():
             for page in all_pages:
                 executor.submit(process_page_kr, page, engine, client)
                 time.sleep(0.05)
-    logger.info("✨ 로직 분리 및 일반 코스피 업데이트 완료")
+    logger.info("✨ 시장별 로직 완전 분리 업데이트 완료")
 
 if __name__ == "__main__":
     main()
