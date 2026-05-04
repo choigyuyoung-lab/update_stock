@@ -23,7 +23,7 @@ BENCHMARK_IDS = {
     "KOSPI 200": "2f0f59dbdb5b81b98fecc95376dbc921",
     "KOSDAQ 150": "2f8f59dbdb5b80dc984ccb32f316dd1f",
     "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759",
-    "KODEX_300": "355f59dbdb5b802a9ecbf4a8eef99f2f"
+    "KODEX_300": "355f59dbdb5b80879573c5dce4d1e291"
 }
 
 # [산업 벤치마크 ID] (14개 대표 ETF)
