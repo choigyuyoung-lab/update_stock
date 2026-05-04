@@ -21,6 +21,7 @@ BENCHMARK_IDS = {
     "KODEX_300": "355f59dbdb5b80879573c5dce4d1e291"
 }
 
+# 산업 ETF 매핑 (동일 유지)
 INDUSTRY_ETF_MAP = {
     "102970": "2f8f59dbdb5b8001a863e3b0d6c9f5e3", "466920": "313f59dbdb5b80c688f2daed09ab727b",
     "455850": "324f59dbdb5b809f9791f696ad2bc7d9", "396500": "354f59dbdb5b80afb3cfc82a7f037603",
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("📡 주식 엔진 초기화")
+        logger.info("📡 주식 엔진 초기화 (2단계 분리 로직)")
         self.all_map = fdr.StockListing('KRX').set_index('Code').to_dict('index')
         self.etf_map = fdr.StockListing('ETF/KR').set_index('Symbol').to_dict('index')
         self.kospi_200_list = self._get_index_by_code("1028")
@@ -101,73 +102,6 @@ def get_base_update(info):
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
 
-# ---------------------------------------------------------
-# 4. 단계별 실행 로직 (ETF -> KOSDAQ -> KOSPI)
-# ---------------------------------------------------------
-
-# Phase 1: ETF 전용 업데이트
-def run_etf_phase(pages, engine, client):
-    logger.info("🚀 Phase 1: ETF 업데이트 시작")
-    for page in pages:
-        ticker = extract_ticker(page)
-        if not ticker or ticker in EXCLUDE_TICKERS: continue
-        
-        info = engine.get_info(ticker)
-        if not info or not info["is_etf"]: continue
-
-        update_props = get_base_update(info)
-        update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KODEX_300"])}]}
-        
-        ind_id = engine.industry_lookup.get(ticker)
-        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
-        
-        client.pages.update(page_id=page["id"], properties=update_props)
-        logger.info(f"   ✅ [ETF] {info['name']} ({ticker})")
-
-# Phase 2: KOSDAQ 전용 업데이트
-def run_kosdaq_phase(pages, engine, client):
-    logger.info("🚀 Phase 2: KOSDAQ 업데이트 시작")
-    for page in pages:
-        ticker = extract_ticker(page)
-        if not ticker or ticker in EXCLUDE_TICKERS: continue
-        
-        info = engine.get_info(ticker)
-        if not info or info["is_etf"] or info["market"] != "KOSDAQ": continue
-
-        update_props = get_base_update(info)
-        if ticker in engine.kosdaq_150_list:
-            update_props["우량주"] = {"multi_select": [{"name": "KOSDAQ 150"}]}
-            update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSDAQ 150"])}]}
-        
-        ind_id = engine.industry_lookup.get(ticker)
-        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
-
-        client.pages.update(page_id=page["id"], properties=update_props)
-        logger.info(f"   ✅ [KOSDAQ] {info['name']} ({ticker})")
-
-# Phase 3: KOSPI 전용 업데이트
-def run_kospi_phase(pages, engine, client):
-    logger.info("🚀 Phase 3: KOSPI 업데이트 시작")
-    for page in pages:
-        ticker = extract_ticker(page)
-        if not ticker or ticker in EXCLUDE_TICKERS: continue
-        
-        info = engine.get_info(ticker)
-        if not info or info["is_etf"] or info["market"] != "KOSPI": continue
-
-        update_props = get_base_update(info)
-        if ticker in engine.kospi_200_list:
-            update_props["우량주"] = {"multi_select": [{"name": "KOSPI 200"}]}
-            update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSPI 200"])}]}
-        else:
-            update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSPI_TOTAL"])}]}
-            
-        ind_id = engine.industry_lookup.get(ticker)
-        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
-
-        client.pages.update(page_id=page["id"], properties=update_props)
-        logger.info(f"   ✅ [KOSPI] {info['name']} ({ticker})")
-
 def extract_ticker(page):
     props = page["properties"]
     ticker_prop = props.get("티커") or props.get("Ticker")
@@ -179,13 +113,68 @@ def extract_ticker(page):
     return match.group(1) if match else raw[:6]
 
 # ---------------------------------------------------------
+# 4. 단계별 실행 로직
+# ---------------------------------------------------------
+
+# Phase 1: KOSPI + KOSDAQ 통합 업데이트
+def run_stock_phase(pages, engine, client):
+    logger.info("🚀 Phase 1: 일반 주식(KOSPI+KOSDAQ) 업데이트 시작")
+    for page in pages:
+        ticker = extract_ticker(page)
+        if not ticker or ticker in EXCLUDE_TICKERS: continue
+        
+        info = engine.get_info(ticker)
+        if not info or info["is_etf"]: continue # ETF는 이 단계에서 건드리지 않음
+
+        update_props = get_base_update(info)
+        
+        # 시장별 지표 로직
+        if info["market"] == "KOSPI":
+            if ticker in engine.kospi_200_list:
+                update_props["우량주"] = {"multi_select": [{"name": "KOSPI 200"}]}
+                update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSPI 200"])}]}
+            else:
+                update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSPI_TOTAL"])}]}
+        
+        elif info["market"] == "KOSDAQ":
+            if ticker in engine.kosdaq_150_list:
+                update_props["우량주"] = {"multi_select": [{"name": "KOSDAQ 150"}]}
+                update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSDAQ 150"])}]}
+            # 🌟 일반 코스닥은 시장BM 필드를 아예 포함하지 않아 기존 데이터 보존
+        
+        # 산업BM 처리
+        ind_id = engine.industry_lookup.get(ticker)
+        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
+
+        client.pages.update(page_id=page["id"], properties=update_props)
+        logger.info(f"   ✅ [STOCK] {info['name']} ({ticker})")
+
+# Phase 2: ETF 전용 업데이트
+def run_etf_phase(pages, engine, client):
+    logger.info("🚀 Phase 2: ETF 업데이트 시작")
+    for page in pages:
+        ticker = extract_ticker(page)
+        if not ticker or ticker in EXCLUDE_TICKERS: continue
+        
+        info = engine.get_info(ticker)
+        if not info or not info["is_etf"]: continue # 일반 주식은 이 단계에서 건드리지 않음
+
+        update_props = get_base_update(info)
+        update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KODEX_300"])}]}
+        
+        ind_id = engine.industry_lookup.get(ticker)
+        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
+        
+        client.pages.update(page_id=page["id"], properties=update_props)
+        logger.info(f"   ✅ [ETF] {info['name']} ({ticker})")
+
+# ---------------------------------------------------------
 # 5. 메인 실행
 # ---------------------------------------------------------
 def main():
     client = Client(auth=NOTION_TOKEN)
     engine = StockAutomationEngineKR()
     
-    # 노션 페이지 한 번에 모두 가져오기
     logger.info("📦 노션 페이지 수집 중...")
     all_pages = []
     cursor = None
@@ -195,12 +184,11 @@ def main():
         if not response["has_more"]: break
         cursor = response["next_cursor"]
 
-    # 🌟 3단계 순차 실행
+    # 🌟 2단계 순차 실행: 주식 먼저, 그 다음 ETF
+    run_stock_phase(all_pages, engine, client)
     run_etf_phase(all_pages, engine, client)
-    run_kosdaq_phase(all_pages, engine, client)
-    run_kospi_phase(all_pages, engine, client)
     
-    logger.info("✨ 모든 단계 업데이트 완료")
+    logger.info("✨ 모든 업데이트 작업이 안전하게 완료되었습니다.")
 
 if __name__ == "__main__":
     main()
