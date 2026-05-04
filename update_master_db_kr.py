@@ -15,8 +15,8 @@ from notion_client import Client
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# 🌟 수동 업데이트 시 무조건 전체 갱신하도록 True로 고정
-IS_FULL_UPDATE = True
+# 🌟 전체 업데이트 여부 (True 시 모든 종목 갱신)
+IS_FULL_UPDATE = True 
 
 # [시장 벤치마크 ID]
 BENCHMARK_IDS = {
@@ -37,7 +37,7 @@ INDUSTRY_ETF_MAP = {
     "091180": "353f59dbdb5b801c9161c510d2c33986", "139260": "354f59dbdb5b80f8a75ae3942eb6c502"
 }
 
-# 🌟 로깅(출력)을 위해 ID를 다시 이름으로 바꿔주는 역방향 딕셔너리
+# 로깅을 위한 역방향 맵
 REV_BENCHMARK = {v: k for k, v in BENCHMARK_IDS.items()}
 REV_INDUSTRY = {v: k for k, v in INDUSTRY_ETF_MAP.items()}
 
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("📡 주식 엔진 가동 (3중 하이브리드 수집 & 분할 처리)")
+        logger.info("📡 주식 엔진 가동 (3중 하이브리드 수집 시작)")
         df_all = fdr.StockListing('KRX')
         self.all_map = df_all.set_index('Code').to_dict('index')
         
@@ -135,7 +135,7 @@ def process_page_kr(page, engine, client):
 
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     
-    # 한국 주식 필터 (해외 주식 건너뛰기)
+    # 🌟 해외 종목 건너뛰기
     is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
     if not is_kr: return
 
@@ -143,9 +143,8 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
+    # 시장 벤치마크 5대 규칙 적용
     tag, m_id = None, None
-    
-    # 🌟 시장BM 5가지 룰
     if "ETF" in str(info["market"]):
         m_id = BENCHMARK_IDS["KODEX_300"]
     elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
@@ -159,6 +158,16 @@ def process_page_kr(page, engine, client):
 
     ind_id = engine.industry_lookup.get(clean_t)
 
+    # 🌟 하이픈(-) 포함 UUID 포맷 강제 변환
+    def format_notion_id(uid):
+        if not uid: return None
+        u = str(uid).replace("-", "")
+        if len(u) == 32: return f"{u[:8]}-{u[8:12]}-{u[12:16]}-{u[16:20]}-{u[20:]}"
+        return uid
+
+    safe_m_id = format_notion_id(m_id)
+    safe_ind_id = format_notion_id(ind_id)
+
     update_props = {
         "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]}, 
         "Market": {"select": {"name": str(info["market"])}}, 
@@ -168,23 +177,20 @@ def process_page_kr(page, engine, client):
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 🌟 완전 초기화 & 덮어쓰기 로직
-    # 값이 있으면 해당 ID로 업데이트하고, 없으면 빈 배열([])을 보내서 기존 노션 데이터를 싹 지웁니다.
+    # 🌟 Reset & Rewrite: 값이 없으면 빈 배열([])을 보내 기존 데이터 삭제
     if "우량주" in props: 
         update_props["우량주"] = {"multi_select": [{"name": tag}] if tag else []}
     if "시장BM" in props: 
-        update_props["시장BM"] = {"relation": [{"id": m_id}] if m_id else []}
+        update_props["시장BM"] = {"relation": [{"id": safe_m_id}] if safe_m_id else []}
     if "산업BM" in props: 
-        update_props["산업BM"] = {"relation": [{"id": ind_id}] if ind_id else []}
+        update_props["산업BM"] = {"relation": [{"id": safe_ind_id}] if safe_ind_id else []}
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        
-        # 🌟 상세 로깅 로직 (터미널 출력용)
+        # 상세 업데이트 로그 기록
         m_log = REV_BENCHMARK.get(m_id, "공백") if m_id else "공백"
         ind_log = REV_INDUSTRY.get(ind_id, "공백") if ind_id else "공백"
         logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t}) | 시장: {m_log} | 산업: {ind_log}")
-        
     except Exception as e:
         logger.error(f"   ❌ [FAIL] {info['name']}({clean_t}): {e}")
 
@@ -201,6 +207,7 @@ def main():
         query = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query["start_cursor"] = cursor
         
+        # 필터 로직: IS_FULL_UPDATE가 False일 때만 작동
         if not IS_FULL_UPDATE:
             query["filter"] = {
                 "or": [
@@ -214,6 +221,8 @@ def main():
         all_pages.extend(response.get("results", []))
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
+
+    logger.info(f"🎯 총 {len(all_pages)}개 종목 분석 시작")
 
     if all_pages:
         with ThreadPoolExecutor(max_workers=5) as executor:
