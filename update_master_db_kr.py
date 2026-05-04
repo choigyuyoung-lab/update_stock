@@ -9,17 +9,21 @@ import FinanceDataReader as fdr
 from pykrx import stock
 from notion_client import Client
 
+# ---------------------------------------------------------
+# 1. 환경 변수 및 설정
+# ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 IS_FULL_UPDATE = True 
 
+# 🌟 ETF 시장BM(KODEX 300) 제거
 BENCHMARK_IDS = {
     "KOSPI 200": "2f0f59dbdb5b81b98fecc95376dbc921",
     "KOSDAQ 150": "2f8f59dbdb5b80dc984ccb32f316dd1f",
-    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759",
-    "KODEX_300": "355f59dbdb5b80879573c5dce4d1e291"
+    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759"
 }
 
+# 🌟 산업BM 분석을 위한 ETF 매핑은 유지 (일반 종목 업데이트용)
 INDUSTRY_ETF_MAP = {
     "102970": "2f8f59dbdb5b8001a863e3b0d6c9f5e3", "466920": "313f59dbdb5b80c688f2daed09ab727b",
     "455850": "324f59dbdb5b809f9791f696ad2bc7d9", "396500": "354f59dbdb5b80afb3cfc82a7f037603",
@@ -35,9 +39,13 @@ REV_INDUSTRY = {v: k for k, v in INDUSTRY_ETF_MAP.items()}
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------
+# 2. 데이터 엔진
+# ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
         logger.info("📡 주식 엔진 가동")
+        # requests + StringIO + pandas.read_html 방식의 데이터 로드[cite: 1]
         df_all = fdr.StockListing('KRX')
         self.all_map = df_all.set_index('Code').to_dict('index')
         
@@ -108,6 +116,9 @@ class StockAutomationEngineKR:
         if match := re.search(r'(\d{6})', t): return match.group(1)
         return re.split(r'[-.]', t)[0]
 
+# ---------------------------------------------------------
+# 3. 페이지 처리 로직
+# ---------------------------------------------------------
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
     ticker_prop = props.get("티커") or props.get("Ticker")
@@ -124,20 +135,15 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-    tag, m_id, m_reason = None, None, "조건에 맞는 시장BM 없음"
+    tag, m_id, m_reason = None, None, "지수 미포함 종목"
     
-    # 🌟 KOSPI 200, KOSDAQ 150만 기록하는 방식으로 수정
+    # 🌟 KOSPI 200 및 KOSDAQ 150 기록 (ETF 시장BM 로직 완전 삭제)
     if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id, m_reason = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"], "KOSPI 200 종목 기록"
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
         tag, m_id, m_reason = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"], "KOSDAQ 150 종목 기록"
-    
-    # [기존 로직 주석 처리]
-    # elif "ETF" in str(info["market"]):
-    #     m_id, m_reason = BENCHMARK_IDS["KODEX_300"], "국내 ETF"
-    # elif info["market"] == "KOSPI":
-    #     m_id, m_reason = BENCHMARK_IDS["KOSPI_TOTAL"], "기본 KOSPI"
 
+    # 산업BM 분석 (일반 종목용 유지)
     ind_id = engine.industry_lookup.get(clean_t)
     ind_reason = f"산업 ETF({REV_INDUSTRY.get(ind_id)}) 포함" if ind_id else "산업 ETF 미포함"
 
@@ -159,7 +165,7 @@ def process_page_kr(page, engine, client):
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 🌟 방어적 업데이트: 값이 존재할 때만 전송하여 삭제 방지[cite: 3]
+    # 🌟 방어적 업데이트: 값이 존재할 때만 전송
     if "우량주" in props and tag: 
         update_props["우량주"] = {"multi_select": [{"name": tag}]}
     if "시장BM" in props and safe_m_id: 
@@ -173,6 +179,9 @@ def process_page_kr(page, engine, client):
     except Exception as e:
         logger.error(f"❌ {info['name']}({clean_t}): {e}")
 
+# ---------------------------------------------------------
+# 4. 메인 실행
+# ---------------------------------------------------------
 def main():
     client = Client(auth=NOTION_TOKEN)
     engine = StockAutomationEngineKR()
@@ -191,7 +200,7 @@ def main():
             for page in all_pages:
                 executor.submit(process_page_kr, page, engine, client)
                 time.sleep(0.05)
-    logger.info("✨ 업데이트 완료")
+    logger.info("✨ 국내 주식 업데이트 완료 (ETF 시장BM 제외)")
 
 if __name__ == "__main__":
     main()
