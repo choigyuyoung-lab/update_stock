@@ -131,17 +131,14 @@ def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
     ticker_rich = (props.get("티커") or props.get("Ticker")).get("title") or (props.get("티커") or props.get("Ticker")).get("rich_text")
     if not ticker_rich: return
-    
+
     clean_t = engine.clean_ticker(ticker_rich[0]["plain_text"])
     info = engine.get_stock_detail(clean_t)
-    
-    if not info["name"]: 
-        logger.warning(f"⚠️ 이름을 찾을 수 없어 건너뜁니다: {clean_t}")
-        return
+    if not info["name"]: return
 
     tag, m_id = None, None
     
-    # 🌟 "ETF" 글자가 포함되어 있으면 무조건 KODEX_300 벤치마크 연결
+    # 🌟 [수정 포인트 1] ETF라는 단어가 있으면 무조건 KODEX_300 할당
     if "ETF" in str(info["market"]):
         m_id = BENCHMARK_IDS["KODEX_300"]
     elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
@@ -150,6 +147,9 @@ def process_page_kr(page, engine, client):
         tag, m_id = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"]
     elif info["market"] == "KOSPI":
         m_id = BENCHMARK_IDS["KOSPI_TOTAL"]
+    # 🌟 [수정 포인트 2] 일반 코스닥 종목 누락 방지 (KOSDAQ 150 연결)
+    elif info["market"] == "KOSDAQ":
+        m_id = BENCHMARK_IDS["KOSDAQ 150"]
 
     ind_id = engine.industry_lookup.get(clean_t)
 
@@ -158,7 +158,7 @@ def process_page_kr(page, engine, client):
         "Market": {"select": {"name": str(info["market"])}}, 
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
-    
+
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     if "우량주" in props: update_props["우량주"] = {"multi_select": [{"name": tag}] if tag else []}
@@ -170,6 +170,7 @@ def process_page_kr(page, engine, client):
         logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t})")
     except Exception as e:
         logger.error(f"   ❌ [FAIL] {clean_t}: {e}")
+
 
 # ---------------------------------------------------------
 # 4. 메인 실행 함수
