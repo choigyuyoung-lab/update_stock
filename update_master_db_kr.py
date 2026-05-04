@@ -166,13 +166,18 @@ def process_page_kr(page, engine, client):
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 🌟 [수정 포인트] 리셋 로직 제거: 값이 존재할 때만 업데이트 항목에 추가함
+    # 🌟 [수정 포인트] 명시적 기존값 유지: 조건을 만족할 때만 업데이트 항목에 추가
+    # 조건을 만족하지 않으면, 업데이트 요청에 해당 필드를 포함하지 않아 기존값을 유지함
     if "우량주" in props and tag: 
         update_props["우량주"] = {"multi_select": [{"name": tag}]}
+    
     if "시장BM" in props and safe_m_id: 
         update_props["시장BM"] = {"relation": [{"id": safe_m_id}]}
+    # safe_m_id가 None이면 update_props에 추가하지 않아 기존값 유지
+    
     if "산업BM" in props and safe_ind_id: 
         update_props["산업BM"] = {"relation": [{"id": safe_ind_id}]}
+    # safe_ind_id가 None이면 update_props에 추가하지 않아 기존값 유지
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
