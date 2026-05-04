@@ -136,20 +136,27 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-    tag, m_id = None, None
+tag, m_id = None, None
     
-    # 🌟 [수정 포인트 1] ETF라는 단어가 있으면 무조건 KODEX_300 할당
+    # 룰 1. ETF(KR)은 무조건 KODEX 300
     if "ETF" in str(info["market"]):
         m_id = BENCHMARK_IDS["KODEX_300"]
+        
+    # 룰 2. KOSPI 200 종목
     elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
+        
+    # 룰 3. KOSDAQ 150 종목
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
         tag, m_id = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"]
+        
+    # 룰 4. KOSPI 200 이외의 일반 KOSPI 종목 (KOSPI_TOTAL ID 사용)
     elif info["market"] == "KOSPI":
         m_id = BENCHMARK_IDS["KOSPI_TOTAL"]
-    # 🌟 [수정 포인트 2] 일반 코스닥 종목 누락 방지 (KOSDAQ 150 연결)
+        
+    # 룰 5. KOSDAQ 150 이외의 일반 KOSDAQ 종목은 공백 (None 유지)
     elif info["market"] == "KOSDAQ":
-        m_id = BENCHMARK_IDS["KOSDAQ 150"]
+        m_id = None
 
     ind_id = engine.industry_lookup.get(clean_t)
 
