@@ -37,6 +37,10 @@ INDUSTRY_ETF_MAP = {
     "091180": "353f59dbdb5b801c9161c510d2c33986", "139260": "354f59dbdb5b80f8a75ae3942eb6c502"
 }
 
+# 🌟 로깅(출력)을 위해 ID를 다시 이름으로 바꿔주는 역방향 딕셔너리
+REV_BENCHMARK = {v: k for k, v in BENCHMARK_IDS.items()}
+REV_INDUSTRY = {v: k for k, v in INDUSTRY_ETF_MAP.items()}
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -94,21 +98,18 @@ class StockAutomationEngineKR:
     def get_stock_detail(self, clean_t: str) -> dict:
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
         
-        # 1. 일반 종목 맵
         if clean_t in self.all_map:
             item = self.all_map[clean_t]
             m_raw = str(item.get('Market', '')).upper()
             res["market"] = "KOSDAQ" if "KOSDAQ" in m_raw else ("KOSPI" if "KOSPI" in m_raw else m_raw)
             res["name"] = str(item.get('Name', ''))
 
-        # 2. 상세 정보 맵 보강
         if clean_t in self.desc_map:
             desc_item = self.desc_map[clean_t]
             if not res["name"]: res["name"] = str(desc_item.get('Name', ''))
             res["kr_sector"] = str(desc_item.get('Sector') or desc_item.get('WICS 업종명') or "")
             res["kr_ind"] = str(desc_item.get('Industry') or desc_item.get('WICS 제품') or "")
             
-        # 3. ETF 맵 통합
         if clean_t in self.etf_map:
             etf_item = self.etf_map[clean_t]
             res["market"] = "ETF(KR)"
@@ -134,7 +135,7 @@ def process_page_kr(page, engine, client):
 
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     
-    # 🌟 복원됨: 해외 주식(US, NASDAQ 등) 건너뛰기 판별 로직
+    # 한국 주식 필터 (해외 주식 건너뛰기)
     is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
     if not is_kr: return
 
@@ -142,26 +143,17 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-    # 🌟 들여쓰기 에러 해결됨
     tag, m_id = None, None
     
-    # 룰 1. ETF(KR)은 무조건 KODEX 300
+    # 🌟 시장BM 5가지 룰
     if "ETF" in str(info["market"]):
         m_id = BENCHMARK_IDS["KODEX_300"]
-        
-    # 룰 2. KOSPI 200 종목
     elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
-        
-    # 룰 3. KOSDAQ 150 종목
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
         tag, m_id = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"]
-        
-    # 룰 4. KOSPI 200 이외의 일반 KOSPI 종목 (KOSPI_TOTAL ID 사용)
     elif info["market"] == "KOSPI":
         m_id = BENCHMARK_IDS["KOSPI_TOTAL"]
-        
-    # 룰 5. KOSDAQ 150 이외의 일반 KOSDAQ 종목은 공백 (None 유지)
     elif info["market"] == "KOSDAQ":
         m_id = None
 
@@ -176,16 +168,25 @@ def process_page_kr(page, engine, client):
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 🌟 복원됨: 기존 데이터 증발 방지 로직 (값이 있을 때만 덮어쓰기)
-    if "우량주" in props and tag: update_props["우량주"] = {"multi_select": [{"name": tag}]}
-    if "시장BM" in props and m_id: update_props["시장BM"] = {"relation": [{"id": m_id}]}
-    if "산업BM" in props and ind_id: update_props["산업BM"] = {"relation": [{"id": ind_id}]}
+    # 🌟 완전 초기화 & 덮어쓰기 로직
+    # 값이 있으면 해당 ID로 업데이트하고, 없으면 빈 배열([])을 보내서 기존 노션 데이터를 싹 지웁니다.
+    if "우량주" in props: 
+        update_props["우량주"] = {"multi_select": [{"name": tag}] if tag else []}
+    if "시장BM" in props: 
+        update_props["시장BM"] = {"relation": [{"id": m_id}] if m_id else []}
+    if "산업BM" in props: 
+        update_props["산업BM"] = {"relation": [{"id": ind_id}] if ind_id else []}
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t})")
+        
+        # 🌟 상세 로깅 로직 (터미널 출력용)
+        m_log = REV_BENCHMARK.get(m_id, "공백") if m_id else "공백"
+        ind_log = REV_INDUSTRY.get(ind_id, "공백") if ind_id else "공백"
+        logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t}) | 시장: {m_log} | 산업: {ind_log}")
+        
     except Exception as e:
-        logger.error(f"   ❌ [FAIL] {clean_t}: {e}")
+        logger.error(f"   ❌ [FAIL] {info['name']}({clean_t}): {e}")
 
 # ---------------------------------------------------------
 # 4. 메인 실행 함수
@@ -200,7 +201,6 @@ def main():
         query = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query["start_cursor"] = cursor
         
-        # 필터 로직 우회: IS_FULL_UPDATE가 True이므로 모든 페이지 수집
         if not IS_FULL_UPDATE:
             query["filter"] = {
                 "or": [
