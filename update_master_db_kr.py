@@ -11,14 +11,14 @@ from notion_client import Client
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# 🌟 업데이트 제외 지표 티커 (데이터 꼬임 방지를 위해 로직에서 원천 제외)
+# 지표 티커 제외 (KODEX 200, 코스닥150, KODEX 300, 코스피 지수)
 EXCLUDE_TICKERS = {"069500", "233740", "291680", "226490"}
 
 BENCHMARK_IDS = {
     "KOSPI 200": "2f0f59dbdb5b81b98fecc95376dbc921",
     "KOSDAQ 150": "2f8f59dbdb5b80dc984ccb32f316dd1f",
-    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759", # KODEX 코스피
-    "KODEX_300": "355f59dbdb5b80879573c5dce4d1e291"  # KRX 300 기반 ETF
+    "KOSPI_TOTAL": "353f59dbdb5b80ba82ffc1f99413d759",
+    "KODEX_300": "355f59dbdb5b80879573c5dce4d1e291"
 }
 
 INDUSTRY_ETF_MAP = {
@@ -35,15 +35,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. 데이터 엔진 (엄격한 마켓 분류 적용)
+# 2. 데이터 엔진
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("📡 주식 엔진 가동 (마켓별 핸들러 완전 격리 모드)")
+        logger.info("📡 주식 엔진 초기화")
         self.all_map = fdr.StockListing('KRX').set_index('Code').to_dict('index')
-        self.desc_map = fdr.StockListing('KRX-DESC').set_index('Code').to_dict('index')
         self.etf_map = fdr.StockListing('ETF/KR').set_index('Symbol').to_dict('index')
-        
         self.kospi_200_list = self._get_index_by_code("1028")
         self.kosdaq_150_list = self._get_index_by_code("2203")
         self.industry_lookup = self._build_industry_lookup_chunked()
@@ -79,125 +77,106 @@ class StockAutomationEngineKR:
             time.sleep(1.0)
         return {t: d[0] for t, d in temp_mapping.items()}
 
-    def get_stock_detail(self, clean_t: str) -> dict:
-        res = {"name": "", "market": "기타", "is_etf": False}
-        
-        # 1. ETF 여부를 최우선으로 판별
+    def get_info(self, clean_t: str) -> dict:
         if clean_t in self.etf_map:
-            etf_item = self.etf_map[clean_t]
-            res.update({"market": "ETF(KR)", "name": str(etf_item.get('Name', '')), "is_etf": True})
-            return res
-            
-        # 2. 일반 종목 마켓 분류 (KOSPI vs KOSDAQ 정밀 분류)
+            return {"market": "ETF(KR)", "name": str(self.etf_map[clean_t]['Name']), "is_etf": True}
         if clean_t in self.all_map:
-            item = self.all_map[clean_t]
-            m_raw = str(item.get('Market', '')).upper()
-            
-            if "KOSPI" in m_raw or "STK" in m_raw:
-                res["market"] = "KOSPI"
-            elif "KOSDAQ" in m_raw:
-                res["market"] = "KOSDAQ"
-            else:
-                res["market"] = m_raw
-                
-            res["name"] = str(item.get('Name', ''))
-        return res
+            m_raw = str(self.all_map[clean_t]['Market']).upper()
+            market = "KOSPI" if any(x in m_raw for x in ["KOSPI", "STK"]) else ("KOSDAQ" if "KOSDAQ" in m_raw else m_raw)
+            return {"market": market, "name": str(self.all_map[clean_t]['Name']), "is_etf": False}
+        return None
 
 # ---------------------------------------------------------
-# 3. 마켓별 독립 핸들러 (격리 성공의 핵심)
+# 3. 유틸리티 및 속성 생성
 # ---------------------------------------------------------
-
 def format_notion_id(uid):
     if not uid: return None
     u = str(uid).replace("-", "")
     return f"{u[:8]}-{u[8:12]}-{u[12:16]}-{u[16:20]}-{u[20:]}" if len(u) == 32 else uid
 
-def get_base_props(info):
-    # 공통 속성 패키지 (이름, 마켓, 일자)
+def get_base_update(info):
     return {
-        "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]},
-        "Market": {"select": {"name": str(info["market"])}},
+        "종목명": {"rich_text": [{"text": {"content": info["name"]}}]},
+        "Market": {"select": {"name": info["market"]}},
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
 
-# 🌟 [KOSPI 전용] - KOSPI 200 또는 코스피 전체 지표만 다룸
-def handle_kospi_logic(page, info, engine, client, clean_t):
-    tag, m_id = None, None
-    if clean_t in engine.kospi_200_list:
-        tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
-    else:
-        m_id = BENCHMARK_IDS["KOSPI_TOTAL"]
-
-    update_data = get_base_props(info)
-    if tag: update_data["우량주"] = {"multi_select": [{"name": tag}]}
-    if m_id: update_data["시장BM"] = {"relation": [{"id": format_notion_id(m_id)}]}
-    
-    ind_id = engine.industry_lookup.get(clean_t)
-    if ind_id: update_data["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
-    
-    client.pages.update(page_id=page["id"], properties=update_data)
-    logger.info(f"✅ [KOSPI] {info['name']}({clean_t})")
-
-# 🌟 [KOSDAQ 전용] - 오직 KOSDAQ 150 지표만 다룸 (KRX 300 절대 금지)
-def handle_kosdaq_logic(page, info, engine, client, clean_t):
-    tag, m_id = None, None
-    # 코스닥 종목은 오직 코스닥 150 리스트만 확인
-    if clean_t in engine.kosdaq_150_list:
-        tag, m_id = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"]
-
-    update_data = get_base_props(info)
-    if tag: update_data["우량주"] = {"multi_select": [{"name": tag}]}
-    # 🌟 m_id가 없을 경우 시장BM 필드를 아예 전송하지 않음 (기존값 유지)
-    if m_id: 
-        update_data["시장BM"] = {"relation": [{"id": format_notion_id(m_id)}]}
-    
-    ind_id = engine.industry_lookup.get(clean_t)
-    if ind_id: update_data["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
-    
-    client.pages.update(page_id=page["id"], properties=update_data)
-    logger.info(f"✅ [KOSDAQ] {info['name']}({clean_t})")
-
-# 🌟 [ETF 전용] - 오직 KODEX 300 지표만 할당
-def handle_etf_logic(page, info, engine, client, clean_t):
-    m_id = BENCHMARK_IDS["KODEX_300"]
-    update_data = get_base_props(info)
-    update_data["시장BM"] = {"relation": [{"id": format_notion_id(m_id)}]}
-    
-    ind_id = engine.industry_lookup.get(clean_t)
-    if ind_id: update_data["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
-    
-    client.pages.update(page_id=page["id"], properties=update_data)
-    logger.info(f"✅ [ETF] {info['name']}({clean_t})")
-
 # ---------------------------------------------------------
-# 4. 페이지 처리 핸들러 (라우터)
+# 4. 단계별 실행 로직 (ETF -> KOSDAQ -> KOSPI)
 # ---------------------------------------------------------
-def process_page_kr(page, engine, client):
-    pid, props = page["id"], page["properties"]
+
+# Phase 1: ETF 전용 업데이트
+def run_etf_phase(pages, engine, client):
+    logger.info("🚀 Phase 1: ETF 업데이트 시작")
+    for page in pages:
+        ticker = extract_ticker(page)
+        if not ticker or ticker in EXCLUDE_TICKERS: continue
+        
+        info = engine.get_info(ticker)
+        if not info or not info["is_etf"]: continue
+
+        update_props = get_base_update(info)
+        update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KODEX_300"])}]}
+        
+        ind_id = engine.industry_lookup.get(ticker)
+        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
+        
+        client.pages.update(page_id=page["id"], properties=update_props)
+        logger.info(f"   ✅ [ETF] {info['name']} ({ticker})")
+
+# Phase 2: KOSDAQ 전용 업데이트
+def run_kosdaq_phase(pages, engine, client):
+    logger.info("🚀 Phase 2: KOSDAQ 업데이트 시작")
+    for page in pages:
+        ticker = extract_ticker(page)
+        if not ticker or ticker in EXCLUDE_TICKERS: continue
+        
+        info = engine.get_info(ticker)
+        if not info or info["is_etf"] or info["market"] != "KOSDAQ": continue
+
+        update_props = get_base_update(info)
+        if ticker in engine.kosdaq_150_list:
+            update_props["우량주"] = {"multi_select": [{"name": "KOSDAQ 150"}]}
+            update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSDAQ 150"])}]}
+        
+        ind_id = engine.industry_lookup.get(ticker)
+        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
+
+        client.pages.update(page_id=page["id"], properties=update_props)
+        logger.info(f"   ✅ [KOSDAQ] {info['name']} ({ticker})")
+
+# Phase 3: KOSPI 전용 업데이트
+def run_kospi_phase(pages, engine, client):
+    logger.info("🚀 Phase 3: KOSPI 업데이트 시작")
+    for page in pages:
+        ticker = extract_ticker(page)
+        if not ticker or ticker in EXCLUDE_TICKERS: continue
+        
+        info = engine.get_info(ticker)
+        if not info or info["is_etf"] or info["market"] != "KOSPI": continue
+
+        update_props = get_base_update(info)
+        if ticker in engine.kospi_200_list:
+            update_props["우량주"] = {"multi_select": [{"name": "KOSPI 200"}]}
+            update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSPI 200"])}]}
+        else:
+            update_props["시장BM"] = {"relation": [{"id": format_notion_id(BENCHMARK_IDS["KOSPI_TOTAL"])}]}
+            
+        ind_id = engine.industry_lookup.get(ticker)
+        if ind_id: update_props["산업BM"] = {"relation": [{"id": format_notion_id(ind_id)}]}
+
+        client.pages.update(page_id=page["id"], properties=update_props)
+        logger.info(f"   ✅ [KOSPI] {info['name']} ({ticker})")
+
+def extract_ticker(page):
+    props = page["properties"]
     ticker_prop = props.get("티커") or props.get("Ticker")
-    if not ticker_prop: return
-    ticker_rich = ticker_prop.get("title") or ticker_prop.get("rich_text")
-    if not ticker_rich: return
-
-    raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
-    clean_t = str(re.search(r'(\d{6})', raw_ticker).group(1)) if re.search(r'(\d{6})', raw_ticker) else raw_ticker[:6]
-    
-    # 지표 티커 제외
-    if clean_t in EXCLUDE_TICKERS: return
-
-    info = engine.get_stock_detail(clean_t)
-    if not info["name"]: return
-
-    try:
-        # 🌟 입구에서 신분에 따라 전용 함수로 완전히 격리 배정
-        if info["is_etf"]:
-            handle_etf_logic(page, info, engine, client, clean_t)
-        elif info["market"] == "KOSPI":
-            handle_kospi_logic(page, info, engine, client, clean_t)
-        elif info["market"] == "KOSDAQ":
-            handle_kosdaq_logic(page, info, engine, client, clean_t)
-    except Exception as e:
-        logger.error(f"❌ {info['name']}({clean_t}) 오류: {e}")
+    if not ticker_prop: return None
+    rich_text = ticker_prop.get("title") or ticker_prop.get("rich_text")
+    if not rich_text: return None
+    raw = rich_text[0]["plain_text"].strip().upper()
+    match = re.search(r'(\d{6})', raw)
+    return match.group(1) if match else raw[:6]
 
 # ---------------------------------------------------------
 # 5. 메인 실행
@@ -205,22 +184,23 @@ def process_page_kr(page, engine, client):
 def main():
     client = Client(auth=NOTION_TOKEN)
     engine = StockAutomationEngineKR()
+    
+    # 노션 페이지 한 번에 모두 가져오기
+    logger.info("📦 노션 페이지 수집 중...")
     all_pages = []
     cursor = None
     while True:
-        query = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
-        if cursor: query["start_cursor"] = cursor
-        response = client.databases.query(**query)
-        all_pages.extend(response.get("results", []))
-        if not response.get("has_more"): break
-        cursor = response.get("next_cursor")
+        response = client.databases.query(database_id=MASTER_DATABASE_ID, start_cursor=cursor)
+        all_pages.extend(response["results"])
+        if not response["has_more"]: break
+        cursor = response["next_cursor"]
 
-    if all_pages:
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            for page in all_pages:
-                executor.submit(process_page_kr, page, engine, client)
-                time.sleep(0.05)
-    logger.info("✨ 모든 마켓 개별 핸들러 업데이트 완료")
+    # 🌟 3단계 순차 실행
+    run_etf_phase(all_pages, engine, client)
+    run_kosdaq_phase(all_pages, engine, client)
+    run_kospi_phase(all_pages, engine, client)
+    
+    logger.info("✨ 모든 단계 업데이트 완료")
 
 if __name__ == "__main__":
     main()
