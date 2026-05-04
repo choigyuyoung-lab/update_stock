@@ -10,11 +10,12 @@ from pykrx import stock
 from notion_client import Client
 
 # ---------------------------------------------------------
-# 1. 환경 변수 및 설정 (Source 6 기준)
+# 1. 환경 변수 및 설정
 # ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
-# 🌟 시장BM이 비어있는 기존 종목들을 보강하려면 IS_FULL_UPDATE를 False로 두어도 작동합니다.
+
+# 🌟 수동 업데이트 시 무조건 전체 갱신하도록 True로 고정
 IS_FULL_UPDATE = True
 
 # [시장 벤치마크 ID]
@@ -25,7 +26,7 @@ BENCHMARK_IDS = {
     "KODEX_300": "355f59dbdb5b802a9ecbf4a8eef99f2f"
 }
 
-# 🌟 [산업 벤치마크 ID] (14개 대표 ETF)
+# [산업 벤치마크 ID] (14개 대표 ETF)
 INDUSTRY_ETF_MAP = {
     "102970": "2f8f59dbdb5b8001a863e3b0d6c9f5e3", "466920": "313f59dbdb5b80c688f2daed09ab727b",
     "455850": "324f59dbdb5b809f9791f696ad2bc7d9", "396500": "354f59dbdb5b80afb3cfc82a7f037603",
@@ -92,23 +93,30 @@ class StockAutomationEngineKR:
 
     def get_stock_detail(self, clean_t: str) -> dict:
         res = {"name": "", "market": "기타", "kr_sector": None, "kr_ind": None}
+        
+        # 1. 일반 종목 맵
         if clean_t in self.all_map:
             item = self.all_map[clean_t]
             m_raw = str(item.get('Market', '')).upper()
             res["market"] = "KOSDAQ" if "KOSDAQ" in m_raw else ("KOSPI" if "KOSPI" in m_raw else m_raw)
-            res["name"] = item.get('Name', '')
+            res["name"] = str(item.get('Name', ''))
 
+        # 2. 상세 정보 맵 보강
         if clean_t in self.desc_map:
             desc_item = self.desc_map[clean_t]
-            if not res["name"]: res["name"] = desc_item.get('Name', '')
-            res["kr_sector"] = desc_item.get('Sector') or desc_item.get('WICS 업종명')
-            res["kr_ind"] = desc_item.get('Industry') or desc_item.get('WICS 제품')
+            if not res["name"]: res["name"] = str(desc_item.get('Name', ''))
+            res["kr_sector"] = str(desc_item.get('Sector') or desc_item.get('WICS 업종명') or "")
+            res["kr_ind"] = str(desc_item.get('Industry') or desc_item.get('WICS 제품') or "")
             
+        # 3. ETF 맵 (🌟 누락되었던 핵심 로직 통합 완료)
         if clean_t in self.etf_map:
             etf_item = self.etf_map[clean_t]
             res["market"] = "ETF(KR)"
+            if not res["name"]: 
+                res["name"] = str(etf_item.get('Name', ''))
             res["kr_sector"] = str(etf_item.get('Category', 'ETF'))
             res["kr_ind"] = "ETF"
+            
         return res
 
     def clean_ticker(self, raw_ticker: str) -> str:
@@ -126,11 +134,15 @@ def process_page_kr(page, engine, client):
     
     clean_t = engine.clean_ticker(ticker_rich[0]["plain_text"])
     info = engine.get_stock_detail(clean_t)
-    if not info["name"]: return
+    
+    if not info["name"]: 
+        logger.warning(f"⚠️ 이름을 찾을 수 없어 건너뜁니다: {clean_t}")
+        return
 
     tag, m_id = None, None
-    if info["market"] == "ETF(KR)":
-        # 🌟 ETF는 무조건 KODEX 300(통합시장)을 벤치마크로 설정
+    
+    # 🌟 "ETF" 글자가 포함되어 있으면 무조건 KODEX_300 벤치마크 연결
+    if "ETF" in str(info["market"]):
         m_id = BENCHMARK_IDS["KODEX_300"]
     elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
@@ -160,7 +172,7 @@ def process_page_kr(page, engine, client):
         logger.error(f"   ❌ [FAIL] {clean_t}: {e}")
 
 # ---------------------------------------------------------
-# 4. 메인 실행 함수 (🌟 쿼리 필터 확장 적용)
+# 4. 메인 실행 함수
 # ---------------------------------------------------------
 def main():
     client = Client(auth=NOTION_TOKEN) 
@@ -172,7 +184,7 @@ def main():
         query = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query["start_cursor"] = cursor
         
-        # 🌟 필터 확장: 종목명, 시장BM, 산업BM 중 하나라도 비어있으면 수집
+        # 필터 로직 우회: IS_FULL_UPDATE가 True이므로 이 조건문은 무시되고 모든 페이지를 수집합니다.
         if not IS_FULL_UPDATE:
             query["filter"] = {
                 "or": [
@@ -193,7 +205,7 @@ def main():
                 executor.submit(process_page_kr, page, engine, client)
                 time.sleep(0.05) 
     
-    logger.info("✨ 업데이트 완료")
+    logger.info("✨ 전체 업데이트 완료")
 
 if __name__ == "__main__":
     main()
