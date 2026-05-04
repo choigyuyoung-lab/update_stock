@@ -9,6 +9,9 @@ import FinanceDataReader as fdr
 from pykrx import stock
 from notion_client import Client
 
+# ---------------------------------------------------------
+# 1. 환경 변수 및 설정
+# ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 IS_FULL_UPDATE = True 
@@ -35,6 +38,9 @@ REV_INDUSTRY = {v: k for k, v in INDUSTRY_ETF_MAP.items()}
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------
+# 2. 데이터 수집 엔진
+# ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
         logger.info("📡 주식 엔진 가동")
@@ -67,7 +73,6 @@ class StockAutomationEngineKR:
                 w_col = '비중' if '비중' in pdf.columns else pdf.columns[0]
                 return [(t, (n_id, r[w_col])) for t, r in pdf.iterrows()]
         except: return []
-        return []
 
     def _build_industry_lookup_chunked(self):
         temp_mapping = {}
@@ -108,6 +113,9 @@ class StockAutomationEngineKR:
         if match := re.search(r'(\d{6})', t): return match.group(1)
         return re.split(r'[-.]', t)[0]
 
+# ---------------------------------------------------------
+# 3. 노션 업데이트 처리 로직
+# ---------------------------------------------------------
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
     ticker_prop = props.get("티커") or props.get("Ticker")
@@ -124,22 +132,22 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-    tag, m_id, m_reason = None, None, "조건에 맞는 시장BM 없음"
+    tag, m_id, m_reason = None, None, "유지 (매칭 결과 없음)"
     
-    # 🌟 KOSPI 200, KOSDAQ 150만 기록하는 방식으로 수정
-    if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
+    # 🌟 시장BM 선택 기능 추가: ETF(KR) -> KODEX 300
+    if info["market"] == "ETF(KR)":
+        m_id, m_reason = BENCHMARK_IDS["KODEX_300"], "ETF(KR) 종목 -> KODEX 300 할당"
+    elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id, m_reason = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"], "KOSPI 200 종목 기록"
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
         tag, m_id, m_reason = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"], "KOSDAQ 150 종목 기록"
     
-    # [기존 로직 주석 처리]
-    # elif "ETF" in str(info["market"]):
-    #     m_id, m_reason = BENCHMARK_IDS["KODEX_300"], "국내 ETF"
+    # [기타 로직 주석 처리 보관]
     # elif info["market"] == "KOSPI":
-    #     m_id, m_reason = BENCHMARK_IDS["KOSPI_TOTAL"], "기본 KOSPI"
+    #     m_id, m_reason = BENCHMARK_IDS["KOSPI_TOTAL"], "일반 KOSPI"
 
     ind_id = engine.industry_lookup.get(clean_t)
-    ind_reason = f"산업 ETF({REV_INDUSTRY.get(ind_id)}) 포함" if ind_id else "산업 ETF 미포함"
+    ind_reason = f"산업 ETF({REV_INDUSTRY.get(ind_id)}) 포함" if ind_id else "유지 (산업 ETF 미포함)"
 
     def format_notion_id(uid):
         if not uid: return None
@@ -159,7 +167,7 @@ def process_page_kr(page, engine, client):
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 🌟 방어적 업데이트: 값이 존재할 때만 전송하여 삭제 방지[cite: 3]
+    # 🌟 방어적 업데이트: 값이 존재할 때만 전송[cite: 3]
     if "우량주" in props and tag: 
         update_props["우량주"] = {"multi_select": [{"name": tag}]}
     if "시장BM" in props and safe_m_id: 
@@ -173,6 +181,9 @@ def process_page_kr(page, engine, client):
     except Exception as e:
         logger.error(f"❌ {info['name']}({clean_t}): {e}")
 
+# ---------------------------------------------------------
+# 4. 메인 실행[cite: 3]
+# ---------------------------------------------------------
 def main():
     client = Client(auth=NOTION_TOKEN)
     engine = StockAutomationEngineKR()
