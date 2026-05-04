@@ -15,7 +15,7 @@ from notion_client import Client
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 
-# 🌟 전체 업데이트 여부
+# 🌟 전체 업데이트 여부 (True 시 모든 종목 분석)
 IS_FULL_UPDATE = True 
 
 # [시장 벤치마크 ID]
@@ -38,7 +38,6 @@ INDUSTRY_ETF_MAP = {
 }
 
 # 로깅용 역방향 맵
-REV_BENCHMARK = {v: k for k, v in BENCHMARK_IDS.items()}
 REV_INDUSTRY = {v: k for k, v in INDUSTRY_ETF_MAP.items()}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -49,7 +48,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
-        logger.info("🚀 [방어적 업데이트 모드] 엔진 가동")
+        logger.info("📡 주식 엔진 가동 (데이터 수집 및 분석 시작)")
         df_all = fdr.StockListing('KRX')
         self.all_map = df_all.set_index('Code').to_dict('index')
         
@@ -121,11 +120,14 @@ class StockAutomationEngineKR:
         return re.split(r'[-.]', t)[0]
 
 # ---------------------------------------------------------
-# 3. 페이지 업데이트 로직
+# 3. 페이지 업데이트 및 사유 기록 로직
 # ---------------------------------------------------------
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
-    ticker_rich = (props.get("티커") or props.get("Ticker")).get("title") or (props.get("티커") or props.get("Ticker")).get("rich_text")
+    ticker_prop = props.get("티커") or props.get("Ticker")
+    if not ticker_prop: return
+    
+    ticker_rich = ticker_prop.get("title") or ticker_prop.get("rich_text")
     if not ticker_rich: return
 
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
@@ -136,17 +138,22 @@ def process_page_kr(page, engine, client):
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-    tag, m_id = None, None
+    # 시장BM 매칭 및 사유 결정
+    tag, m_id, m_reason = None, None, "매칭되는 규칙 없음"
     if "ETF" in str(info["market"]):
-        m_id = BENCHMARK_IDS["KODEX_300"]
+        m_id, m_reason = BENCHMARK_IDS["KODEX_300"], "국내 ETF 전용 벤치마크 적용"
     elif clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
-        tag, m_id = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"]
+        tag, m_id, m_reason = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"], "KOSPI 200 구성 종목 확인"
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
-        tag, m_id = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"]
+        tag, m_id, m_reason = "KOSDAQ 150", BENCHMARK_IDS["KOSDAQ 150"], "KOSDAQ 150 구성 종목 확인"
     elif info["market"] == "KOSPI":
-        m_id = BENCHMARK_IDS["KOSPI_TOTAL"]
+        m_id, m_reason = BENCHMARK_IDS["KOSPI_TOTAL"], "KOSPI 200 제외 일반 종목 (TOTAL 할당)"
+    elif info["market"] == "KOSDAQ":
+        m_reason = "KOSDAQ 150 미포함 종목이므로 기존 데이터 유지"
 
+    # 산업BM 매칭 및 사유 결정
     ind_id = engine.industry_lookup.get(clean_t)
+    ind_reason = f"산업 ETF({REV_INDUSTRY.get(ind_id)}) 구성 종목 확인" if ind_id else "분석 대상 산업 ETF 포트폴리오에 미포함 (기존 데이터 유지)"
 
     def format_notion_id(uid):
         if not uid: return None
@@ -157,7 +164,7 @@ def process_page_kr(page, engine, client):
     safe_m_id = format_notion_id(m_id)
     safe_ind_id = format_notion_id(ind_id)
 
-    # 기본 정보 업데이트 패키지
+    # 기본 정보 (항상 업데이트)
     update_props = {
         "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]},
         "Market": {"select": {"name": str(info["market"])}},
@@ -167,9 +174,8 @@ def process_page_kr(page, engine, client):
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 🌟 [삭제 방지 로직 적용] 
-    # 데이터가 확실히 존재할 때만 속성을 추가합니다.
-    # 이를 통해 파이썬이 값을 못 찾았을 때 기존 노션 데이터가 삭제되는 것을 방지합니다.
+    # 🌟 [핵심 수정] 삭제 방지: 값이 확실히 존재할 때만 업데이트 속성에 포함
+    # 값이 None이면 아예 전달하지 않으므로 노션의 기존 데이터가 삭제되지 않고 유지됩니다.
     if "우량주" in props and tag: 
         update_props["우량주"] = {"multi_select": [{"name": tag}]}
     
@@ -181,11 +187,11 @@ def process_page_kr(page, engine, client):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        m_log = REV_BENCHMARK.get(m_id, "공백") if m_id else "유지"
-        ind_log = REV_INDUSTRY.get(ind_id, "공백") if ind_id else "유지"
-        logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t}) | 시장: {m_log} | 산업: {ind_log}")
+        logger.info(f"✅ [SUCCESS] {info['name']}({clean_t})")
+        logger.info(f"   ∟ 시장: {m_reason}")
+        logger.info(f"   ∟ 산업: {ind_reason}")
     except Exception as e:
-        logger.error(f"   ❌ [FAIL] {info['name']}({clean_t}): {e}")
+        logger.error(f"❌ [ERROR] {info['name']}({clean_t}): {e}")
 
 # ---------------------------------------------------------
 # 4. 메인 실행 함수
@@ -204,11 +210,12 @@ def main():
         cursor = response.get("next_cursor")
 
     if all_pages:
+        logger.info(f"🎯 총 {len(all_pages)}개 페이지 분석 및 업데이트 시작")
         with ThreadPoolExecutor(max_workers=5) as executor:
             for page in all_pages:
                 executor.submit(process_page_kr, page, engine, client)
                 time.sleep(0.05)
-    logger.info("✨ 모든 업데이트가 완료되었습니다.")
+    logger.info("✨ 모든 업데이트 작업이 완료되었습니다.")
 
 if __name__ == "__main__":
     main()
