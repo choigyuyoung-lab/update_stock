@@ -108,7 +108,7 @@ class StockAutomationEngineKR:
             res["kr_sector"] = str(desc_item.get('Sector') or desc_item.get('WICS 업종명') or "")
             res["kr_ind"] = str(desc_item.get('Industry') or desc_item.get('WICS 제품') or "")
             
-        # 3. ETF 맵 (🌟 누락되었던 핵심 로직 통합 완료)
+        # 3. ETF 맵 통합
         if clean_t in self.etf_map:
             etf_item = self.etf_map[clean_t]
             res["market"] = "ETF(KR)"
@@ -132,11 +132,18 @@ def process_page_kr(page, engine, client):
     ticker_rich = (props.get("티커") or props.get("Ticker")).get("title") or (props.get("티커") or props.get("Ticker")).get("rich_text")
     if not ticker_rich: return
 
-    clean_t = engine.clean_ticker(ticker_rich[0]["plain_text"])
+    raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
+    
+    # 🌟 복원됨: 해외 주식(US, NASDAQ 등) 건너뛰기 판별 로직
+    is_kr = (raw_ticker.endswith(('.KS', '.KQ')) or (len(raw_ticker) >= 6 and raw_ticker[0].isdigit())) and not raw_ticker.endswith(('.T', '.TA', '.TW'))
+    if not is_kr: return
+
+    clean_t = engine.clean_ticker(raw_ticker)
     info = engine.get_stock_detail(clean_t)
     if not info["name"]: return
 
-tag, m_id = None, None
+    # 🌟 들여쓰기 에러 해결됨
+    tag, m_id = None, None
     
     # 룰 1. ETF(KR)은 무조건 KODEX 300
     if "ETF" in str(info["market"]):
@@ -168,16 +175,17 @@ tag, m_id = None, None
 
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
-    if "우량주" in props: update_props["우량주"] = {"multi_select": [{"name": tag}] if tag else []}
-    if "시장BM" in props: update_props["시장BM"] = {"relation": [{"id": m_id}] if m_id else []}
-    if "산업BM" in props: update_props["산업BM"] = {"relation": [{"id": ind_id}] if ind_id else []}
+    
+    # 🌟 복원됨: 기존 데이터 증발 방지 로직 (값이 있을 때만 덮어쓰기)
+    if "우량주" in props and tag: update_props["우량주"] = {"multi_select": [{"name": tag}]}
+    if "시장BM" in props and m_id: update_props["시장BM"] = {"relation": [{"id": m_id}]}
+    if "산업BM" in props and ind_id: update_props["산업BM"] = {"relation": [{"id": ind_id}]}
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
         logger.info(f"   ✅ [UPDATE] {info['name']}({clean_t})")
     except Exception as e:
         logger.error(f"   ❌ [FAIL] {clean_t}: {e}")
-
 
 # ---------------------------------------------------------
 # 4. 메인 실행 함수
@@ -192,7 +200,7 @@ def main():
         query = {"database_id": MASTER_DATABASE_ID, "page_size": 100}
         if cursor: query["start_cursor"] = cursor
         
-        # 필터 로직 우회: IS_FULL_UPDATE가 True이므로 이 조건문은 무시되고 모든 페이지를 수집합니다.
+        # 필터 로직 우회: IS_FULL_UPDATE가 True이므로 모든 페이지 수집
         if not IS_FULL_UPDATE:
             query["filter"] = {
                 "or": [
