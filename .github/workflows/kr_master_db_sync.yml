@@ -24,6 +24,7 @@ jobs:
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
+        BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         
         # 🌟 KRX 로그인 정보 필수 (Secrets에 등록되어 있어야 함)
         KRX_ID: ${{ secrets.KRX_ID }}
