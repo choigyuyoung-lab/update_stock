@@ -1,4 +1,4 @@
-import os, re, time, logging, io
+import os, re, time, logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import httpx
@@ -7,7 +7,7 @@ import yfinance as yf
 import FinanceDataReader as fdr
 from notion_client import Client
 
-# 1. 환경 변수 및 설정
+# 1. 환경 변수 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 BENCHMARK_DATABASE_ID = os.environ.get("BENCHMARK_DATABASE_ID")
@@ -15,46 +15,48 @@ BENCHMARK_DATABASE_ID = os.environ.get("BENCHMARK_DATABASE_ID")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-# 2. 지표 DB 로드 (ID 맵 생성)
-def get_us_benchmark_ids(client):
-    """지표 DB에서 티커별 Notion ID만 추출"""
-    logger.info("🔍 US 지표 ID 로드 중...")
-    ticker_to_id = {}
+# 2. 지표 DB 로드 (티커별 Notion ID 매핑)
+def get_us_id_map(client):
+    logger.info("🔍 지표 DB에서 US 벤치마크 ID 로드 중...")
+    id_map = {}
     try:
         pages = client.databases.query(database_id=BENCHMARK_DATABASE_ID).get("results", [])
         for page in pages:
-            ticker_list = page["properties"].get("이름", {}).get("title", [])
-            if ticker_list:
-                ticker = ticker_list[0]["plain_text"].strip().upper()
-                ticker_to_id[ticker] = page["id"]
-        logger.info(f"✅ 총 {len(ticker_to_id)}개의 지표 ID 확보")
+            t_list = page["properties"].get("이름", {}).get("title", [])
+            if t_list:
+                id_map[t_list[0]["plain_text"].strip().upper()] = page["id"]
+        logger.info(f"✅ 총 {len(id_map)}개의 지표 확보")
     except Exception as e:
-        logger.error(f"❌ 지표 ID 로드 실패: {e}")
-    return ticker_to_id
+        logger.error(f"❌ 지표 로드 실패: {e}")
+    return id_map
 
-# 3. 미국 데이터 엔진
-class USAstockEngine:
+# 3. 상세 정보 수집 엔진
+class USDetailedEngine:
     def __init__(self):
-        logger.info("📡 US 데이터 세트 로딩 중...")
-        # S&P 500 및 나스닥 100 리스트 확보
-        self.sp500_list = fdr.StockListing('S&P500')['Symbol'].tolist()
+        logger.info("📡 상세 마켓 분석 엔진 가동...")
+        # 거래소별 리스트 확보
         self.nasdaq_list = fdr.StockListing('NASDAQ')['Symbol'].tolist()
-        self.session = httpx.Client(timeout=30.0)
+        self.sp500_list = fdr.StockListing('S&P500')['Symbol'].tolist()
+        self.httpx_client = httpx.Client(timeout=30.0)
 
     def get_info(self, ticker):
-        """yfinance를 통한 상세 정보 수집"""
+        """상세 거래소 및 산업군 정보 추출"""
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
+            # 거래소 이름 정규화 (NYQ -> NYSE, NMS -> NASDAQ 등)
+            raw_ex = info.get("exchange", "기타")
+            market = "NASDAQ" if any(x in raw_ex for x in ["NMS", "NAS"]) else "NYSE" if "NYQ" in raw_ex else raw_ex
+            
             return {
                 "name": info.get("longName"),
+                "market": market,
                 "sector": info.get("sector"),
-                "industry": info.get("industry"),
-                "market": info.get("exchange")
+                "industry": info.get("industry")
             }
         except: return None
 
-# 4. 페이지 처리 (중복 방지 매핑 로직)
+# 4. 페이지 처리 (상세 마켓 및 벤치마크 연동)
 def process_page_us(page, engine, client, id_map):
     pid, props = page["id"], page["properties"]
     ticker_prop = props.get("티커") or props.get("Ticker")
@@ -66,14 +68,15 @@ def process_page_us(page, engine, client, id_map):
     info = engine.get_info(raw_t)
     if not info or not info["name"]: return
 
-    # --- 🌟 자동 매핑 로직 (중복 해결) ---
-    # 1. 시장BM (Market Benchmark)
-    target_m_t = "QQQ" if raw_t in engine.nasdaq_list else "SPY"
-    
-    # 2. 산업BM (Industry Benchmark) - yfinance 데이터 기준 자동 분류
-    target_ind_t = None
-    sec, ind = info["sector"], info["industry"]
+    # 🌟 시장 판별: 이름에 ETF가 있으면 ETF(US), 아니면 실제 거래소 명칭 사용
+    final_market = "ETF(US)" if "ETF" in info["name"].upper() else info["market"]
 
+    # 🌟 벤치마크 자동 결정 (한국 주식 방식 응용)[cite: 2]
+    target_m_t = "QQQ" if raw_t in engine.nasdaq_list else "SPY"
+    target_ind_t = None
+    sec, ind = info["sector"], info.get("industry", "")
+
+    # 산업별 상세 분류[cite: 2]
     if sec == "Technology":
         target_ind_t = "SOXX" if "Semiconductors" in ind else "XLK"
     elif sec == "Industrials":
@@ -84,14 +87,13 @@ def process_page_us(page, engine, client, id_map):
     elif sec == "Consumer Cyclical": target_ind_t = "XLY"
     elif sec == "Basic Materials": target_ind_t = "GDX"
 
-    # --- 데이터 업데이트 ---
     update_props = {
         "종목명": {"rich_text": [{"text": {"content": info["name"]}}]},
-        "Market": {"select": {"name": "ETF(US)" if "ETF" in info["name"] else "US"}},
+        "Market": {"select": {"name": final_market}}, # 상세 마켓 복구[cite: 2]
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
 
-    # 지표 연결 (자기참조 방지)
+    # 지표 관계형 연결 (자기참조 방지)[cite: 2]
     if target_m_t and target_m_t != raw_t:
         if m_id := id_map.get(target_m_t):
             update_props["시장BM"] = {"relation": [{"id": m_id}]}
@@ -102,17 +104,15 @@ def process_page_us(page, engine, client, id_map):
 
     try:
         client.pages.update(page_id=pid, properties=update_props)
-        logger.info(f"✅ [US] {raw_t} 완료 (BM: {target_m_t}, {target_ind_t})")
+        logger.info(f"✅ [US] {raw_t} -> {final_market} 업데이트 완료")
     except Exception as e:
-        logger.error(f"❌ [US] {raw_t} 실패: {e}")
+        logger.error(f"❌ [US] {raw_t} 오류: {e}")
 
 # 5. 메인 함수
 def main():
-    notion_httpx = httpx.Client(timeout=60.0)
-    client = Client(auth=NOTION_TOKEN, client=notion_httpx)
-    
-    id_map = get_us_benchmark_ids(client)
-    engine = USAstockEngine()
+    client = Client(auth=NOTION_TOKEN, client=httpx.Client(timeout=60.0))
+    id_map = get_us_id_map(client)
+    engine = USDetailedEngine()
     
     res = client.databases.query(database_id=MASTER_DATABASE_ID)
     pages = res.get("results", [])
