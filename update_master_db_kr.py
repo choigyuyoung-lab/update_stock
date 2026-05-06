@@ -18,15 +18,15 @@ MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 # 🌟 True: 무조건 업데이트 / False: 오늘 이미 업데이트된 종목은 건너뜀
 FORCE_UPDATE = True 
 
-# 🌟 반드시 사용자님의 '지표 DB' 실제 페이지 ID로 교체하세요!
+# 🌟 사용자님의 새로운 '지표 DB' 실제 페이지 ID[cite: 3]
 BENCHMARK_IDS = {
     "KOSPI 200": "357f59dbdb5b800291f7dada7bd46933",
     "KOSDAQ 150": "357f59dbdb5b80ef87c1dc278c942840",
     "KOSPI_TOTAL": "357f59dbdb5b804bb2a7e0fc9ec775f1",
-    "KRX 300": "357f59dbdb5b80caaed5daa99086fcfd" # 국내 ETF가 연결될 목표
+    "KRX 300": "357f59dbdb5b80caaed5daa99086fcfd" 
 }
 
-# 지표 그 자체인 티커 제외 (데이터 오염 방지)
+# 지표 자체인 티커 제외 (데이터 오염 방지)[cite: 3]
 EXCLUDE_TICKERS = {"069500", "233740", "226490", "292190"}
 
 INDUSTRY_ETF_MAP = {
@@ -43,12 +43,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. 데이터 엔진
+# 2. 데이터 엔진 (Python 3.10+ 기준)[cite: 3]
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self):
         logger.info("📡 KRX 데이터 로딩 중...")
-        # requests + StringIO + pandas.read_html 방식 권장 사항 준수[cite: 1]
+        # requests + StringIO + pandas.read_html 방식 유지[cite: 1, 3]
         self.all_map = fdr.StockListing('KRX').set_index('Code').to_dict('index')
         self.desc_map = fdr.StockListing('KRX-DESC').set_index('Code').to_dict('index')
         self.etf_map = fdr.StockListing('ETF/KR').set_index('Symbol').to_dict('index')
@@ -114,7 +114,7 @@ class StockAutomationEngineKR:
         return re.split(r'[-.]', t)[0]
 
 # ---------------------------------------------------------
-# 3. 페이지 처리 로직 (강제 업데이트 포함)
+# 3. 페이지 처리 로직 (강제 업데이트 및 스크린샷 열 이름 반영)[cite: 3]
 # ---------------------------------------------------------
 def process_page_kr(page, engine, client):
     pid, props = page["id"], page["properties"]
@@ -127,10 +127,10 @@ def process_page_kr(page, engine, client):
     raw_ticker = ticker_rich[0]["plain_text"].strip().upper()
     clean_t = engine.clean_ticker(raw_ticker)
 
-    # 1. 지표 종목 제외
+    # 1. 지표 종목 제외[cite: 3]
     if clean_t in EXCLUDE_TICKERS: return
 
-    # 2. 강제 업데이트가 아닐 경우 날짜 체크
+    # 2. 강제 업데이트 체크
     if not FORCE_UPDATE:
         last_updated_prop = props.get("업데이트 일자", {}).get("date")
         if last_updated_prop:
@@ -143,7 +143,7 @@ def process_page_kr(page, engine, client):
 
     tag, m_id, m_reason = None, None, "지수 미포함"
     
-    # 🌟 시장 지표 할당 (KOSPI 200 / KOSDAQ 150 / KRX 300)[cite: 2]
+    # 🌟 시장 지표 매칭 (KOSPI 200 / KOSDAQ 150 / KRX 300)[cite: 3]
     if clean_t in engine.kospi_200_list and info["market"] == "KOSPI":
         tag, m_id, m_reason = "KOSPI 200", BENCHMARK_IDS["KOSPI 200"], "KOSPI 200"
     elif clean_t in engine.kosdaq_150_list and info["market"] == "KOSDAQ":
@@ -163,6 +163,7 @@ def process_page_kr(page, engine, client):
     safe_m_id = format_notion_id(m_id)
     safe_ind_id = format_notion_id(ind_id)
 
+    # 업데이트 데이터 조립[cite: 3]
     update_props = {
         "종목명": {"rich_text": [{"text": {"content": str(info["name"])}}]},
         "Market": {"select": {"name": str(info["market"])}},
@@ -172,13 +173,16 @@ def process_page_kr(page, engine, client):
     if info["kr_sector"]: update_props["KR_섹터"] = {"rich_text": [{"text": {"content": str(info["kr_sector"])}}]}
     if info["kr_ind"]: update_props["KR_산업"] = {"rich_text": [{"text": {"content": str(info["kr_ind"])}}]}
     
-    # 🌟 스크린샷에 확인된 속성명 '지표지수' 반영[cite: 2]
-    target_bm_prop = "지표지수" 
+    # 🌟 스크린샷 열 이름 반영: '지표지수'가 아닌 '시장BM' 타겟팅
+    target_bm_prop = "시장BM" 
     
     if "우량주" in props and tag: 
         update_props["우량주"] = {"multi_select": [{"name": tag}]}
+    
+    # 🌟 관계형 업데이트 (방어적 코드 적용)
     if target_bm_prop in props and safe_m_id: 
         update_props[target_bm_prop] = {"relation": [{"id": safe_m_id}]}
+    
     if "산업BM" in props and safe_ind_id: 
         update_props["산업BM"] = {"relation": [{"id": safe_ind_id}]}
 
@@ -189,7 +193,7 @@ def process_page_kr(page, engine, client):
         logger.error(f"❌ {info['name']}({clean_t}) 업데이트 실패: {e}")
 
 # ---------------------------------------------------------
-# 4. 메인 실행
+# 4. 메인 실행[cite: 3]
 # ---------------------------------------------------------
 def main():
     client = Client(auth=NOTION_TOKEN)
@@ -206,7 +210,7 @@ def main():
         if not response.get("has_more"): break
         cursor = response.get("next_cursor")
 
-    # 🌟 진단 로그: 이 숫자가 0이라면 MASTER_DATABASE_ID나 API 권한 문제[cite: 2]
+    # 진단 로그 추가[cite: 2, 3]
     logger.info(f"🔎 수집된 총 페이지 수: {len(all_pages)}개")
 
     if all_pages:
@@ -215,7 +219,7 @@ def main():
                 executor.submit(process_page_kr, page, engine, client)
                 time.sleep(0.05)
     
-    logger.info("✨ 상장주식 DB 업데이트 프로세스 완료")
+    logger.info("✨ 상장주식 DB 업데이트 완료")
 
 if __name__ == "__main__":
     main()
