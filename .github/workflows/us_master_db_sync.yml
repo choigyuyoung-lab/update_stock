@@ -19,10 +19,12 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         # 필요한 모든 라이브러리 설치 (lxml은 속도 향상에 필수)
+        pip install notion-client pandas finance-datareader yfinance httpx lxml
         pip install notion-client==2.2.1 requests beautifulsoup4 pandas finance-datareader lxml yfinance>=0.2.31
     - name: Run US Update
       env:
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
+        BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db_us.py
