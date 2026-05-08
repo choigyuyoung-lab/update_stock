@@ -24,20 +24,22 @@ jobs:
 
     - name: Run KR Update
       env:
-        # 🌟 노션 연결 정보 (Secrets 이름과 완벽 매칭 및 안전장치)
+        # 1. 노션 연결 정보
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        MASTER_DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
         DATABASE_ID: ${{ secrets.DATABASE_ID }}
         BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         INDEX_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         
-        # 🌟 KIS API 인증키
+        # 2. KIS API 인증키
         KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
         KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
         
-        # 🌟 KRX 로그인 인증 (IP 차단 우회용 필수 복구!)
+        # 3. 🌟 KRX 로그인 인증 (이게 없으면 로그에 나온 파싱 에러가 다시 발생합니다!)
         KRX_ID: ${{ secrets.KRX_ID }}
         KRX_PW: ${{ secrets.KRX_PW }}
         
+        # 4. 🌟 수동 실행 시 'true' 신호를 보내주는 핵심 라인
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+        
       run: python update_master_db_kr.py
