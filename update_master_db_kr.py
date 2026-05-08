@@ -12,17 +12,23 @@ from notion_client import Client
 # 1. 환경 변수 및 설정
 # ---------------------------------------------------------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-MASTER_DATABASE_ID = os.environ.get("DATABASE_ID") # 노션 DB ID
-BENCHMARK_DATABASE_ID = os.environ.get("INDEX_DATABASE_ID") # 지표지수 DB ID
+# yml 파일과 호환되도록 다중 변수명 지원
+MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID") or os.environ.get("DATABASE_ID")
+BENCHMARK_DATABASE_ID = os.environ.get("BENCHMARK_DATABASE_ID") or os.environ.get("INDEX_DATABASE_ID")
+
 KIS_APP_KEY = os.environ.get("KIS_APP_KEY")
 KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET")
+
+# KRX 인증 환경 변수 (사용자 커스텀 모듈 대응)
+KRX_ID = os.environ.get("KRX_ID")
+KRX_PW = os.environ.get("KRX_PW")
 
 URL_BASE = "https://openapivts.koreainvestment.com:29443"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-# 사용자님의 오리지널 테마 규칙
+# 🌟 최종 완성된 테마 ETF 판별 규칙
 ETF_THEME_RULES = {
     "S&P500": {"tag": "S&P 500", "bm": "SPY"},
     "나스닥100": {"tag": "NASDAQ 100", "bm": "QQQ"},
@@ -48,11 +54,14 @@ def get_access_token():
     url = f"{URL_BASE}/oauth2/tokenP"
     headers = {"content-type": "application/json"}
     body = {"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET}
-    res = requests.post(url, headers=headers, data=json.dumps(body))
-    return res.json().get('access_token')
+    try:
+        res = requests.post(url, headers=headers, data=json.dumps(body))
+        return res.json().get('access_token')
+    except Exception as e:
+        logger.error(f"❌ KIS 토큰 발급 에러: {e}")
+        return None
 
 def get_dynamic_config(client):
-    """원본: 지표지수 DB 로드 (그대로 유지)"""
     logger.info("🔍 지표지수 DB 동적 분석 시작...")
     config = {"ticker_to_id": {}, "kr_industry_tickers": []}
     try:
@@ -81,18 +90,20 @@ def get_dynamic_config(client):
     return config
 
 # ---------------------------------------------------------
-# 3. 데이터 엔진 (FDR 제거, pykrx 유지)
+# 3. 데이터 엔진 (pykrx 기반 PDF/인덱스 분석)
 # ---------------------------------------------------------
 class StockAutomationEngineKR:
     def __init__(self, kr_industry_tickers):
         logger.info("📡 KRX 인덱스 및 ETF PDF 엔진 가동 (pykrx)...")
-        # FDR 대신 KIS API를 개별적으로 호출할 것이므로 FDR 제거
+        # KRX 로그인 체크 (사용자 커스텀 환경 대응)
+        if not KRX_ID or not KRX_PW:
+            logger.warning("⚠️ KRX_ID 또는 KRX_PW가 설정되지 않았습니다. (일부 데이터 조회가 제한될 수 있습니다)")
+            
         self.k200_list = self._get_index_list("1028")
         self.kd150_list = self._get_index_list("2203")
         self.kr_industry_lookup = self._build_industry_lookup(kr_industry_tickers)
 
     def _get_index_list(self, code):
-        """원본 유지: 코스피200 / 코스닥150 목록 조회"""
         for i in range(5):
             date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
             try:
@@ -102,7 +113,6 @@ class StockAutomationEngineKR:
         return []
 
     def _build_industry_lookup(self, tickers):
-        """원본 유지: 다이내믹 산업BM 역추적 (최고 비중 ETF 매핑)"""
         lookup = {}
         for etf_t in tickers:
             try:
@@ -117,7 +127,7 @@ class StockAutomationEngineKR:
         return {k: v[0] for k, v in lookup.items()}
 
 # ---------------------------------------------------------
-# 4. 개별 페이지 처리 (원본 로직 + KIS 데이터)
+# 4. 개별 페이지 처리 (KIS API + 테마/BM 로직)
 # ---------------------------------------------------------
 def process_page_kr(page, engine, client, config, kis_token):
     pid, props = page["id"], page["properties"]
@@ -132,7 +142,7 @@ def process_page_kr(page, engine, client, config, kis_token):
 
     clean_t = re.search(r'(\d{6})', ticker_val).group(1) if re.search(r'\d{6}', ticker_val) else ticker_val.split('.')[0]
 
-    # 🌟 FDR 대신 KIS API 호출 (더 정확한 이름/섹터/산업 정보)
+    # KIS API로 공식 데이터 조회
     headers = {"Content-Type":"application/json", "authorization":f"Bearer {kis_token}", "appkey":KIS_APP_KEY, "appsecret":KIS_APP_SECRET, "tr_id":"CTAC1503R", "custtype":"P"}
     try:
         res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/quotations/search-stock-info", headers=headers, params={"PRDT_TYPE_CD": "300", "PDNO": clean_t})
@@ -140,18 +150,17 @@ def process_page_kr(page, engine, client, config, kis_token):
     except:
         item = {}
 
-    if not item.get('prdt_abrv_name'): return # KIS에 데이터가 없으면 패스
+    if not item.get('prdt_abrv_name'): return 
 
     stock_name = item['prdt_abrv_name']
     m_raw = item.get('mkt_id_nm', '')
     is_etf = "ETF" in m_raw.upper()
     market_label = "ETF(KR)" if is_etf else ("KOSPI" if "유가증권" in m_raw else "KOSDAQ")
     
-    # KIS API 기반 깔끔한 섹터/산업 정보 (기존 HEADERS 하드코딩 대체)
     sec_val = item.get('idx_bztp_lcls_nm', '') if not is_etf else "ETF"
     ind_val = item.get('idx_bztp_mcls_nm', '') if not is_etf else "ETF"
 
-    # --- 여기서부터 원본의 강력한 BM 판별 로직 그대로 유지 ---
+    # 테마 및 BM 판별
     us_tracking_tag = None
     target_m_t = None
     
@@ -163,14 +172,12 @@ def process_page_kr(page, engine, client, config, kis_token):
                 target_m_t = rule["bm"]
                 break
 
-    # 일반 시장BM 로직 (테마가 없는 경우)
     if not target_m_t:
         if clean_t in engine.k200_list: target_m_t = "069500"
         elif clean_t in engine.kd150_list: target_m_t = "229200"
         elif is_etf: target_m_t = "292190"
         elif market_label == "KOSPI": target_m_t = "226490"
 
-    # 🌟 원본의 다이내믹 산업BM 추출
     target_ind_t = engine.kr_industry_lookup.get(clean_t)
 
     def make_rich_text(val):
@@ -184,14 +191,13 @@ def process_page_kr(page, engine, client, config, kis_token):
         "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
     }
     
-    # 원본: '우량주' 열에 테마 태그 부여 (Multi-select)
     if us_tracking_tag:
         update_props["우량주"] = {"multi_select": [{"name": us_tracking_tag}]}
     
-    # 원본: 시장/산업 BM 관계형 연결
     if target_m_t and target_m_t != clean_t:
         if m_id := config["ticker_to_id"].get(target_m_t):
             update_props["시장BM"] = {"relation": [{"id": m_id}]}
+            
     if target_ind_t and target_ind_t != clean_t:
         if ind_id := config["ticker_to_id"].get(target_ind_t):
             update_props["산업BM"] = {"relation": [{"id": ind_id}]}
@@ -203,7 +209,7 @@ def process_page_kr(page, engine, client, config, kis_token):
         logger.error(f"   ❌ [KR] {clean_t} 노션 전송 실패: {e}")
 
 # ---------------------------------------------------------
-# 5. 메인 (원본의 병렬 처리 유지)
+# 5. 메인 로직 (전체/부분 업데이트 분기)
 # ---------------------------------------------------------
 def main():
     custom_client = httpx.Client(timeout=60.0)
@@ -214,23 +220,46 @@ def main():
     kis_token = get_access_token()
     
     if not kis_token:
-        logger.error("❌ KIS 토큰 발급 실패. 종료합니다.")
+        logger.error("❌ KIS 토큰 발급 실패. 환경 변수를 확인하세요.")
         return
+
+    # 🌟 수동(전체) vs 자동(부분) 판단 로직
+    is_full_update = os.environ.get("IS_FULL_UPDATE", "false").lower() == "true"
+    
+    query_params = {"database_id": MASTER_DATABASE_ID}
+    
+    if not is_full_update:
+        logger.info("⚡ [부분 업데이트 모드] 새로 추가된 종목만 탐색합니다.")
+        query_params["filter"] = {
+            "or": [
+                {"property": "종목명", "rich_text": {"is_empty": True}},
+                {"property": "업데이트 일자", "date": {"is_empty": True}}
+            ]
+        }
+    else:
+        logger.info("🔥 [전체 업데이트 모드] 수동 실행 - 모든 항목을 재검사합니다.")
 
     all_pages, cursor = [], None
     while True:
-        res = client.databases.query(database_id=MASTER_DATABASE_ID, start_cursor=cursor)
+        if cursor: 
+            query_params["start_cursor"] = cursor
+            
+        res = client.databases.query(**query_params)
         all_pages.extend(res.get("results", []))
+        
         if not res.get("has_more"): break
         cursor = res.get("next_cursor")
         time.sleep(0.1)
 
     if all_pages:
-        # KIS API는 초당 20건 제한이 있으므로 workers를 3 정도로 조정
+        logger.info(f"🚀 총 {len(all_pages)}개의 항목을 업데이트합니다.")
+        # API 과부하 방지를 위해 워커 수는 3으로 유지
         with ThreadPoolExecutor(max_workers=3) as executor:
             for page in all_pages:
                 executor.submit(process_page_kr, page, engine, client, config, kis_token)
-                time.sleep(0.05) # API 과부하 방지
+                time.sleep(0.05) 
+    else:
+        logger.info("✅ 업데이트할 새로운 항목이 없습니다.")
     
     logger.info("✨ 하이브리드 업데이트 프로세스 완료")
 
