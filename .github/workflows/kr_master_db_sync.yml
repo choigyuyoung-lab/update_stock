@@ -15,22 +15,29 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.10'
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 🌟 불필요해진 크롤링 라이브러리(bs4, fdr)를 제거하고 KIS API 및 비동기 처리에 필요한 핵심만 남겼습니다.
+        # KIS API 및 pykrx 비동기 처리에 최적화된 라이브러리 구성
         pip install notion-client==2.2.1 requests pandas pykrx httpx lxml
+
     - name: Run KR Update
       env:
-        # 🌟 노션 DB 정보 (이전 파이썬 코드의 os.environ.get 이름과 매핑)
+        # 🌟 노션 연결 정보 (Secrets 이름과 완벽 매칭 및 안전장치)
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-        DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
+        MASTER_DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
+        BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         INDEX_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         
-        # 🌟 KIS API 정보 추가 (필수)
+        # 🌟 KIS API 인증키
         KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
         KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
         
-        # (KRX_ID / KRX_PW는 KIS API 사용으로 인해 더 이상 필요하지 않아 제거했습니다)
+        # 🌟 KRX 로그인 인증 (IP 차단 우회용 필수 복구!)
+        KRX_ID: ${{ secrets.KRX_ID }}
+        KRX_PW: ${{ secrets.KRX_PW }}
+        
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db_kr.py
