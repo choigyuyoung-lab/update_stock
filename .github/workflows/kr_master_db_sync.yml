@@ -3,7 +3,7 @@ name: KR Master DB Sync
 on:
   repository_dispatch:
     types: [kr_master_sync]
-  workflow_dispatch:
+  workflow_dispatch: # 👈 여기서 'Run workflow' 버튼을 눌러야 전체 업데이트가 돌아갑니다.
 
 jobs:
   build:
@@ -15,31 +15,28 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # KIS API 및 pykrx 비동기 처리에 최적화된 라이브러리 구성
+        # KIS API와 pykrx 처리에 필요한 핵심 라이브러리 (fdr, bs4 제거로 속도 향상)
         pip install notion-client==2.2.1 requests pandas pykrx httpx lxml
-
     - name: Run KR Update
       env:
-        # 1. 노션 연결 정보
+        # 1. 노션 DB 연결 (사용자님의 기존 Secret 이름과 완벽 매칭)
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
         BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
-        INDEX_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         
-        # 2. KIS API 인증키
+        # 2. 🌟 KIS API 정보 (새로운 코드의 핵심 열쇠!)
         KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
         KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
         
-        # 3. 🌟 KRX 로그인 인증 (이게 없으면 로그에 나온 파싱 에러가 다시 발생합니다!)
+        # 3. 🌟 KRX 로그인 정보 (로그에 나온 파싱 에러 방지용)
         KRX_ID: ${{ secrets.KRX_ID }}
         KRX_PW: ${{ secrets.KRX_PW }}
         
-        # 4. 🌟 수동 실행 시 'true' 신호를 보내주는 핵심 라인
-        IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+        # 4. 🌟 업데이트 모드 강제 설정
+        # 테스트 기간에는 아래 줄을 'true'로 적어두시면 어떤 방식으로 실행해도 전체 업데이트가 돌아갑니다.
+        IS_FULL_UPDATE: 'true' 
         
       run: python update_master_db_kr.py
