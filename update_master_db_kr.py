@@ -1,28 +1,42 @@
 import os, re, time, logging, json, requests
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from notion_client import Client
 
-# 1. 환경 변수 설정
+# 1. 환경 변수 및 설정
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
 BENCHMARK_DATABASE_ID = os.environ.get("BENCHMARK_DATABASE_ID")
 KIS_APP_KEY = os.environ.get("KIS_APP_KEY")
 KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET")
 
+# 모의투자 서버 주소
 URL_BASE = "https://openapivts.koreainvestment.com:29443" 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-# [ETF 테마 규칙 생략 - 기존과 동일]
+# ETF 테마 분류 규칙
+ETF_THEME_RULES = {
+    "S&P500": {"tag": "S&P 500", "bm": "SPY"},
+    "나스닥100": {"tag": "NASDAQ 100", "bm": "QQQ"},
+    "미국배당": {"tag": "US Dividend", "bm": "SCHD"},
+    "AI전력": {"tag": "US AI Power", "bm": "XLU"},
+    "HBM": {"tag": "Global AI Memory", "bm": "SOXX"}
+}
 
+# ---------------------------------------------------------
+# 2. KIS 모의투자 전용 엔진
+# ---------------------------------------------------------
 class KISVtsEngine:
     def __init__(self):
         self.token = self._get_token()
         self.headers = {
             "Content-Type": "application/json",
             "authorization": f"Bearer {self.token}",
-            "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET, "custtype": "P"
+            "appkey": KIS_APP_KEY,
+            "appsecret": KIS_APP_SECRET,
+            "custtype": "P"
         }
 
     def _get_token(self):
@@ -31,24 +45,46 @@ class KISVtsEngine:
         try:
             res = requests.post(url, json=body)
             return res.json().get('access_token')
-        except: return None
+        except Exception as e:
+            logger.error(f"❌ KIS 토큰 발급 실패: {e}")
+            return None
 
-    def get_stock_master_info(self, ticker):
-        """🌟 모의투자에서 가장 안정적인 '현재가 시세' TR(FHKST01010100) 활용"""
-        url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-price"
-        headers = {**self.headers, "tr_id": "FHKST01010100"} # 가격 업데이트 때 썼던 그 ID
-        params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    def safe_api_call(self, url, params, tr_id):
+        """JSONDecodeError 방지를 위한 안전한 호출 함수"""
+        headers = {**self.headers, "tr_id": tr_id}
         try:
             res = requests.get(url, headers=headers, params=params, timeout=10)
-            return res.json().get('output', {})
+            if res.status_code != 200 or not res.text.strip():
+                return {}
+            return res.json()
         except:
             return {}
 
+    def get_stock_info(self, ticker):
+        """모의투자에서 가장 안정적인 '현재가 시세' TR 활용"""
+        url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-price"
+        return self.safe_api_call(url, {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}, "FHKST01010100")
+
+    def get_index_members(self, index_code):
+        """지수 구성 종목 조회 (K200: '0001', KD150: '1001')"""
+        url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-index-category-constituent-stock"
+        res = self.safe_api_call(url, {"fid_cond_mrkt_div_code": "U", "fid_input_iscd": index_code}, "FHPST01200000")
+        return [item['mksc_shrn_iscd'] for item in res.get('output2', [])]
+
+    def get_etf_pdf(self, etf_ticker):
+        """ETF PDF(구성종목/비중) 조회"""
+        url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-etf-constituent-stocks"
+        res = self.safe_api_call(url, {"fid_input_iscd": etf_ticker}, "FHPST02410000")
+        return res.get('output2', [])
+
+# ---------------------------------------------------------
+# 3. 페이지 처리 및 업데이트 로직
+# ---------------------------------------------------------
 def process_page(page, engine, client, config, k200, kd150, industry_lookup):
     pid = page["id"]
     props = page["properties"]
     
-    # 1. 티커 추출
+    # 티커 추출 (Ticker/티커 공용)
     ticker = ""
     for name in ["티커", "Ticker"]:
         if name in props:
@@ -59,47 +95,53 @@ def process_page(page, engine, client, config, k200, kd150, industry_lookup):
     
     if not (ticker and len(ticker) == 6 and ticker.isdigit()): return
 
-    # 2. 🌟 KIS 시세 API로 정보 확보
-    item = engine.get_stock_master_info(ticker)
+    # 1. KIS API 데이터 수집
+    data = engine.get_stock_info(ticker)
+    item = data.get('output', {})
     
-    # 시세 API가 응답을 주지 않을 경우 (모의투자 대비)
     if not item or not item.get('bstp_kor_isnm'):
-        logger.warning(f"⏩ {ticker}: 시세 API 응답 없음 (Skip)")
+        logger.warning(f"⏩ {ticker}: API 응답 없음 (Skip)")
         return
 
-    # 종목명은 노션에 있는 것을 우선 쓰고, API에 있으면 그것을 사용
-    stock_name_raw = props.get("종목정보", {}).get("rich_text")
+    # 종목명 확보 (노션 기존값 유지)
+    stock_name_raw = props.get("종목정보", {}).get("rich_text") or props.get("종목명", {}).get("rich_text")
     stock_name = stock_name_raw[0].get("plain_text", "") if stock_name_raw else ticker
 
-    # API에서 주는 마켓 및 업종 정보 활용
-    m_raw = item.get('rprs_mrkt_kor_name', '') # 대표 시장명 (KOSPI/KOSDAQ)
+    # 마켓 및 업종명 추출
+    m_raw = item.get('rprs_mrkt_kor_name', '')
     is_etf = "ETF" in m_raw.upper()
     market_label = "ETF(KR)" if is_etf else ("KOSPI" if "KOSPI" in m_raw.upper() else "KOSDAQ")
-    
-    # 업종 정보를 섹터/산업으로 활용
-    industry_info = item.get('bstp_kor_isnm', '') # 업종 한글명
+    industry_name = item.get('bstp_kor_isnm', '기타')
 
-    # 3. 우량주/지수 판별
+    # 2. 우량주(지수) 및 시장BM 판별
     us_tracking_tag, target_m_t = None, None
-    if not is_etf:
+    if is_etf:
+        name_clean = stock_name.replace(" ", "").upper()
+        for kw, rule in ETF_THEME_RULES.items():
+            if kw.upper() in name_clean:
+                us_tracking_tag, target_m_t = rule["tag"], rule["bm"]
+                break
+    else:
         if ticker in k200: us_tracking_tag, target_m_t = "KOSPI 200", "069500"
         elif ticker in kd150: us_tracking_tag, target_m_t = "KOSDAQ 150", "229200"
 
     if not target_m_t:
         target_m_t = "292190" if is_etf else ("226490" if market_label == "KOSPI" else None)
 
+    # 3. 산업BM (비중 룩업 테이블 활용)
     target_ind_t = industry_lookup.get(ticker)
 
-    # 4. 노션 업데이트
+    # 4. 노션 업데이트 데이터 구성
     def make_rt(v): return {"rich_text": [{"text": {"content": str(v)}}]}
     upd = {
         "Market": {"select": {"name": market_label}},
-        "KR_섹터": make_rt(industry_info if not is_etf else "ETF"),
-        "KR_산업": make_rt(industry_info if not is_etf else "ETF"),
+        "KR_섹터": make_rt(industry_name if not is_etf else "ETF"),
+        "KR_산업": make_rt(industry_name if not is_etf else "ETF"),
         "업데이트 일자": {"date": {"start": datetime.now(timezone(timedelta(hours=9))).isoformat()}}
     }
     if us_tracking_tag: upd["우량주"] = {"multi_select": [{"name": us_tracking_tag}]}
     
+    # 관계형 BM 연결
     if target_m_t and (m_id := config["ticker_to_id"].get(target_m_t)):
         upd["시장BM"] = {"relation": [{"id": m_id}]}
     if target_ind_t and (ind_id := config["ticker_to_id"].get(target_ind_t)):
@@ -107,8 +149,67 @@ def process_page(page, engine, client, config, k200, kd150, industry_lookup):
 
     try:
         client.pages.update(page_id=pid, properties=upd)
-        logger.info(f"✅ {ticker} ({industry_info}) 완료")
+        logger.info(f"✅ {ticker} ({industry_name}) 업데이트 완료")
     except Exception as e:
-        logger.error(f"❌ {ticker} 업데이트 에러: {e}")
+        logger.error(f"❌ {ticker} 에러: {e}")
 
-# [main 함수 생략 - 이전과 동일하게 유지]
+# ---------------------------------------------------------
+# 4. 메인 실행 함수
+# ---------------------------------------------------------
+def main():
+    engine = KISVtsEngine()
+    if not engine.token: return
+    
+    client = Client(auth=NOTION_TOKEN)
+    
+    # A. 지수 데이터 확보
+    k200 = engine.get_index_members("0001")
+    kd150 = engine.get_index_members("1001")
+    
+    # B. 지표지수 DB 로드 및 산업 리스트 생성
+    config = {"ticker_to_id": {}, "kr_industry_tickers": []}
+    cursor = None
+    while True:
+        res = client.databases.query(database_id=BENCHMARK_DATABASE_ID, start_cursor=cursor)
+        for p in res.get("results", []):
+            t_list = p["properties"].get("이름", {}).get("title") or p["properties"].get("티커", {}).get("rich_text", [])
+            if t_list:
+                ticker = t_list[0]["plain_text"].strip().upper().split('.')[0]
+                config["ticker_to_id"][ticker] = p["id"]
+                if p["properties"].get("구분", {}).get("select", {}).get("name") == "KR산업":
+                    config["kr_industry_tickers"].append(ticker)
+        if not res.get("has_more"): break
+        cursor = res.get("next_cursor")
+
+    # C. 산업BM 룩업 테이블 구축 (PDF 비중 분석)
+    industry_lookup = {}
+    logger.info(f"📊 {len(config['kr_industry_tickers'])}개 산업 ETF PDF 분석 중...")
+    for etf_t in config["kr_industry_tickers"]:
+        pdf = engine.get_etf_pdf(etf_t)
+        for item in pdf:
+            stk = item.get('stck_shrn_iscd')
+            w = float(item.get('etf_cnst_itms_rt') or 0)
+            if stk and (stk not in industry_lookup or w > industry_lookup[stk][1]):
+                industry_lookup[stk] = (etf_t, w)
+        time.sleep(0.1)
+    industry_lookup = {k: v[0] for k, v in industry_lookup.items()}
+
+    # D. 마스터 DB 모든 페이지 로드 (수동 업데이트 대응)
+    all_pages = []
+    cursor = None
+    while True:
+        res = client.databases.query(database_id=MASTER_DATABASE_ID, start_cursor=cursor)
+        all_pages.extend(res.get("results", []))
+        if not res.get("has_more"): break
+        cursor = res.get("next_cursor")
+
+    logger.info(f"🚀 총 {len(all_pages)}개 종목 업데이트 시작")
+    
+    # 병렬 처리 (안정적인 TPS 유지를 위해 max_workers 제한)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        for page in all_pages:
+            executor.submit(process_page, page, engine, client, config, k200, kd150, industry_lookup)
+            time.sleep(0.08)
+
+if __name__ == "__main__":
+    main()
