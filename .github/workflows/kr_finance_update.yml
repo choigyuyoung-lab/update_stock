@@ -36,3 +36,4 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           
         run: python update_finance_kr.py
+

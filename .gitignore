@@ -1,0 +1,14 @@
+.idea/
+.venv/
+__pycache__/
+*.pyc
+
+# 파이참 기본 생성 파일들
+shelf/
+workspace.xml
+httpRequests/
+queries/
+dataSources/
+dataSources.local.xml
+# created by virtualenv automatically ....
+*
