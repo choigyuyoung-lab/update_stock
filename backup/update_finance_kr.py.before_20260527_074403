@@ -51,9 +51,7 @@ def get_finance_data(ticker, token):
             "추정EPS": sf(o2.get('est_eps')), "목표주가": sf(o2.get('dstn_prce')) or sf(o1.get('dstn_prce')),
             "의견": o2.get('invt_opnn_nm')
         }
-    except Exception as e:
-        print(f"   ⚠️  [{ticker}] API 조회 실패: {str(e)[:100]}")
-        return {}
+    except: return {}
 
 # 3. 메인 로직 (재시도 기능 포함)
 def main():
@@ -82,15 +80,6 @@ def main():
                 if data.get("의견"): upd["목표가 범위"] = {"select": {"name": data["의견"]}}
                 if "마지막 업데이트" in props: upd["마지막 업데이트"] = {"date": {"start": datetime.now(kst).isoformat()}}
                 
-                # 데이터 조회 상태 확인
-                if not data or not upd:
-                    print(f"⚠️  [미취득] {ticker}: 데이터 없음")
-                    continue
-                
-                # 상세 정보 출력
-                data_summary = ", ".join([f"{k}={v}" for k, v in list(data.items())[:5]])
-                print(f"📊 [{ticker}] {data_summary}... (총 {len(upd)}개 필드 업데이트)")
-                
                 # 🌟 [보완] 노션 업데이트 재시도 로직
                 if upd:
                     success = False
@@ -113,7 +102,7 @@ def main():
                 time.sleep(0.3) # 노션 부하를 줄이기 위해 간격을 살짝 늘림
 
             except Exception as e:
-                print(f"❌ [에러] {ticker} 스킵: {str(e)[:200]}")
+                print(f"❌ [에러] {ticker} 스킵: {e}")
                 continue
 
         if not res.get("has_more"): break
