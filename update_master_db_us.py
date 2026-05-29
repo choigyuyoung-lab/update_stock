@@ -59,8 +59,14 @@ class StockAutomationEngineUS:
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
         
-        # 기초 데이터셋 로드
-        self.df_us_etf = fdr.StockListing('ETF/US')    
+        # 🛡️ [수정] 크롤링 에러(ValueError: No objects to concatenate) 방지를 위한 예외 처리 추가
+        try:
+            self.df_us_etf = fdr.StockListing('ETF/US')    
+        except Exception as e:
+            logger.warning(f"⚠️ fdr.StockListing('ETF/US') 로드 실패 (공백 우회 처리): {e}")
+            # 마켓 판별 로직(get_market_label)에서 에러가 터지지 않도록 스키마만 맞춘 빈 데이터프레임 생성
+            self.df_us_etf = pd.DataFrame(columns=['Symbol', 'Name'])
+
         self.df_sp500 = fdr.StockListing('S&P500')     
         self.df_nasdaq = fdr.StockListing('NASDAQ')    
         self.df_nyse = fdr.StockListing('NYSE')        
