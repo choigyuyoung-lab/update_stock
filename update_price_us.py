@@ -6,6 +6,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yfinance as yf
 
+
+# 👈 2. yfinance 및 pandas에서 발생하는 FutureWarning 경고 숨기기
+warnings.filterwarnings("ignore", category=FutureWarning, module="yfinance")
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+
+
 from notion_utils import (
     build_notion_client,
     get_env_var,
