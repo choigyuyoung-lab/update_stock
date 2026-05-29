@@ -3,6 +3,7 @@ import math
 import time
 import requests
 from datetime import timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from notion_utils import (
     build_notion_client,
@@ -13,7 +14,6 @@ from notion_utils import (
     safe_page_update,
     RETRY_STATUS_CODES,
 )
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 DATABASE_ID = get_env_var("DATABASE_ID")
@@ -67,7 +67,6 @@ def get_access_token(max_retries: int = 3, base_delay: float = 2.0) -> str:
                 return None
                 
         except requests.RequestException as exc:
-            # HTTPError 예외에서 상태 코드 추출
             status = None
             if hasattr(exc, "response") and exc.response is not None:
                 status = exc.response.status_code
@@ -109,12 +108,11 @@ def get_price_data(ticker: str, token: str, max_retries: int = 3, base_delay: fl
         try:
             response = SESSION.get(
                 url=f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
-                headers=headers,
+                headers={**headers},
                 params=params,
                 timeout=10,
             )
             
-            # 상태 코드 확인 (재시도 여부 결정)
             status = response.status_code
             if status in RETRY_STATUS_CODES and attempt < max_retries:
                 delay = base_delay * attempt
@@ -123,10 +121,8 @@ def get_price_data(ticker: str, token: str, max_retries: int = 3, base_delay: fl
                 attempt += 1
                 continue
             
-            # 성공하지 않은 상태 코드에서 예외 발생
             response.raise_for_status()
             
-            # 응답 파싱
             out = response.json().get("output", {})
             return {
                 "현재가": float(out.get("stck_prpr")) if out.get("stck_prpr") else None,
@@ -134,7 +130,6 @@ def get_price_data(ticker: str, token: str, max_retries: int = 3, base_delay: fl
             }
             
         except requests.exceptions.Timeout as exc:
-            # 타임아웃 에러는 재시도 가능
             if attempt < max_retries:
                 delay = base_delay * attempt
                 print(f"   ⚠️ [{ticker}] KIS API 타임아웃 재시도 {attempt}/{max_retries}, {delay}초 대기")
@@ -145,7 +140,6 @@ def get_price_data(ticker: str, token: str, max_retries: int = 3, base_delay: fl
             return {}
             
         except requests.exceptions.ConnectionError as exc:
-            # 연결 에러도 재시도 가능
             if attempt < max_retries:
                 delay = base_delay * attempt
                 print(f"   ⚠️ [{ticker}] KIS API 연결 에러 재시도 {attempt}/{max_retries}, {delay}초 대기")
@@ -156,7 +150,6 @@ def get_price_data(ticker: str, token: str, max_retries: int = 3, base_delay: fl
             return {}
             
         except requests.exceptions.HTTPError as exc:
-            # HTTP 에러에서 상태 코드 추출
             status = None
             if hasattr(exc, "response") and exc.response is not None:
                 status = exc.response.status_code
@@ -172,7 +165,6 @@ def get_price_data(ticker: str, token: str, max_retries: int = 3, base_delay: fl
             return {}
             
         except requests.RequestException as exc:
-            # 기타 요청 에러
             print(f"❌ [{ticker}] KIS API 요청 실패 (시도 {attempt}/{max_retries}): {exc}")
             return {}
             
@@ -182,6 +174,7 @@ def get_price_data(ticker: str, token: str, max_retries: int = 3, base_delay: fl
             
     print(f"❌ [{ticker}] KIS API: 최대 재시도 횟수 초과")
     return {}
+
 
 def build_update_for_page(page, token: str):
     props = page.get("properties", {})
@@ -216,7 +209,6 @@ def build_update_for_page(page, token: str):
 def batch_update_pages(notion_client, updates: list, batch_size: int = 5, delay_between_batches: float = 0.25):
     if not updates:
         return
-    # process in chunks of batch_size using a ThreadPool for parallel requests
     for i in range(0, len(updates), batch_size):
         chunk = updates[i : i + batch_size]
         with ThreadPoolExecutor(max_workers=len(chunk)) as exe:
@@ -241,21 +233,32 @@ def main() -> None:
         print("❌ KIS 액세스 토큰을 가져오지 못했습니다. 환경 변수를 확인하세요.")
         return
 
+    print("🚀 한투 가격 정보 실시간 수집 및 배치 업데이트 시작...")
     updates = []
-    batch_threshold = 20  # when to flush collected updates
+    batch_threshold = 20  
+    
     for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
         item = build_update_for_page(page, token)
+        
         if item:
             updates.append(item)
-        # Flush when enough updates collected to improve throughput
+            # 🛡️ [지연 보완] 한국 주식 데이터 수집이 성공적으로 진행되었다면, 
+            # 모의투자 초당 2건 제한 규칙(500ms)을 안전하게 준수하기 위해 0.5초 대기를 보장합니다.
+            time.sleep(0.5)
+        else:
+            # 주식이 아니거나 업데이트 대상이 아닐 때는 노션 스캔 제한 부하 유지를 위해 짧게 대기
+            time.sleep(0.1)
+            
+        # 버퍼 플러시 분기점
         if len(updates) >= batch_threshold:
             batch_update_pages(notion, updates, batch_size=5, delay_between_batches=0.25)
             updates.clear()
-        # Small delay between reading pages to avoid hammering the DB / API
-        time.sleep(0.1)
-    # flush any remaining updates
+            
+    # 남아있는 잔여 데이터 처리
     if updates:
         batch_update_pages(notion, updates, batch_size=5, delay_between_batches=0.25)
+        
+    print("✨ 모든 국내 주식 현재가 업데이트 프로세스가 완료되었습니다.")
 
 
 if __name__ == "__main__":
