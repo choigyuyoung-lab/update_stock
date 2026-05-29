@@ -213,65 +213,25 @@ def build_update_for_page(page, token: str):
     return (page["id"], ticker, update_props)
 
 
-def batch_collect_data(pages: list, token: str, max_workers: int = 5):
-    """
-    여러 페이지의 데이터를 병렬로 수집합니다.
-    ThreadPoolExecutor를 사용하여 API 호출을 동시에 처리합니다.
-    """
-    updates = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 모든 페이지에 대해 비동기 작업 제출
-        futures = {executor.submit(build_update_for_page, page, token): page for page in pages}
-        
-        for fut in as_completed(futures):
-            try:
-                result = fut.result()
-                if result:
-                    updates.append(result)
-            except Exception as exc:
-                page = futures[fut]
-                ticker = get_page_text(page.get("properties", {}), ["티커", "Ticker"]).upper() or "UNKNOWN"
-                print(f"❌ [{ticker}] 데이터 수집 중 에러: {exc}")
-    
-    return updates
-
-
-def batch_update_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.25):
-    """
-    배치 단위로 노션 페이지를 업데이트합니다.
-    각 배치는 parallel로 처리되며, 배치 간에는 delay를 두어 API 제한을 준수합니다.
-    """
+def batch_update_pages(notion_client, updates: list, batch_size: int = 5, delay_between_batches: float = 0.25):
     if not updates:
         return
-    
-    print(f"📦 [{len(updates)}개 항목] 배치 업데이트 시작 (배치 크기: {batch_size})")
-    success_count = 0
-    fail_count = 0
-    
-    for batch_idx, i in enumerate(range(0, len(updates), batch_size), 1):
+    # process in chunks of batch_size using a ThreadPool for parallel requests
+    for i in range(0, len(updates), batch_size):
         chunk = updates[i : i + batch_size]
-        print(f"   📤 배치 {batch_idx}/{(len(updates) + batch_size - 1) // batch_size} 처리 중 ({len(chunk)}개)...")
-        
-        with ThreadPoolExecutor(max_workers=min(len(chunk), 5)) as exe:
+        with ThreadPoolExecutor(max_workers=len(chunk)) as exe:
             futures = {exe.submit(safe_page_update, notion_client, pid, props): (pid, ticker) for pid, ticker, props in chunk}
             for fut in as_completed(futures):
                 pid, ticker = futures[fut]
                 try:
                     ok = fut.result()
                     if ok:
-                        print(f"      ✅ [Price] {ticker}")
-                        success_count += 1
+                        print(f"✅ [Price] {ticker} 업데이트 완료")
                     else:
-                        print(f"      ❌ [Price] {ticker} - 업데이트 실패")
-                        fail_count += 1
+                        print(f"❌ [Price] {ticker} 업데이트 실패")
                 except Exception as exc:
-                    print(f"      ❌ [Price] {ticker} - 예외 발생: {exc}")
-                    fail_count += 1
-        
-        if batch_idx < (len(updates) + batch_size - 1) // batch_size:
-            time.sleep(delay_between_batches)
-    
-    print(f"\n✨ 배치 업데이트 완료: 성공 {success_count}개, 실패 {fail_count}개")
+                    print(f"❌ [Price] {ticker} 업데이트 중 예외: {exc}")
+        time.sleep(delay_between_batches)
 
 
 def main() -> None:
@@ -281,37 +241,21 @@ def main() -> None:
         print("❌ KIS 액세스 토큰을 가져오지 못했습니다. 환경 변수를 확인하세요.")
         return
 
-    print("🚀 한투 주가 대량 업데이트 시작...")
-    all_pages = []
-    
-    # 1단계: 모든 페이지 수집
-    print("📋 노션 데이터베이스 스캔 중...")
-    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
-        all_pages.append(page)
-    
-    print(f"📊 총 {len(all_pages)}개 항목 발견")
-    
-    # 2단계: 배치 크기로 그룹화하여 데이터 수집 (병렬화)
-    batch_collect_size = 30  # 한 번에 30개씩 병렬 수집
     updates = []
-    
-    for batch_idx, i in enumerate(range(0, len(all_pages), batch_collect_size), 1):
-        batch = all_pages[i : i + batch_collect_size]
-        print(f"\n🔄 데이터 수집 배치 {batch_idx}/{(len(all_pages) + batch_collect_size - 1) // batch_collect_size} ({len(batch)}개 항목)")
-        
-        batch_updates = batch_collect_data(batch, token, max_workers=5)
-        updates.extend(batch_updates)
-        
-        # 배치 간에 짧은 대기 (API 제한 준수)
-        if i + batch_collect_size < len(all_pages):
-            time.sleep(0.5)
-    
-    # 3단계: 수집된 데이터를 배치로 노션에 업데이트
+    batch_threshold = 20  # when to flush collected updates
+    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
+        item = build_update_for_page(page, token)
+        if item:
+            updates.append(item)
+        # Flush when enough updates collected to improve throughput
+        if len(updates) >= batch_threshold:
+            batch_update_pages(notion, updates, batch_size=5, delay_between_batches=0.25)
+            updates.clear()
+        # Small delay between reading pages to avoid hammering the DB / API
+        time.sleep(0.1)
+    # flush any remaining updates
     if updates:
-        print(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
-        batch_update_pages(notion, updates, batch_size=10, delay_between_batches=0.25)
-    else:
-        print("⚠️ 업데이트할 항목이 없습니다.")
+        batch_update_pages(notion, updates, batch_size=5, delay_between_batches=0.25)
 
 
 if __name__ == "__main__":

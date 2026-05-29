@@ -19,6 +19,7 @@ from notion_utils import (
     get_page_text,
     paginate_database,
     safe_page_update,
+    kst_isoformat,
 )
 
 # ---------------------------------------------------------
