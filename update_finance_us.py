@@ -1,12 +1,22 @@
-import os, time, math, logging
+import logging
+import math
+import time
+
 import yfinance as yf
 from datetime import datetime, timedelta, timezone
-from notion_client import Client
 
-# 설정
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-DATABASE_ID = os.environ.get("DATABASE_ID") 
-notion = Client(auth=NOTION_TOKEN)
+from notion_utils import (
+    build_notion_client,
+    get_env_var,
+    get_page_text,
+    kst_isoformat,
+    paginate_database,
+    safe_page_update,
+)
+
+NOTION_TOKEN = get_env_var("NOTION_TOKEN")
+DATABASE_ID = get_env_var("DATABASE_ID")
+notion = build_notion_client(NOTION_TOKEN)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -68,51 +78,37 @@ def main():
     success_cnt = 0
     number_keys = ["PER", "추정PER", "EPS", "추정EPS", "PBR", "BPS", "배당수익률", "52주 최고가", "52주 최저가", "목표주가"]
 
-    while True:
-        try:
-            res = notion.databases.query(database_id=DATABASE_ID, start_cursor=next_cursor, page_size=100)
-        except Exception as e:
-            logger.error(f"❌ 노션 쿼리 실패: {e}")
-            break
+    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
+        props = page.get("properties", {})
+        ticker = get_page_text(props, ["티커", "Ticker"]).upper()
+        if not ticker:
+            continue
 
-        pages = res.get("results", [])
-        for page in pages:
-            props = page["properties"]
-            ticker = ""
-            
-            # 티커 추출 및 한국 주식 판별 (최적화 버전)
-            for name in ["티커", "Ticker"]:
-                if name in props:
-                    content = props.get(name, {}).get("title") or props.get(name, {}).get("rich_text")
-                    if content:
-                        ticker = content[0].get("plain_text", "").strip().upper()
-                        is_kr = (ticker.endswith(('.KS', '.KQ')) or (len(ticker) >= 6 and ticker[0].isdigit())) and not ticker.endswith(('.T', '.TA', '.TW'))
-                        break
-            
-            if not ticker or is_kr: continue
+        is_kr = (ticker.endswith((".KS", ".KQ")) or (len(ticker) >= 6 and ticker[0].isdigit())) and not ticker.endswith((".T", ".TA", ".TW"))
+        if is_kr:
+            continue
 
-            fin_data = get_us_fin_optimized(ticker)
-            upd = {key: {"number": fin_data[key] if is_valid(fin_data[key]) else None} for key in number_keys}
-            
-            # 의견(Select) 및 마지막 업데이트(Date) 추가
-            if fin_data.get("의견"):
-                upd["목표가 범위"] = {"select": {"name": fin_data["의견"]}}
-            
-            if "마지막 업데이트" in props:
-                upd["마지막 업데이트"] = {"date": {"start": datetime.now(kst).isoformat()}}
-            
-            try:
-                notion.pages.update(page_id=page["id"], properties=upd)
-                logger.info(f"   ✅ [Global: {ticker}] 업데이트 완료")
-                success_cnt += 1
-            except Exception as e:
-                logger.error(f"   ❌ [{ticker}] 전송 실패: {e}")
-            
-            time.sleep(0.4) # API 속도 제한 준수
+        fin_data = get_us_fin_optimized(ticker)
+        update_props = {
+            key: {"number": fin_data[key]}
+            for key in number_keys
+            if is_valid(fin_data.get(key))
+        }
 
-        if not res.get("has_more"): break
-        next_cursor = res.get("next_cursor")
-        time.sleep(2)
+        if fin_data.get("의견"):
+            update_props["목표가 범위"] = {"select": {"name": fin_data["의견"]}}
+        if "마지막 업데이트" in props:
+            update_props["마지막 업데이트"] = {"date": {"start": kst_isoformat()}}
+
+        if not update_props:
+            logger.info(f"⚠️ [{ticker}] 업데이트할 유효 데이터 없음")
+            continue
+
+        if safe_page_update(notion, page["id"], update_props):
+            logger.info(f"   ✅ [Global: {ticker}] 업데이트 완료")
+            success_cnt += 1
+
+        time.sleep(0.4)
 
     logger.info(f"✨ 종료. 총 {success_cnt}건 처리 완료.")
 

@@ -1,4 +1,8 @@
-import os, re, time, logging, io
+import os
+import re
+import time
+import logging
+import io
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
@@ -8,12 +12,19 @@ import FinanceDataReader as fdr
 from pykrx import stock
 from notion_client import Client
 
+from notion_utils import (
+    build_notion_client,
+    get_env_var,
+    paginate_database,
+    safe_page_update,
+)
+
 # ---------------------------------------------------------
 # 1. 환경 변수 및 설정
 # ---------------------------------------------------------
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-MASTER_DATABASE_ID = os.environ.get("MASTER_DATABASE_ID")
-BENCHMARK_DATABASE_ID = os.environ.get("BENCHMARK_DATABASE_ID")
+NOTION_TOKEN = get_env_var("NOTION_TOKEN")
+MASTER_DATABASE_ID = get_env_var("MASTER_DATABASE_ID")
+BENCHMARK_DATABASE_ID = get_env_var("BENCHMARK_DATABASE_ID")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -50,30 +61,20 @@ def get_dynamic_config(client):
     logger.info("🔍 지표지수 DB 동적 분석 시작...")
     config = {"ticker_to_id": {}, "kr_industry_tickers": []}
     try:
-        pages = []
-        cursor = None
-        while True:
-            # 100개 이상의 지표를 누락 없이 가져오기 위한 페이지네이션[cite: 3]
-            query_params = {"database_id": BENCHMARK_DATABASE_ID, "page_size": 100}
-            if cursor: query_params["start_cursor"] = cursor
-            res = client.databases.query(**query_params)
-            pages.extend(res.get("results", []))
-            if not res.get("has_more"): break
-            cursor = res.get("next_cursor")
-
-        for page in pages:
-            props = page["properties"]
+        for page in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.2):
+            props = page.get("properties", {})
             ticker_list = props.get("이름", {}).get("title", [])
-            if not ticker_list: continue
-            ticker = ticker_list[0]["plain_text"].strip().upper()
-            
-            # NoneType 에러 방지를 위한 안전한 속성 추출[cite: 3]
+            if not ticker_list:
+                continue
+
+            ticker = ticker_list[0].get("plain_text", "").strip().upper()
             select_obj = props.get("구분", {}).get("select")
             category = select_obj.get("name", "") if select_obj else ""
-            
+
             config["ticker_to_id"][ticker] = page["id"]
             if category == "KR산업":
                 config["kr_industry_tickers"].append(ticker)
+
         logger.info(f"✅ 지표 로드 완료 (총 {len(config['ticker_to_id'])}개)")
     except Exception as e:
         logger.error(f"❌ 지표 DB 로드 실패: {e}")
@@ -203,25 +204,23 @@ def process_page_kr(page, engine, client, config):
 # 5. 메인 실행 함수
 # ---------------------------------------------------------
 def main():
-    custom_client = httpx.Client(timeout=60.0)
-    client = Client(auth=NOTION_TOKEN, client=custom_client)
+    client = build_notion_client(NOTION_TOKEN, use_httpx=True, timeout=60.0)
     config = get_dynamic_config(client)
     engine = StockAutomationEngineKR(config["kr_industry_tickers"])
-    
-    all_pages, cursor = [], None
-    while True:
-        res = client.databases.query(database_id=MASTER_DATABASE_ID, start_cursor=cursor)
-        all_pages.extend(res.get("results", []))
-        if not res.get("has_more"): break
-        cursor = res.get("next_cursor")
-        time.sleep(0.1)
+
+    all_pages = []
+    for page in paginate_database(client, MASTER_DATABASE_ID, page_size=100, retry_delay=0.1):
+        all_pages.append(page)
 
     if all_pages:
         with ThreadPoolExecutor(max_workers=5) as executor:
-            for page in all_pages:
-                executor.submit(process_page_kr, page, engine, client, config)
-                time.sleep(0.1)
-    
+            futures = [executor.submit(process_page_kr, page, engine, client, config) for page in all_pages]
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.error(f"❌ 페이지 처리 중 에러: {exc}")
+
     logger.info("✨ 한국 주식 마스터 DB 통합 업데이트 프로세스 완료")
 
 if __name__ == "__main__":
