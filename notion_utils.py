@@ -21,15 +21,19 @@ def build_notion_client(auth_token: str, use_httpx: bool = False, timeout: float
     if use_httpx:
         import httpx
 
-        client = httpx.Client(timeout=timeout)
-        return Client(auth=auth_token, client=client)
+        # httpx.Client type can be passed to notion_client; annotate as Any to satisfy static checkers
+        httpx_client: Any = httpx.Client(timeout=timeout)
+        return Client(auth=auth_token, client=httpx_client)
     return Client(auth=auth_token)
 
 
 def _format_notion_error(error: Exception) -> str:
+    # Format common fields from HTTPResponseError if present, using getattr to avoid attribute errors
     if isinstance(error, HTTPResponseError):
+        status = getattr(error, "status", None)
+        message = getattr(error, "message", None) or str(error)
         body = getattr(error, "body", None)
-        return f"status={error.status}, message={error.message or error}, body={body}"
+        return f"status={status}, message={message}, body={body}"
     return str(error)
 
 
