@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+import warnings  # 👈 이 줄이 반드시 들어가 있어야 합니다!
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
