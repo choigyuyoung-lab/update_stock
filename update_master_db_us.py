@@ -13,6 +13,10 @@ import yfinance as yf
 import FinanceDataReader as fdr
 from notion_client import Client
 
+# 1. 여기에 dotenv 라이브러리를 가져오는 코드를 추가합니다.
+from dotenv import load_dotenv
+load_dotenv()
+
 from notion_utils import (
     build_notion_client,
     get_env_var,
