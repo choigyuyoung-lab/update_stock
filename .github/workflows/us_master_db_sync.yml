@@ -28,3 +28,4 @@ jobs:
         BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
         IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       run: python update_master_db_us.py
+

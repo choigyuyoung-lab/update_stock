@@ -1,7 +1,7 @@
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, cast
 
 from notion_client import Client
 from notion_client.errors import HTTPResponseError
@@ -11,10 +11,11 @@ DEFAULT_PAGE_SIZE = 100
 
 
 def get_env_var(name: str, required: bool = True, default: Optional[str] = None) -> str:
-    value = os.environ.get(name, default)
+    value: Optional[str] = os.environ.get(name, default)
     if required and not value:
         raise EnvironmentError(f"환경 변수 {name}이(가) 설정되지 않았습니다.")
-    return value
+    # At this point, mypy/pylance may still see Optional[str]; cast to `str` to satisfy checkers
+    return cast(str, value)
 
 
 def build_notion_client(auth_token: str, use_httpx: bool = False, timeout: float = 60.0) -> Client:
@@ -38,7 +39,7 @@ def _format_notion_error(error: Exception) -> str:
 
 
 def safe_databases_query(
-    client: Client,
+    client: Any,
     database_id: str,
     start_cursor: Optional[str] = None,
     page_size: int = DEFAULT_PAGE_SIZE,
@@ -51,7 +52,9 @@ def safe_databases_query(
             params = {"database_id": database_id, "page_size": page_size}
             if start_cursor:
                 params["start_cursor"] = start_cursor
-            return client.databases.query(**params)
+            # notion_client methods may return SyncAsync[...] (sync value or awaitable).
+            # Use cast to Dict[str, Any] to satisfy static type checkers in synchronous usage.
+            return cast(Dict[str, Any], client.databases.query(**params))
         except HTTPResponseError as error:
             status = getattr(error, "status", None)
             if status in RETRY_STATUS_CODES and attempt < max_retries:
@@ -70,7 +73,7 @@ def safe_databases_query(
 
 
 def paginate_database(
-    client: Client,
+    client: Any,
     database_id: str,
     page_size: int = DEFAULT_PAGE_SIZE,
     retry_delay: float = 1.0,
@@ -87,7 +90,7 @@ def paginate_database(
 
 
 def safe_page_update(
-    client: Client,
+    client: Any,
     page_id: str,
     properties: Dict[str, Any],
     max_retries: int = 3,
@@ -99,7 +102,8 @@ def safe_page_update(
     attempt = 1
     while True:
         try:
-            client.pages.update(page_id=page_id, properties=properties)
+            # pages.update may be SyncAsync[...] — running synchronously here; cast return as Any
+            _ = cast(Any, client.pages.update(page_id=page_id, properties=properties))
             return True
         except HTTPResponseError as error:
             status = getattr(error, "status", None)
