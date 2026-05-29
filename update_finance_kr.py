@@ -2,6 +2,8 @@ import json
 import math
 import time
 import requests
+# 🛡️ [수정] NameError 해결을 위한 ThreadPoolExecutor 및 as_completed 임포트 추가
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from notion_utils import (
     build_notion_client,
@@ -209,7 +211,6 @@ def get_finance_data(ticker: str, token: str, max_retries: int = 3, base_delay: 
     return {}
 
 
-
 def is_kr_ticker(ticker: str) -> bool:
     if not ticker:
         return False
@@ -355,7 +356,6 @@ def main() -> None:
         batch_update_finance_pages(notion, updates, batch_size=10, delay_between_batches=0.3)
     else:
         print("⚠️ 업데이트할 항목이 없습니다.")
-
 
 
 if __name__ == "__main__":
