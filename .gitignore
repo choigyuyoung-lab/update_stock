@@ -1,5 +1,7 @@
 .idea/
 .venv/
+.venv311/
+.env
 __pycache__/
 *.pyc
 # GitHub Actions 워크플로우 파일은 무조건 제외하지 말고 포함하기
