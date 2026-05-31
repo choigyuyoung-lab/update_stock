@@ -2,7 +2,7 @@ import json
 import math
 import time
 import requests
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from notion_utils import (
     build_notion_client,
     get_env_var,
