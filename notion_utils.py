@@ -2,7 +2,8 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo  # 🌟 파이썬 3.9+ 해외 서버 시간 왜곡 차단 표준 라이브러리
 from typing import Any, Dict, Iterable, List, Optional, cast
 
 from notion_client import Client
@@ -16,22 +17,18 @@ def get_env_var(name: str, required: bool = True, default: Optional[str] = None)
     value: Optional[str] = os.environ.get(name, default)
     if required and not value:
         raise EnvironmentError(f"환경 변수 {name}이(가) 설정되지 않았습니다.")
-    # At this point, mypy/pylance may still see Optional[str]; cast to `str` to satisfy checkers
     return cast(str, value)
 
 
 def build_notion_client(auth_token: str, use_httpx: bool = False, timeout: float = 60.0) -> Client:
     if use_httpx:
         import httpx
-
-        # httpx.Client type can be passed to notion_client; annotate as Any to satisfy static checkers
         httpx_client: Any = httpx.Client(timeout=timeout)
         return Client(auth=auth_token, client=httpx_client)
     return Client(auth=auth_token)
 
 
 def _format_notion_error(error: Exception) -> str:
-    # Format common fields from HTTPResponseError if present, using getattr to avoid attribute errors
     if isinstance(error, HTTPResponseError):
         status = getattr(error, "status", None)
         message = getattr(error, "message", None) or str(error)
@@ -54,8 +51,6 @@ def safe_databases_query(
             params = {"database_id": database_id, "page_size": page_size}
             if start_cursor:
                 params["start_cursor"] = start_cursor
-            # notion_client methods may return SyncAsync[...] (sync value or awaitable).
-            # Use cast to Dict[str, Any] to satisfy static type checkers in synchronous usage.
             return cast(Dict[str, Any], client.databases.query(**params))
         except HTTPResponseError as error:
             status = getattr(error, "status", None)
@@ -104,7 +99,6 @@ def safe_page_update(
     attempt = 1
     while True:
         try:
-            # pages.update may be SyncAsync[...] — running synchronously here; cast return as Any
             _ = cast(Any, client.pages.update(page_id=page_id, properties=properties))
             return True
         except HTTPResponseError as error:
@@ -139,4 +133,5 @@ def get_page_text(props: Dict[str, Any], names: List[str]) -> str:
 
 
 def kst_isoformat() -> str:
-    return datetime.now(timezone(timedelta(hours=9))).isoformat()
+    """🌟 전 세계 어느 가상 서버에서 실행되든 실제 대한민국 서울 표준시(KST)를 절대값으로 계산해 반환합니다."""
+    return datetime.now(ZoneInfo("Asia/Seoul")).isoformat()

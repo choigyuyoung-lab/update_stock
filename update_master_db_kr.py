@@ -4,7 +4,8 @@ import time
 import logging
 import io
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
+from zoneinfo import ZoneInfo  # 🌟 파이썬 3.9+ 타임존 표준 라이브러리
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 import pandas as pd
@@ -35,13 +36,13 @@ HEADERS = {
     "KR_INDUSTRY": ['Industry', '주요제품', 'WICS 제품']
 }
 
-# 🌟 최종 완성된 테마 ETF 판별 규칙 (광통신 네트워크 추가)
+# 최종 완성된 테마 ETF 판별 규칙
 ETF_THEME_RULES = {
     "S&P500": {"tag": "S&P 500", "bm": "SPY"},
     "나스닥100": {"tag": "NASDAQ 100", "bm": "QQQ"},
     "미국배당": {"tag": "US Dividend", "bm": "SCHD"},
     "AI전력": {"tag": "US AI Power", "bm": "XLU"},
-    "AI광통신": {"tag": "US AI Optical Network", "bm": "IGN"}, # 👈 추가된 로직
+    "AI광통신": {"tag": "US AI Optical Network", "bm": "IGN"},
     "미국빅테크": {"tag": "US Big Tech", "bm": "XLK"},
     "구글밸류": {"tag": "Google Focused", "bm": "QQQ"},
     "마이크로소프트밸류": {"tag": "MS Focused", "bm": "QQQ"},
@@ -55,13 +56,13 @@ ETF_THEME_RULES = {
 }
 
 # ---------------------------------------------------------
-# 2. 지표 DB 동적 분석 (전체 로드 및 에러 방지)
+# 2. 지표 DB 동적 분석
 # ---------------------------------------------------------
 def get_dynamic_config(client):
     logger.info("🔍 지표지수 DB 동적 분석 시작...")
     config = {"ticker_to_id": {}, "kr_industry_tickers": []}
     try:
-        for page in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.2):
+        for page in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.3):
             props = page.get("properties", {})
             ticker_list = props.get("이름", {}).get("title", [])
             if not ticker_list:
@@ -86,35 +87,59 @@ def get_dynamic_config(client):
 class StockAutomationEngineKR:
     def __init__(self, kr_industry_tickers):
         logger.info("📡 KRX 데이터 엔진 가동...")
-        # 상세 텍스트 정보 수집용[cite: 4]
+        
+        # 1번 피드백 반영: 대량 스캔 인프라 안정화 마진 구현
         self.df_kr_desc = fdr.StockListing('KRX-DESC').set_index('Code')
         self.kr_etf = fdr.StockListing('ETF/KR').set_index('Symbol').to_dict('index')
+        
+        # 지수 추적용 포트폴리오 로드 간격 배분 (KRX 서버 디도스 감지 회피)
         self.k200_list = self._get_index_list("1028")
+        time.sleep(0.5)  
         self.kd150_list = self._get_index_list("2203")
-        # ETF PDF 기반 최고 비중 매핑[cite: 3]
+        time.sleep(0.5)
+        
+        # ETF PDF 기반 종목별 산업 매핑 연산 가동
         self.kr_industry_lookup = self._build_industry_lookup(kr_industry_tickers)
 
     def _get_index_list(self, code):
+        """KRX 인덱스 포트폴리오를 조회하되 실패 시 타임아웃 백오프를 수행합니다."""
+        # 지보 자산 연산 시 한국 표준시 기준으로 백테스팅 날짜 산출
+        kst_today = datetime.now(ZoneInfo("Asia/Seoul"))
         for i in range(5):
-            date = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+            date = (kst_today - timedelta(days=i)).strftime("%Y%m%d")
             try:
                 res = stock.get_index_portfolio_deposit_file(code, date)
-                if res and len(res) > 50: return res
-            except: continue
+                if res and len(res) > 50: 
+                    return res
+            except Exception as e:
+                logger.warning(f"⚠️ 지수 [{code}] 조회 시도 실패 ({date}): {e}")
+                time.sleep(1.0 * (i + 1))
+                continue
         return []
 
     def _build_industry_lookup(self, tickers):
+        """산업별 ETF 구성을 파싱할 때 거래소 IP 차단을 완벽 방어하기 위한 슬립 타임을 둡니다."""
         lookup = {}
+        logger.info(f"📦 총 {len(tickers)}개 산업 ETF의 PDF 구성 종목 분석 중...")
         for etf_t in tickers:
             try:
                 pdf = stock.get_etf_portfolio_deposit_file(etf_t)
+                # 🌟 1번 반영: KRX 수집 서버 트래픽 0.4초 댐퍼 장치
+                time.sleep(0.4)
+                
                 if pdf is not None and not pdf.empty:
                     w_col = '비중' if '비중' in pdf.columns else pdf.columns[0]
                     for stock_t, row in pdf.iterrows():
-                        weight = float(row[w_col])
-                        if stock_t not in lookup or weight > lookup[stock_t][1]:
-                            lookup[stock_t] = (etf_t, weight)
-            except: continue
+                        try:
+                            weight = float(row[w_col])
+                            if stock_t not in lookup or weight > lookup[stock_t][1]:
+                                lookup[stock_t] = (etf_t, weight)
+                        except (ValueError, TypeError):
+                            continue
+            except Exception as e:
+                logger.warning(f"⚠️ ETF [{etf_t}] PDF 수집 건너뜀: {e}")
+                time.sleep(1.0)
+                continue
         return {k: v[0] for k, v in lookup.items()}
 
     def _get_val_from_headers(self, row, candidates):
@@ -129,7 +154,8 @@ class StockAutomationEngineKR:
 def process_page_kr(page, engine, client, config):
     pid, props = page["id"], page["properties"]
     ticker_prop = props.get("티커") or props.get("Ticker")
-    if not ticker_prop: return
+    if not ticker_prop: 
+        return None
     
     ticker_val = ticker_prop.get("title", [{}])[0].get("plain_text", "").strip()
     clean_t = re.search(r'(\d{6})', ticker_val).group(1) if re.search(r'\d{6}', ticker_val) else ticker_val
@@ -146,11 +172,9 @@ def process_page_kr(page, engine, client, config):
         m_raw = str(item.get('Market', '')).upper()
         market_label = "ETF(KR)" if is_etf else ("KOSDAQ" if "KOSDAQ" in m_raw else "KOSPI")
         
-        # 기초 텍스트 정보 추출[cite: 4]
         sec_val = engine._get_val_from_headers(item, HEADERS['KR_SECTOR']) if not is_etf else item.get('Category')
         ind_val = engine._get_val_from_headers(item, HEADERS['KR_INDUSTRY']) if not is_etf else "ETF"
 
-        # 테마 판별 및 시장BM 결정[cite: 3]
         us_tracking_tag = None
         target_m_t = None
         
@@ -162,7 +186,6 @@ def process_page_kr(page, engine, client, config):
                     target_m_t = rule["bm"]
                     break
 
-        # 일반 시장BM 로직 (테마가 없는 경우)[cite: 3]
         if not target_m_t:
             if clean_t in engine.k200_list: target_m_t = "069500"
             elif clean_t in engine.kd150_list: target_m_t = "229200"
@@ -174,19 +197,20 @@ def process_page_kr(page, engine, client, config):
         def make_rich_text(val):
             return {"rich_text": [{"text": {"content": str(val)}}]} if val else {"rich_text": []}
 
+        # 🌟 3번 반영: 깃허브 가상 서버용 KST 강제 지정 ISO 8601 타임스탬프 산출법 교정
+        now_str = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+
         update_props = {
             "종목명": make_rich_text(stock_name),
             "Market": {"select": {"name": market_label}},
             "KR_섹터": make_rich_text(sec_val),
             "KR_산업": make_rich_text(ind_val),
-            "업데이트 일자": {"date": {"start": datetime.now().isoformat()}}
+            "업데이트 일자": {"date": {"start": now_str}}
         }
         
-        # '우량주' 열에 테마 태그 부여[cite: 4]
         if us_tracking_tag:
             update_props["우량주"] = {"multi_select": [{"name": us_tracking_tag}]}
         
-        # 시장/산업 BM 관계형 연결[cite: 3]
         if target_m_t and target_m_t != clean_t:
             if m_id := config["ticker_to_id"].get(target_m_t):
                 update_props["시장BM"] = {"relation": [{"id": m_id}]}
@@ -194,11 +218,8 @@ def process_page_kr(page, engine, client, config):
             if ind_id := config["ticker_to_id"].get(target_ind_t):
                 update_props["산업BM"] = {"relation": [{"id": ind_id}]}
 
-        try:
-            client.pages.update(page_id=pid, properties=update_props)
-            logger.info(f"   ✅ [KR] {clean_t} ({stock_name}) 업데이트 완료")
-        except Exception as e:
-            logger.error(f"   ❌ [KR] {clean_t} 실패: {e}")
+        return pid, update_props, clean_t, stock_name
+    return None
 
 # ---------------------------------------------------------
 # 5. 메인 실행 함수
@@ -209,17 +230,43 @@ def main():
     engine = StockAutomationEngineKR(config["kr_industry_tickers"])
 
     all_pages = []
-    for page in paginate_database(client, MASTER_DATABASE_ID, page_size=100, retry_delay=0.1):
+    logger.info("📋 마스터 DB 스캔 및 대상 페이지 추출 시작...")
+    for page in paginate_database(client, MASTER_DATABASE_ID, page_size=100, retry_delay=0.3):
         all_pages.append(page)
 
-    if all_pages:
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(process_page_kr, page, engine, client, config) for page in all_pages]
-            for future in futures:
+    logger.info(f"📊 총 {len(all_pages)}개의 동기화 대상 목록 확보 완료")
+
+    # 가상 연산 스텝 (데이터만 추출하므로 단일 루프로 쾌속 처리)
+    update_payloads = []
+    for page in all_pages:
+        res = process_page_kr(page, engine, client, config)
+        if res:
+            update_payloads.append(res)
+
+    # 🌟 2번 반영: 노션 API 쓰기 차단 우회용 동시 워커 제어 장치 가동
+    if update_payloads:
+        logger.info(f"📝 {len(update_payloads)}개 종목 노션 DB 반영 시작 (안전 동시 워커 제어)...")
+        
+        # 노션 쓰기 작업은 3개의 제한된 워커로 분산하여 초당 요청 상한선(TPS)을 영리하게 준수합니다.
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(safe_page_update, client, pid, props): (ticker, name)
+                for pid, props, ticker, name in update_payloads
+            }
+            
+            for idx, future in enumerate(as_completed(futures), 1):
+                ticker, name = futures[future]
                 try:
-                    future.result()
+                    success = future.result()
+                    if success:
+                        logger.info(f"   ✅ [{idx}/{len(update_payloads)}] [Master Sync] {ticker} ({name}) 동기화 성공")
+                    else:
+                        logger.warning(f"   ❌ [{idx}/{len(update_payloads)}] [Master Sync] {ticker} ({name}) 노션 반영 실패")
                 except Exception as exc:
-                    logger.error(f"❌ 페이지 처리 중 에러: {exc}")
+                    logger.error(f"   ❌ [{ticker}] 트랜잭션 에러 발생: {exc}")
+                
+                # 쓰레드 반환 후 마진 시간(0.1초) 부여로 레이트 리밋 이중 방어
+                time.sleep(0.1)
 
     logger.info("✨ 한국 주식 마스터 DB 통합 업데이트 프로세스 완료")
 
