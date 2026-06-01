@@ -129,7 +129,7 @@ def get_finance_data(ticker: str, token: str, max_retries: int = 4, base_delay: 
             response.raise_for_status()
             output = response.json().get("output", {})
 
-            time.sleep(0.3)
+            time.sleep(0.1)  # 🌟 대기 시간 최소화 (0.3s -> 0.1s)
             
             # 2단계: 투자의견 조회
             response = SESSION.get(
@@ -222,7 +222,7 @@ def build_finance_update_for_page(page, token: str):
 
     preview = ", ".join([f"{k}={v}" for k, v in list(data.items())[:3]])
     
-    time.sleep(0.2)
+    # 🌟 불필요한 대기 시간(0.2s) 제거로 전체 성능 대폭 향상
     return (page["id"], ticker, update_props, preview)
 
 
@@ -244,7 +244,7 @@ def batch_collect_finance_data(pages: list, token: str, max_workers: int = 3):
     return updates
 
 
-def batch_update_finance_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.5):
+def batch_update_finance_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.3):
     if not updates:
         return
     
@@ -256,7 +256,8 @@ def batch_update_finance_pages(notion_client, updates: list, batch_size: int = 1
         chunk = updates[i : i + batch_size]
         print(f"   📤 배치 {batch_idx}/{(len(updates) + batch_size - 1) // batch_size} 처리 중 ({len(chunk)}개)...")
         
-        with ThreadPoolExecutor(max_workers=min(len(chunk), 4)) as exe:
+        # 🌟 노션 API 속도 최적화를 위해 max_workers=5로 패싱
+        with ThreadPoolExecutor(max_workers=min(len(chunk), 5)) as exe:
             futures = {}
             for pid, ticker, props, preview in chunk:
                 fut = exe.submit(safe_page_update, notion_client, pid, props)
@@ -309,7 +310,7 @@ def main() -> None:
         updates.extend(batch_updates)
         
         if i + batch_collect_size < len(all_pages):
-            time.sleep(1.5)
+            time.sleep(0.5)  # 🌟 대기 시간 단축 (1.5s -> 0.5s)
     
     if updates:
         print(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")

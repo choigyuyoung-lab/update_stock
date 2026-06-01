@@ -193,15 +193,33 @@ def build_update_for_page(page, token: str):
     return (page["id"], ticker, update_props)
 
 
-def batch_update_pages(notion_client, updates: list, batch_size: int = 5, delay_between_batches: float = 0.4):
+def batch_collect_price_data(pages: list, token: str, max_workers: int = 3) -> list:
+    """ 여러 페이지의 국내 주식 가격 데이터를 병렬로 수집합니다. """
+    updates = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(build_update_for_page, page, token): page for page in pages}
+        for fut in as_completed(futures):
+            try:
+                result = fut.result()
+                if result:
+                    updates.append(result)
+            except Exception as exc:
+                page = futures[fut]
+                props = page.get("properties", {})
+                ticker = get_page_text(props, ["티커", "Ticker"]).upper() or "UNKNOWN"
+                print(f"❌ [{ticker}] 데이터 수집 중 예외 발생: {exc}")
+    return updates
+
+
+def batch_update_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.3):
     """ 수집된 가격 정보를 배치화하여 노션에 안전하게 밀어 넣습니다. """
     if not updates:
         return
     for i in range(0, len(updates), batch_size):
         chunk = updates[i : i + batch_size]
         
-        # 🌟 노션 API 리밋을 초과하지 않도록 안전 워커 수(max_workers=3)로 패싱
-        with ThreadPoolExecutor(max_workers=min(len(chunk), 3)) as exe:
+        # 🌟 노션 API 속도 최적화를 위해 max_workers=5로 패싱
+        with ThreadPoolExecutor(max_workers=min(len(chunk), 5)) as exe:
             futures = {exe.submit(safe_page_update, notion_client, pid, props): (pid, ticker) for pid, ticker, props in chunk}
             for fut in as_completed(futures):
                 pid, ticker = futures[fut]
@@ -225,27 +243,32 @@ def main() -> None:
         return
 
     print("🚀 한투 가격 정보 실시간 수집 및 배치 업데이트 시작...")
-    updates = []
-    batch_threshold = 20  
+    all_pages = []
     
-    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.4):
-        item = build_update_for_page(page, token)
+    print("📋 노션 데이터베이스 스캔 중...")
+    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
+        all_pages.append(page)
         
-        if item:
-            updates.append(item)
-            # 모의투자 초당 2건 제한 규칙 완벽 준수를 위한 완충 장치
+    print(f"📊 총 {len(all_pages)}개 항목 발견")
+    
+    batch_collect_size = 20
+    updates = []
+    
+    for batch_idx, i in enumerate(range(0, len(all_pages), batch_collect_size), 1):
+        batch = all_pages[i : i + batch_collect_size]
+        print(f"\n🔄 가격 데이터 수집 배치 {batch_idx}/{(len(all_pages) + batch_collect_size - 1) // batch_collect_size} ({len(batch)}개 항목)")
+        
+        batch_updates = batch_collect_price_data(batch, token, max_workers=3)
+        updates.extend(batch_updates)
+        
+        if i + batch_collect_size < len(all_pages):
             time.sleep(0.5)
-        else:
-            time.sleep(0.1)
             
-        # 버퍼 분할 동기화 처리
-        if len(updates) >= batch_threshold:
-            batch_update_pages(notion, updates, batch_size=5, delay_between_batches=0.4)
-            updates.clear()
-            
-    # 잔여 수집 분량 마감 처리
     if updates:
-        batch_update_pages(notion, updates, batch_size=5, delay_between_batches=0.4)
+        print(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
+        batch_update_pages(notion, updates, batch_size=10, delay_between_batches=0.3)
+    else:
+        print("⚠️ 업데이트할 항목이 없습니다.")
         
     print("✨ 모든 국내 주식 현재가 업데이트 프로세스가 완료되었습니다.")
 
