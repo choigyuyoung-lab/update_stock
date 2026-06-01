@@ -4,7 +4,24 @@ import time
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 import yfinance as yf
+
+# 🌟 yfinance용 글로벌 HTTP 세션 설정 (Connection: close 및 자동 재시도 적용)
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Connection": "close"
+})
+retries = Retry(
+    total=3,
+    backoff_factor=0.2,
+    status_forcelist=[429, 500, 502, 503, 504],
+    raise_on_status=False
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=retries))
 
 from notion_utils import (
     build_notion_client,
@@ -44,7 +61,7 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
     attempt = 1
     while attempt <= max_retries:
         try:
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(ticker, session=SESSION)
             
             # 1. 속도가 빠른 fast_info에서 52주 가격 정보 먼저 추출
             f_info = stock.fast_info

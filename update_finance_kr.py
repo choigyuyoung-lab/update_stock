@@ -2,6 +2,8 @@ import json
 import math
 import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # 🌟 해외 서버 시간 왜곡 차단용 표준 라이브러리
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,7 +26,19 @@ KIS_APP_SECRET = get_env_var("KIS_APP_SECRET")
 URL_BASE = "https://openapivts.koreainvestment.com:29443"
 
 SESSION = requests.Session()
-SESSION.headers.update({"Content-Type": "application/json"})
+SESSION.headers.update({
+    "Content-Type": "application/json",
+    "Connection": "close"  # 🌟 Keep-Alive 해제하여 서버의 불시 연결 끊김 방지
+})
+
+# 🌟 네트워크 에러 및 429(트래픽 제한), 5xx 서버 에러 발생 시 즉시 재시도하도록 설정
+retries = Retry(
+    total=3,
+    backoff_factor=0.2,
+    status_forcelist=[429, 500, 502, 503, 504],
+    raise_on_status=False
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=retries))
 
 
 def sf(value):
