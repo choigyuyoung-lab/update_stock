@@ -50,7 +50,7 @@ def sf(value):
         return None
 
 
-def get_access_token(max_retries: int = 3, base_delay: float = 2.0) -> str:
+def get_access_token(max_retries: int = 3, base_delay: float = 2.0) -> str | None:
     """ 한투 API 액세스 토큰을 발급받습니다. 지수 백오프가 적용되어 있습니다. """
     url = f"{URL_BASE}/oauth2/tokenP"
     body = {"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET}

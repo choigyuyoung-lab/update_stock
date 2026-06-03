@@ -6,6 +6,8 @@ import io
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # 🌟 파이썬 3.9+ 타임존 표준 라이브러리
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
+
 
 import httpx
 import pandas as pd
@@ -158,7 +160,8 @@ def process_page_kr(page, engine, client, config):
         return None
     
     ticker_val = ticker_prop.get("title", [{}])[0].get("plain_text", "").strip()
-    clean_t = re.search(r'(\d{6})', ticker_val).group(1) if re.search(r'\d{6}', ticker_val) else ticker_val
+    match = re.search(r'(\d{6})', ticker_val)
+    clean_t = match.group(1) if match else ticker_val
 
     item, is_etf = None, False
     if clean_t in engine.df_kr_desc.index:
@@ -200,7 +203,7 @@ def process_page_kr(page, engine, client, config):
         # 🌟 3번 반영: 깃허브 가상 서버용 KST 강제 지정 ISO 8601 타임스탬프 산출법 교정
         now_str = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
 
-        update_props = {
+        update_props: dict[str, Any] = {
             "종목명": make_rich_text(stock_name),
             "Market": {"select": {"name": market_label}},
             "KR_섹터": make_rich_text(sec_val),
