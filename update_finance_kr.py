@@ -234,16 +234,16 @@ def build_finance_update_for_page(page, token: str):
     if not is_kr_ticker(ticker):
         return None
 
-    # 1. 오늘 이미 업데이트 되었는지 확인하여 중복 수집 방지 (스마트 캐싱 - 테스트를 위해 임시 주석 처리)
-    # last_update_prop = props.get("마지막 업데이트", {}).get("date", {})
-    # if last_update_prop:
-    #     last_update_val = last_update_prop.get("start")
-    #     if last_update_val:
-    #         last_update_date = last_update_val.split("T")[0]
-    #         today_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
-    #         if last_update_date == today_date:
-    #             print(f"   ⏭️ [{ticker}] 오늘 이미 업데이트됨 (스킵)")
-    #             return None
+    # 1. 오늘 이미 업데이트 되었는지 확인하여 중복 수집 방지 (스마트 캐싱)
+    last_update_prop = props.get("마지막 업데이트", {}).get("date", {})
+    if last_update_prop:
+        last_update_val = last_update_prop.get("start")
+        if last_update_val:
+            last_update_date = last_update_val.split("T")[0]
+            today_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+            if last_update_date == today_date:
+                print(f"   ⏭️ [{ticker}] 오늘 이미 업데이트됨 (스킵)")
+                return None
 
     data = get_finance_data(ticker, token)
     if not data:
