@@ -55,7 +55,8 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
     res = {
         "PER": None, "추정PER": None, "EPS": None, "추정EPS": None, 
         "PBR": None, "BPS": None, "배당수익률": None,
-        "52주 최고가": None, "52주 최저가": None, "목표주가": None, "의견": None
+        "52주 최고가": None, "52주 최저가": None, "목표주가": None, "의견": None,
+        "직전고점": None, "직전저점": None
     }
     
     attempt = 1
@@ -88,6 +89,13 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
                 rec_key = str(info.get('recommendationKey', '')).lower()
                 opinion_map = {"strong_buy": "적극매수", "buy": "매수", "hold": "중립", "underperform": "매도", "sell": "적극매도"}
                 res['의견'] = opinion_map.get(rec_key)
+
+            # 3. 20영업일 내 직전고점, 직전저점 계산
+            hist = stock.history(period="40d")
+            if not hist.empty:
+                recent_20 = hist.tail(20)
+                res["직전고점"] = float(recent_20["High"].max())
+                res["직전저점"] = float(recent_20["Low"].min())
 
             return res
             
@@ -129,14 +137,18 @@ def build_finance_update_for_page(page):
     if is_kr:
         return None
 
-    number_keys = ["PER", "추정PER", "EPS", "추정EPS", "PBR", "BPS", "배당수익률", "52주 최고가", "52주 최저가", "목표주가"]
+    number_keys = [
+        "PER", "추정PER", "EPS", "추정EPS", "PBR", "BPS", 
+        "배당수익률", "52주 최고가", "52주 최저가", "목표주가", 
+        "직전고점", "직전저점"
+    ]
     
     try:
         fin_data = get_us_fin_optimized(ticker)
         update_props = {
             key: {"number": fin_data[key]}
             for key in number_keys
-            if is_valid(fin_data.get(key))
+            if is_valid(fin_data.get(key)) and key in props
         }
 
         if fin_data.get("의견"):
