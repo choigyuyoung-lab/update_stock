@@ -193,31 +193,11 @@ def get_finance_data(ticker: str, token: str, max_retries: int = 4, base_delay: 
                 except (KeyError, ValueError, TypeError):
                     continue
             
-            n = 5  # Swing High/Low 판별용 윈도우 크기 (좌우 5일 비교)
-            length = len(formatted_candles)
-            for i in range(length - 1 - n, n - 1, -1):
-                curr_high = formatted_candles[i]["high"]
-                curr_low = formatted_candles[i]["low"]
-                
-                is_sh = True
-                for j in range(i - n, i + n + 1):
-                    if j != i and formatted_candles[j]["high"] > curr_high:
-                        is_sh = False
-                        break
-                        
-                is_sl = True
-                for j in range(i - n, i + n + 1):
-                    if j != i and formatted_candles[j]["low"] < curr_low:
-                        is_sl = False
-                        break
-                        
-                if is_sh and swing_high is None:
-                    swing_high = curr_high
-                if is_sl and swing_low is None:
-                    swing_low = curr_low
-                    
-                if swing_high is not None and swing_low is not None:
-                    break
+            # 최근 20영업일 동안의 단순 최고가 및 최저가를 직전 고점/저점으로 반영
+            recent_candles = formatted_candles[-20:]
+            if recent_candles:
+                swing_high = max(day["high"] for day in recent_candles)
+                swing_low = min(day["low"] for day in recent_candles)
     except Exception:
         # 에러 발생 시 대기 시간 없이 즉시 통과
         pass
@@ -254,16 +234,16 @@ def build_finance_update_for_page(page, token: str):
     if not is_kr_ticker(ticker):
         return None
 
-    # 1. 오늘 이미 업데이트 되었는지 확인하여 중복 수집 방지 (스마트 캐싱)
-    last_update_prop = props.get("마지막 업데이트", {}).get("date", {})
-    if last_update_prop:
-        last_update_val = last_update_prop.get("start")
-        if last_update_val:
-            last_update_date = last_update_val.split("T")[0]
-            today_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
-            if last_update_date == today_date:
-                print(f"   ⏭️ [{ticker}] 오늘 이미 업데이트됨 (스킵)")
-                return None
+    # 1. 오늘 이미 업데이트 되었는지 확인하여 중복 수집 방지 (스마트 캐싱 - 테스트를 위해 임시 주석 처리)
+    # last_update_prop = props.get("마지막 업데이트", {}).get("date", {})
+    # if last_update_prop:
+    #     last_update_val = last_update_prop.get("start")
+    #     if last_update_val:
+    #         last_update_date = last_update_val.split("T")[0]
+    #         today_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+    #         if last_update_date == today_date:
+    #             print(f"   ⏭️ [{ticker}] 오늘 이미 업데이트됨 (스킵)")
+    #             return None
 
     data = get_finance_data(ticker, token)
     if not data:
