@@ -22,24 +22,36 @@ from notion_utils import (
 )
 
 # ==========================================
-# 1. 환경 변수 및 설정 (실전투자 PROD / 모의투자 VTS 이중 지원)
+# 1. 환경 변수 및 설정 (실전투자 PROD / 모의투자 VTS 자동 감지 및 선택)
 # ==========================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 MASTER_DB_ID = os.environ.get("MASTER_DATABASE_ID") or os.environ.get("MASTER_DB_ID") or get_env_var("MASTER_DATABASE_ID")
 ETF_DB_ID = get_env_var("ETF_DB_ID")
 
-# KIS 환경 선택: 'prod' (실전투자) 또는 'vts' (모의투자)
-KIS_PAPER_TRADING = os.environ.get("KIS_PAPER_TRADING", "vts").strip().lower()
-IS_PROD = KIS_PAPER_TRADING == "prod"
+paper_env = os.environ.get("KIS_PAPER_TRADING", "prod").strip().lower()
 
-KIS_DOMAIN = "https://openapi.koreainvestment.com:9443" if IS_PROD else "https://openapivts.koreainvestment.com:29443"
+prod_key = (os.environ.get("KIS_PROD_APP_KEY") or "").strip()
+prod_secret = (os.environ.get("KIS_PROD_APP_SECRET") or "").strip()
 
-if IS_PROD:
-    KIS_APP_KEY = os.environ.get("KIS_PROD_APP_KEY") or os.environ.get("KIS_APP_KEY") or os.environ.get("KIS_APPKEY")
-    KIS_APP_SECRET = os.environ.get("KIS_PROD_APP_SECRET") or os.environ.get("KIS_APP_SECRET") or os.environ.get("KIS_SECRET")
+vts_key = (os.environ.get("KIS_VTS_APP_KEY") or "").strip()
+vts_secret = (os.environ.get("KIS_VTS_APP_SECRET") or "").strip()
+
+fallback_key = (os.environ.get("KIS_APP_KEY") or os.environ.get("KIS_APPKEY") or "").strip()
+fallback_secret = (os.environ.get("KIS_APP_SECRET") or os.environ.get("KIS_SECRET") or "").strip()
+
+# 실전 키가 존재하거나 paper_env가 prod이면 실전투자(PROD) 서버 적용
+if paper_env == "prod" or (prod_key and prod_secret and paper_env != "vts"):
+    IS_PROD = True
+    KIS_DOMAIN = "https://openapi.koreainvestment.com:9443"
+    KIS_APP_KEY = prod_key or fallback_key
+    KIS_APP_SECRET = prod_secret or fallback_secret
+    SERVER_NAME = "실전투자 (PROD)"
 else:
-    KIS_APP_KEY = os.environ.get("KIS_VTS_APP_KEY") or os.environ.get("KIS_APP_KEY") or os.environ.get("KIS_APPKEY")
-    KIS_APP_SECRET = os.environ.get("KIS_VTS_APP_SECRET") or os.environ.get("KIS_APP_SECRET") or os.environ.get("KIS_SECRET")
+    IS_PROD = False
+    KIS_DOMAIN = "https://openapivts.koreainvestment.com:29443"
+    KIS_APP_KEY = vts_key or fallback_key
+    KIS_APP_SECRET = vts_secret or fallback_secret
+    SERVER_NAME = "모의투자 (VTS)"
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -72,9 +84,7 @@ def sf(value: Any) -> float:
 def get_kis_token(max_retries: int = 3, base_delay: float = 2.0) -> Optional[str]:
     """KIS 접속 토큰 발급 (지수 백오프 적용)"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
-        print(f"❌ KIS [{'실전투자(PROD)' if IS_PROD else '모의투자(VTS)'}] API Key 또는 Secret이 설정되지 않았습니다.")
-        if IS_PROD:
-            print("   👉 .env 파일의 `KIS_PROD_APP_KEY`와 `KIS_PROD_APP_SECRET`에 실전 API 키를 입력해주세요.")
+        print(f"❌ KIS [{SERVER_NAME}] API Key 또는 Secret이 설정되지 않았습니다.")
         return None
 
     url = f"{KIS_DOMAIN}/oauth2/tokenP"
@@ -116,29 +126,30 @@ def get_kis_token(max_retries: int = 3, base_delay: float = 2.0) -> Optional[str
 
 
 def get_etf_composition(token: str, etf_ticker: str) -> Optional[List[Dict[str, Any]]]:
-    """KIS API: 특정 ETF의 편입 종목 및 비중 수집"""
+    """KIS API: 특정 ETF의 편입 종목 및 비중 수집 (공식 KIS API: FHKST121600C0)"""
     clean_ticker = etf_ticker.split(".")[0]
-    url = f"{KIS_DOMAIN}/uapi/domestic-stock/v1/quotations/inquire-etf-composition-item"
+    url = f"{KIS_DOMAIN}/uapi/etfetn/v1/quotations/inquire-component-stock-price"
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
         "appkey": KIS_APP_KEY,
         "appsecret": KIS_APP_SECRET,
-        "tr_id": "FHPKA43600000",
+        "tr_id": "FHKST121600C0",
         "custtype": "P"
     }
     params = {
-        "fid_cond_mrkt_div_code": "J",
-        "fid_input_iscd": clean_ticker
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": clean_ticker,
+        "FID_COND_SCR_DIV_CODE": "11216"
     }
     
     try:
         res = SESSION.get(url, headers=headers, params=params, timeout=10)
         
-        # 모의투자(VTS) 도메인에서는 한투 정책상 ETF 구성종목 엔드포인트가 404로 미지원됨 안내
+        # 모의투자(VTS) 도메인에서는 한투 정책상 ETF 구성종목 엔드포인트가 미지원됨 안내
         if res.status_code == 404 and "openapivts" in KIS_DOMAIN:
             print(f"⚠️ [주의] 모의투자(VTS) 서버에서는 KIS API 정책상 ETF 구성종목(PDF) 조회가 제공되지 않습니다 (404 Not Found).")
-            print(f"   👉 실전투자(PROD) API 키 설정 후 `.env`에서 `KIS_PAPER_TRADING=prod`로 변경 시 정상 동작합니다.")
+            print(f"   👉 실전투자(PROD) API 키 설정 환경에서 정상 동작합니다.")
             return None
 
         res.raise_for_status()
@@ -149,14 +160,17 @@ def get_etf_composition(token: str, etf_ticker: str) -> Optional[List[Dict[str, 
             return None
             
         holdings: List[Dict[str, Any]] = []
-        for item in data.get("output", []):
-            raw_ticker = str(item.get("stck_shrn_iscd", "")).strip()
+        # KIS 공식 응답 output2 배열 참조
+        items = data.get("output2") or data.get("output") or []
+        for item in items:
+            raw_ticker = str(item.get("stck_shrn_iscd") or item.get("stck_iscd") or item.get("mksc_shrn_iscd") or "").strip()
             if not raw_ticker:
                 continue
             # 티커 6자리 zfill 포맷팅
             formatted_ticker = raw_ticker.zfill(6) if raw_ticker.isdigit() else raw_ticker
-            name = item.get("hts_kor_isnm", "").strip()
-            weight = sf(item.get("stck_prpr_vl", 0))
+            name = (item.get("hts_kor_isnm") or item.get("hts_kor_isnm1") or "").strip()
+            # 비중: etf_cnfg_issu_rlim (%) 또는 etf_cnfg_issu_avls 등
+            weight = sf(item.get("etf_cnfg_issu_rlim") or item.get("etf_cnfg_issu_avls") or item.get("stck_prpr_vl") or item.get("cnfg_rto") or item.get("etf_weight") or 0)
             
             holdings.append({
                 "ticker": formatted_ticker,
@@ -272,7 +286,7 @@ def insert_etf_db_holding(client: Any, etf_page_id: str, stock_page_id: str, nam
 # 4. 메인 파이프라인
 # ==========================================
 def main() -> None:
-    print(f"📡 한투 API 접속 설정: [{'실전투자 (PROD)' if IS_PROD else '모의투자 (VTS)'}] ({KIS_DOMAIN})")
+    print(f"📡 한투 API 접속 설정: [{SERVER_NAME}] ({KIS_DOMAIN})")
     
     notion_client = build_notion_client(NOTION_TOKEN)
     
@@ -283,7 +297,8 @@ def main() -> None:
 
     # 관리할 대상 ETF 목록 정의 (etf_page_id가 없거나 미입력된 경우 마스터 DB에서 티커로 자동 검색/생성)
     target_etfs = [
-        {"etf_page_id": None, "ticker": "457780"}  # 예: ACE K휴머노이드...
+        {"etf_page_id": None, "ticker": "069500"}, # KODEX 200 (샘플)
+        {"etf_page_id": None, "ticker": "457780"}  # ACE K휴머노이드...
     ]
     
     for target in target_etfs:
