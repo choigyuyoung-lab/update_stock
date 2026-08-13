@@ -26,9 +26,16 @@ jobs:
       - name: Run ETF Holdings Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          MASTER_DATABASE_ID: ${{ secrets.MASTER_DB_ID }}
           MASTER_DB_ID: ${{ secrets.MASTER_DB_ID }}
           ETF_DB_ID: ${{ secrets.ETF_DB_ID }}
+          # KIS 실전투자 / 모의투자 키 구분 전달
+          KIS_PROD_APP_KEY: ${{ secrets.KIS_PROD_APP_KEY }}
+          KIS_PROD_APP_SECRET: ${{ secrets.KIS_PROD_APP_SECRET }}
+          KIS_VTS_APP_KEY: ${{ secrets.KIS_VTS_APP_KEY }}
+          KIS_VTS_APP_SECRET: ${{ secrets.KIS_VTS_APP_SECRET }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          # prod(실전투자) 또는 vts(모의투자) 선택
           KIS_PAPER_TRADING: prod
         run: python update_etf_holdings_kr.py
