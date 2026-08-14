@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import re
+import difflib
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
@@ -28,6 +29,7 @@ from notion_utils import (
 # ==========================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 INVESTMENT_DB_ID = os.environ.get("DATABASE_ID") or get_env_var("DATABASE_ID")
+MASTER_DB_ID = os.environ.get("MASTER_DATABASE_ID") or os.environ.get("MASTER_DB_ID")
 ETF_DB_ID = get_env_var("ETF_DB_ID")
 
 KIS_DOMAIN = "https://openapi.koreainvestment.com:9443"
@@ -52,6 +54,22 @@ def parse_quantity(val: Any) -> Optional[float]:
         return num if num > 0 else None
     except (ValueError, TypeError):
         return None
+
+
+def normalize_company_name(name: str) -> str:
+    """해외 법인 형태(Corp, Inc, Ltd 등) 및 특수문자 제거 정규화"""
+    if not name:
+        return ""
+    name_clean = name.upper()
+    name_clean = re.sub(r'[\(\)\[\],\.\-]', ' ', name_clean)
+    suffixes = [
+        r'\bCORP\b', r'\bCORPORATION\b', r'\bINC\b', r'\bLTD\b', r'\bLIMITED\b',
+        r'\bCO\b', r'\bHOLDINGS?\b', r'\bGROUP\b', r'\bPLC\b', r'\bADR\b',
+        r'\bCLASS [AB]\b', r'\bS A\b', r'\bAG\b', r'\bSE\b', r'\bNV\b'
+    ]
+    for suf in suffixes:
+        name_clean = re.sub(suf, '', name_clean)
+    return " ".join(name_clean.split())
 
 
 # ==========================================
@@ -79,7 +97,7 @@ def get_kis_token() -> Optional[str]:
 
 
 def get_etf_composition_kis(token: str, clean_ticker: str) -> List[Dict[str, Any]]:
-    """한투 실전 API: ETF 구성종목 및 수량(etf_cu_unit_scrt_cnt) 수집"""
+    """한투 실전 API: 한국 ETF 구성종목 코드 및 수량(etf_cu_unit_scrt_cnt) 수집"""
     url = f"{KIS_DOMAIN}/uapi/etfetn/v1/quotations/inquire-component-stock-price"
     headers = {
         "authorization": f"Bearer {token}",
@@ -153,19 +171,31 @@ def get_etf_composition_wisereport(clean_ticker: str) -> List[Dict[str, Any]]:
 
 
 # ==========================================
-# 3. 투자주 DB 경량 인메모리 매칭 캐시
+# 3. 노션 DB 인메모리 매칭 & 퍼지 유사도 엔진
 # ==========================================
-class InvestmentDBCache:
-    """투자주 DB 종목을 사전 로드하여 1:1 매칭 (미등록 종목은 신규 생성하지 않고 None 반환)"""
+class StockMatchEngine:
+    """
+    [종목 매칭 엔진]
+    1. 한국주식 (한투 API 추출):
+       - API에서 직접 추출된 6자리 공식 종목코드(티커)를 100% 우선 적용
+       - 투자주 DB 등록 여부만 확인하여 있으면 릴레이션 연결, 없으면 공백 유지 (마스터 DB 퍼지 매칭 불필요)
+
+    2. 해외주식 (티커 부재 또는 한국 코드가 아닌 외국 종목):
+       - 1순위: 투자주 DB에 이미 등록된 해외 종목(티커 또는 종목명)과 완전 일치 확인
+       - 2순위: 해외주식에 한해 상장주식DB 전체(마스터 DB)의 해외 종목 풀과 정규화 퍼지(Fuzzy >= 0.80) 매칭하여 글로벌 티커 추출
+       - 3순위: 미매칭 시 릴레이션 및 티커를 안전하게 공백 처리
+    """
     def __init__(self, client: Any):
         self.client = client
-        self.ticker_to_page: Dict[str, Dict[str, str]] = {}
-        self.name_to_page: Dict[str, Dict[str, str]] = {}
+        self.inv_ticker_to_page: Dict[str, Dict[str, str]] = {}
+        self.inv_name_to_page: Dict[str, Dict[str, str]] = {}
+        self.master_foreign_candidates: List[Dict[str, str]] = []
         self._load_cache()
 
     def _load_cache(self) -> None:
-        print(f"📦 투자주 DB({INVESTMENT_DB_ID}) 목록을 메모리에 로드합니다...", flush=True)
-        count = 0
+        # 1. 투자주 DB 로드 (국내/해외 투자 대상 종목 캐시)
+        print(f"📦 [1/2] 투자주 DB({INVESTMENT_DB_ID}) 목록을 메모리에 로드합니다...", flush=True)
+        count_inv = 0
         for page in paginate_database(self.client, INVESTMENT_DB_ID, page_size=100):
             pid = page["id"]
             props = page.get("properties", {})
@@ -187,37 +217,112 @@ class InvestmentDBCache:
             item_info = {"id": pid, "ticker": ticker, "name": name}
             if ticker:
                 clean_t = ticker.split(".")[0].strip().upper()
-                self.ticker_to_page[clean_t] = item_info
-                self.ticker_to_page[ticker] = item_info
+                self.inv_ticker_to_page[clean_t] = item_info
+                self.inv_ticker_to_page[ticker] = item_info
             if name:
-                self.name_to_page[name] = item_info
-                self.name_to_page[name.replace(" ", "")] = item_info
-            count += 1
-        print(f"   ✅ 총 {count}개 투자주 DB 종목 로드 완료", flush=True)
+                self.inv_name_to_page[name] = item_info
+                self.inv_name_to_page[name.replace(" ", "")] = item_info
+            count_inv += 1
+        print(f"   ✅ 투자주 DB 종목 {count_inv}개 로드 완료", flush=True)
+
+        # 2. 상장주식DB 전체 (마스터 DB)에서 해외 종목 풀만 선별 로드
+        if MASTER_DB_ID and MASTER_DB_ID != INVESTMENT_DB_ID:
+            print(f"📦 [2/2] 상장주식DB 전체({MASTER_DB_ID})에서 해외 종목 마스터 풀을 로드합니다...", flush=True)
+            count_master_foreign = 0
+            for page in paginate_database(self.client, MASTER_DB_ID, page_size=100):
+                props = page.get("properties", {})
+                t_prop = props.get("티커", {}).get("title", [])
+                ticker = t_prop[0]["plain_text"].strip().upper() if t_prop else ""
+                
+                n_prop = props.get("종목명", {}).get("rich_text", [])
+                name = n_prop[0]["plain_text"].strip() if n_prop else ""
+                
+                m_val = props.get("Market", {}).get("select")
+                market = m_val["name"] if m_val else ""
+
+                # 한국 종목코드(6자리 숫자 등)가 아니거나 해외 마켓 종목만 해외 후보군에 추가
+                is_kr_stock = (market in ["KOSPI", "KOSDAQ", "KONEX", "ETF(KR)"] and ticker.isdigit() and len(ticker) == 6)
+
+                if not is_kr_stock and ticker and name:
+                    rel_inv = props.get("투자주 DB", {}).get("relation", [])
+                    inv_id = rel_inv[0]["id"] if rel_inv else None
+                    norm_n = normalize_company_name(name)
+                    self.master_foreign_candidates.append({
+                        "ticker": ticker,
+                        "name": name,
+                        "norm_name": norm_n,
+                        "inv_id": inv_id
+                    })
+                    count_master_foreign += 1
+            print(f"   ✅ 해외 종목 마스터 풀 {count_master_foreign}개 로드 완료", flush=True)
 
     def match(self, raw_ticker: str, name: str) -> Tuple[Optional[str], str]:
         """
-        투자주 DB에 존재하면 (page_id, 등록된_티커) 반환.
-        없으면 (None, 원본티커 또는 공백) 반환 (신규 생성 X).
+        종목 매칭:
+        - 한국주식: API에서 추출된 6자리 코드를 그대로 사용, 투자주 DB 등록 여부만 확인
+        - 해외주식: 티커 부재 시 마스터 DB 해외 종목 풀과 정규화 퍼지(유사도 80% 이상) 매칭
         """
         t = raw_ticker.strip().upper()
         n = name.strip()
 
-        # 1. 티커 매칭
-        if t and t in self.ticker_to_page:
-            match_info = self.ticker_to_page[t]
+        # 한국 공식 종목코드 판별 (6자리 숫자 또는 0으로 시작하는 6자리 단축코드)
+        is_kr_code = bool(re.match(r'^\d{6}$', t) or (len(t) == 6 and t.isalnum() and t[0] == '0'))
+
+        # ========================================================
+        # CASE A: 한국주식 (한투 API를 통해 6자리 코드가 명확히 추출된 경우)
+        # ========================================================
+        if is_kr_code:
+            # 1. 투자주 DB에 등록되어 있으면 릴레이션 연결
+            if t in self.inv_ticker_to_page:
+                return self.inv_ticker_to_page[t]["id"], t
+            if n in self.inv_name_to_page:
+                return self.inv_name_to_page[n]["id"], t
+            # 2. 투자주 DB에 없으면 릴레이션은 None, 티커는 API가 추출한 6자리 코드 그대로 사용
+            return None, t
+
+        # ========================================================
+        # CASE B: 해외주식 (티커가 없거나 한국 코드가 아닌 외국 종목)
+        # ========================================================
+        # 1. 투자주 DB에 이미 등록된 해외 종목인지 확인 (완전 일치)
+        if t and t in self.inv_ticker_to_page:
+            match_info = self.inv_ticker_to_page[t]
             return match_info["id"], match_info["ticker"]
 
-        # 2. 종목명 매칭
-        if n and n in self.name_to_page:
-            match_info = self.name_to_page[n]
+        if n and n in self.inv_name_to_page:
+            match_info = self.inv_name_to_page[n]
             return match_info["id"], match_info["ticker"]
-        if n and n.replace(" ", "") in self.name_to_page:
-            match_info = self.name_to_page[n.replace(" ", "")]
+        if n and n.replace(" ", "") in self.inv_name_to_page:
+            match_info = self.inv_name_to_page[n.replace(" ", "")]
             return match_info["id"], match_info["ticker"]
 
-        # 3. 미매칭 시: 투자주 릴레이션은 None, 티커는 유효한 6자리/영문 코드가 있으면 넣고 없으면 공백
-        fallback_ticker = t if (re.match(r'^[A-Z0-9.\-_]{1,10}$', t) and not t.isdigit() or len(t) == 6) else ""
+        # 2. 해외주식에 한해 상장주식DB 전체 (마스터 DB) 해외 종목 풀과 퍼지(Fuzzy >= 0.80) 매칭
+        if n and self.master_foreign_candidates:
+            norm_target = normalize_company_name(n)
+            if norm_target:
+                best_ratio = 0.0
+                best_cand = None
+                for cand in self.master_foreign_candidates:
+                    norm_c = cand["norm_name"]
+                    # 2-1. 정규화 후 완전 일치 또는 4글자 이상 상호 포함 (100% 신뢰)
+                    if norm_target == norm_c or (len(norm_target) >= 4 and (norm_target in norm_c or norm_c in norm_target)):
+                        best_ratio = 1.0
+                        best_cand = cand
+                        break
+                    
+                    # 2-2. SequenceMatcher 유사도 계산 (임계값 0.80 이상)
+                    ratio = difflib.SequenceMatcher(None, norm_target, norm_c).ratio()
+                    if ratio > best_ratio and ratio >= 0.80:
+                        best_ratio = ratio
+                        best_cand = cand
+
+                if best_cand:
+                    inv_id = best_cand["inv_id"]
+                    if not inv_id and best_cand["ticker"] in self.inv_ticker_to_page:
+                        inv_id = self.inv_ticker_to_page[best_cand["ticker"]]["id"]
+                    return inv_id, best_cand["ticker"]
+
+        # 3. 미매칭 외국 종목: 원본에 유효한 해외 티커(예: AAPL)가 있으면 사용하고, 없으면 공백
+        fallback_ticker = t if (re.match(r'^[A-Z0-9.\-_]{1,10}$', t) and not t.isdigit()) else ""
         return None, fallback_ticker
 
 
@@ -290,20 +395,6 @@ def archive_existing_etf_holdings(client: Any, etf_page_id: str) -> None:
             pass
 
 
-def get_etf_quantity_prop_name(client: Any) -> str:
-    """ETF DB에서 수량 열 이름 확인 ('수량' 우선, 없으면 '비중')"""
-    try:
-        db = client.databases.retrieve(database_id=ETF_DB_ID)
-        props = db.get("properties", {})
-        if "수량" in props:
-            return "수량"
-        if "비중" in props:
-            return "비중"
-    except Exception:
-        pass
-    return "수량"
-
-
 # ==========================================
 # 5. 메인 파이프라인
 # ==========================================
@@ -316,8 +407,7 @@ def main() -> None:
         print("❌ KIS 토큰 발급 실패로 중단합니다.", flush=True)
         return
 
-    qty_prop_name = get_etf_quantity_prop_name(notion_client)
-    db_cache = InvestmentDBCache(notion_client)
+    db_cache = StockMatchEngine(notion_client)
     target_etfs = get_target_etfs(notion_client)
 
     if not target_etfs:
@@ -349,7 +439,7 @@ def main() -> None:
             print(f"   ⚠️ {etf_name} 구성종목 수집 결과 없음 (건너뜀)", flush=True)
             continue
 
-        # 2. 투자주 DB 매칭 (있으면 연결, 없으면 공백)
+        # 2. 투자주 DB & 마스터 DB 퍼지 매칭 (한국주식은 API 티커 우선 / 해외주식만 마스터 DB 매칭)
         items_to_insert = []
         for h in raw_holdings:
             stock_id, matched_ticker = db_cache.match(h["raw_ticker"], h["name"])
@@ -364,7 +454,7 @@ def main() -> None:
         print(f"   🧹 기존 과거 데이터 정리 중...", flush=True)
         archive_existing_etf_holdings(notion_client, etf_page_id)
 
-        print(f"   📝 최신 {len(items_to_insert)}개 구성종목 입력 중 (열: {qty_prop_name})...", flush=True)
+        print(f"   📝 최신 {len(items_to_insert)}개 구성종목 입력 중 (수량 열 반영)...", flush=True)
         success_count = 0
         for item in items_to_insert:
             props: Dict[str, Any] = {
@@ -380,7 +470,7 @@ def main() -> None:
                 props["종목(투자DB)"] = {"relation": [{"id": item["stock_id"]}]}
             # 수량이 있으면 수량 열에 숫자 기입
             if item["quantity"] is not None:
-                props[qty_prop_name] = {"number": item["quantity"]}
+                props["수량"] = {"number": item["quantity"]}
 
             try:
                 notion_client.pages.create(parent={"database_id": ETF_DB_ID}, properties=props)
