@@ -28,6 +28,7 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DB_ID }}
           MASTER_DB_ID: ${{ secrets.MASTER_DB_ID }}
+          DATABASE_ID: ${{ secrets.MASTER_DB_ID }}
           ETF_DB_ID: ${{ secrets.ETF_DB_ID }}
           # KIS 실전투자 전용 키 전달
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
