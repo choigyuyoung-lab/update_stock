@@ -28,9 +28,18 @@ from notion_utils import (
 # 1. 환경 변수 및 실전투자 설정
 # ==========================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-INVESTMENT_DB_ID = os.environ.get("DATABASE_ID") or get_env_var("DATABASE_ID")
+INVESTMENT_DB_ID = (
+    os.environ.get("DATABASE_ID")
+    or os.environ.get("INVESTMENT_DB_ID")
+    or os.environ.get("INVESTMENT_DATABASE_ID")
+    or get_env_var("DATABASE_ID")
+)
 MASTER_DB_ID = os.environ.get("MASTER_DATABASE_ID") or os.environ.get("MASTER_DB_ID")
-ETF_DB_ID = get_env_var("ETF_DB_ID")
+ETF_DB_ID = (
+    os.environ.get("ETF_DB_ID")
+    or os.environ.get("ETF_DATABASE_ID")
+    or get_env_var("ETF_DB_ID")
+)
 
 KIS_DOMAIN = "https://openapi.koreainvestment.com:9443"
 KIS_APP_KEY = (os.environ.get("KIS_APP_KEY") or os.environ.get("KIS_PROD_APP_KEY") or "").strip()
