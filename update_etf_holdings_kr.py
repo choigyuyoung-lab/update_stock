@@ -57,18 +57,41 @@ def parse_quantity(val: Any) -> Optional[float]:
 
 
 def normalize_company_name(name: str) -> str:
-    """해외 법인 형태(Corp, Inc, Ltd 등) 및 특수문자 제거 정규화"""
+    """해외/일본/미국 기업명 축약어 확장 및 법인 형태 제거 정규화"""
     if not name:
         return ""
     name_clean = name.upper()
     name_clean = re.sub(r'[\(\)\[\],\.\-]', ' ', name_clean)
+
+    # 1. 글로벌/일본 기업 주요 축약어 표준 확장
+    abbrev_map = {
+        r'\bMFG\b': 'MANUFACTURING',
+        r'\bIND\b': 'INDUSTRIES',
+        r'\bINDS\b': 'INDUSTRIES',
+        r'\bINTL\b': 'INTERNATIONAL',
+        r'\bTECH\b': 'TECHNOLOGY',
+        r'\bTECHNOLOGIES\b': 'TECHNOLOGY',
+        r'\bSYS\b': 'SYSTEMS',
+        r'\bELEC\b': 'ELECTRIC',
+        r'\bELECTR\b': 'ELECTRIC',
+        r'\bSEMICON\b': 'SEMICONDUCTOR',
+        r'\bCHEM\b': 'CHEMICAL',
+        r'\bCOMM\b': 'COMMUNICATIONS',
+        r'\bLAB\b': 'LABORATORIES',
+        r'\bLABS\b': 'LABORATORIES',
+    }
+    for pat, rep in abbrev_map.items():
+        name_clean = re.sub(pat, rep, name_clean)
+
+    # 2. 법인 형태 및 공통 접미사 제거
     suffixes = [
         r'\bCORP\b', r'\bCORPORATION\b', r'\bINC\b', r'\bLTD\b', r'\bLIMITED\b',
         r'\bCO\b', r'\bHOLDINGS?\b', r'\bGROUP\b', r'\bPLC\b', r'\bADR\b',
-        r'\bCLASS [AB]\b', r'\bS A\b', r'\bAG\b', r'\bSE\b', r'\bNV\b'
+        r'\bCLASS [AB]\b', r'\bS A\b', r'\bAG\b', r'\bSE\b', r'\bNV\b', r'\bK K\b'
     ]
     for suf in suffixes:
         name_clean = re.sub(suf, '', name_clean)
+
     return " ".join(name_clean.split())
 
 
@@ -84,7 +107,7 @@ def get_kis_token() -> Optional[str]:
         "appsecret": KIS_APP_SECRET
     }
     try:
-        res = SESSION.post(url, json=body, timeout=10)
+        res = requests.post(url, json=body, timeout=10)
         res.raise_for_status()
         token = res.json().get("access_token")
         if token:
@@ -138,7 +161,7 @@ def get_etf_composition_kis(token: str, clean_ticker: str) -> List[Dict[str, Any
 
 
 def get_etf_composition_wisereport(clean_ticker: str) -> List[Dict[str, Any]]:
-    """WiseReport / Naver 금융: 해외/글로벌 ETF 구성종목 및 계약수량(AGMT_STK_CNT) 수집"""
+    """WiseReport / Naver 금융: 해외/글로벌/일본 ETF 구성종목 및 계약수량(AGMT_STK_CNT) 수집"""
     url = f"https://navercomp.wisereport.co.kr/v2/ETF/index.aspx?cmp_cd={clean_ticker}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     holdings = []
@@ -158,6 +181,8 @@ def get_etf_composition_wisereport(clean_ticker: str) -> List[Dict[str, Any]]:
                 continue
 
             raw_ticker = str(item.get("STK_CD") or item.get("CMP_CD") or "").strip()
+            if raw_ticker.lower() in ["none", "null"]:
+                raw_ticker = ""
             qty = parse_quantity(item.get("AGMT_STK_CNT"))
 
             holdings.append({
@@ -180,7 +205,7 @@ class StockMatchEngine:
        - API에서 직접 추출된 6자리 공식 종목코드(티커)를 100% 우선 적용
        - 투자주 DB 등록 여부만 확인하여 있으면 릴레이션 연결, 없으면 공백 유지 (마스터 DB 퍼지 매칭 불필요)
 
-    2. 해외주식 (티커 부재 또는 한국 코드가 아닌 외국 종목):
+    2. 해외/일본/미국 주식 (티커 부재 또는 외국 종목):
        - 1순위: 투자주 DB에 이미 등록된 해외 종목(티커 또는 종목명)과 완전 일치 확인
        - 2순위: 해외주식에 한해 상장주식DB 전체(마스터 DB)의 해외 종목 풀과 정규화 퍼지(Fuzzy >= 0.80) 매칭하여 글로벌 티커 추출
        - 3순위: 미매칭 시 릴레이션 및 티커를 안전하게 공백 처리
@@ -227,7 +252,7 @@ class StockMatchEngine:
 
         # 2. 상장주식DB 전체 (마스터 DB)에서 해외 종목 풀만 선별 로드
         if MASTER_DB_ID and MASTER_DB_ID != INVESTMENT_DB_ID:
-            print(f"📦 [2/2] 상장주식DB 전체({MASTER_DB_ID})에서 해외 종목 마스터 풀을 로드합니다...", flush=True)
+            print(f"📦 [2/2] 상장주식DB 전체({MASTER_DB_ID})에서 해외/일본 종목 마스터 풀을 로드합니다...", flush=True)
             count_master_foreign = 0
             for page in paginate_database(self.client, MASTER_DB_ID, page_size=100):
                 props = page.get("properties", {})
@@ -254,7 +279,7 @@ class StockMatchEngine:
                         "inv_id": inv_id
                     })
                     count_master_foreign += 1
-            print(f"   ✅ 해외 종목 마스터 풀 {count_master_foreign}개 로드 완료", flush=True)
+            print(f"   ✅ 해외/일본 종목 마스터 풀 {count_master_foreign}개 로드 완료", flush=True)
 
     def match(self, raw_ticker: str, name: str) -> Tuple[Optional[str], str]:
         """
@@ -281,7 +306,7 @@ class StockMatchEngine:
             return None, t
 
         # ========================================================
-        # CASE B: 해외주식 (티커가 없거나 한국 코드가 아닌 외국 종목)
+        # CASE B: 해외/일본/미국 주식 (티커가 없거나 한국 코드가 아닌 외국 종목)
         # ========================================================
         # 1. 투자주 DB에 이미 등록된 해외 종목인지 확인 (완전 일치)
         if t and t in self.inv_ticker_to_page:
@@ -428,7 +453,7 @@ def main() -> None:
         wise_items = get_etf_composition_wisereport(etf_ticker)
         
         raw_holdings = kis_items if kis_items else wise_items
-        # KIS에 없는 해외종목 병합
+        # KIS에 없는 해외/일본 종목 병합
         if kis_items and wise_items:
             existing_names = {it["name"].replace(" ", "") for it in kis_items}
             for w in wise_items:
@@ -439,7 +464,7 @@ def main() -> None:
             print(f"   ⚠️ {etf_name} 구성종목 수집 결과 없음 (건너뜀)", flush=True)
             continue
 
-        # 2. 투자주 DB & 마스터 DB 퍼지 매칭 (한국주식은 API 티커 우선 / 해외주식만 마스터 DB 매칭)
+        # 2. 투자주 DB & 마스터 DB 퍼지 매칭 (한국주식은 API 티커 우선 / 해외/일본 주식은 마스터 DB 매칭)
         items_to_insert = []
         for h in raw_holdings:
             stock_id, matched_ticker = db_cache.match(h["raw_ticker"], h["name"])
