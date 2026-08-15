@@ -290,11 +290,44 @@ class StockMatchEngine:
                     count_master_foreign += 1
             print(f"   ✅ 해외/일본 종목 마스터 풀 {count_master_foreign}개 로드 완료", flush=True)
 
+    def _create_investment_page(self, ticker: str, name: str) -> Optional[str]:
+        """투자주 DB에 존재하지 않는 경우 신규 페이지를 생성하고 인메모리 캐시에 즉시 등록"""
+        if not ticker:
+            return None
+        try:
+            props: Dict[str, Any] = {
+                "티커": {"title": [{"text": {"content": ticker}}]},
+            }
+            if name:
+                props["종목명"] = {"rich_text": [{"text": {"content": name}}]}
+
+            new_page = self.client.pages.create(
+                parent={"database_id": INVESTMENT_DB_ID},
+                properties=props
+            )
+            new_id = new_page["id"]
+            
+            # 생성 즉시 인메모리 캐시에 등록하여 이후 루프에서의 중복 생성 방지
+            item_info = {"id": new_id, "ticker": ticker, "name": name}
+            clean_t = ticker.split(".")[0].strip().upper()
+            self.inv_ticker_to_page[clean_t] = item_info
+            self.inv_ticker_to_page[ticker] = item_info
+            if name:
+                self.inv_name_to_page[name] = item_info
+                self.inv_name_to_page[name.replace(" ", "")] = item_info
+                
+            print(f"      ✨ [투자주 DB 자동등록] {name}({ticker}) 신규 등록 완료", flush=True)
+            time.sleep(0.05)
+            return new_id
+        except Exception as exc:
+            print(f"      ⚠️ [투자주 DB 등록 실패] {name}({ticker}): {exc}", flush=True)
+            return None
+
     def match(self, raw_ticker: str, name: str) -> Tuple[Optional[str], str]:
         """
         종목 매칭:
-        - 한국주식: API에서 추출된 6자리 코드를 그대로 사용, 투자주 DB 등록 여부만 확인
-        - 해외주식: 티커 부재 시 마스터 DB 해외 종목 풀과 정규화 퍼지(유사도 80% 이상) 매칭
+        - 한국주식: API 추출 6자리 코드 기준, 투자주 DB에 없으면 신규 생성 후 릴레이션 연결
+        - 해외주식: 마스터 DB 해외 종목 풀과 정규화 퍼지(유사도 80% 이상) 매칭 후 투자주 DB 미등록 시 자동 생성
         """
         t = raw_ticker.strip().upper()
         n = name.strip()
@@ -306,13 +339,14 @@ class StockMatchEngine:
         # CASE A: 한국주식 (한투 API를 통해 6자리 코드가 명확히 추출된 경우)
         # ========================================================
         if is_kr_code:
-            # 1. 투자주 DB에 등록되어 있으면 릴레이션 연결
+            # 1. 투자주 DB에 이미 등록되어 있으면 기존 페이지 연결
             if t in self.inv_ticker_to_page:
                 return self.inv_ticker_to_page[t]["id"], t
             if n in self.inv_name_to_page:
                 return self.inv_name_to_page[n]["id"], t
-            # 2. 투자주 DB에 없으면 릴레이션은 None, 티커는 API가 추출한 6자리 코드 그대로 사용
-            return None, t
+            # 2. 투자주 DB에 없으면 신규 페이지 자동 생성 후 릴레이션 연결
+            new_inv_id = self._create_investment_page(t, n)
+            return new_inv_id, t
 
         # ========================================================
         # CASE B: 해외/일본/미국 주식 (티커가 없거나 한국 코드가 아닌 외국 종목)
@@ -353,6 +387,11 @@ class StockMatchEngine:
                     inv_id = best_cand["inv_id"]
                     if not inv_id and best_cand["ticker"] in self.inv_ticker_to_page:
                         inv_id = self.inv_ticker_to_page[best_cand["ticker"]]["id"]
+                    
+                    # 마스터 DB와 매칭되었으나 투자주 DB에는 없는 경우 -> 자동 등록
+                    if not inv_id and best_cand["ticker"]:
+                        inv_id = self._create_investment_page(best_cand["ticker"], best_cand["name"])
+                    
                     return inv_id, best_cand["ticker"]
 
         # 3. 미매칭 외국 종목: 원본에 유효한 해외 티커(예: AAPL)가 있으면 사용하고, 없으면 공백
