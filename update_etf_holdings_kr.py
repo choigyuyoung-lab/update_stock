@@ -211,19 +211,21 @@ class StockMatchEngine:
     """
     [종목 매칭 엔진]
     1. 한국주식 (한투 API 추출):
-       - API에서 직접 추출된 6자리 공식 종목코드(티커)를 100% 우선 적용
-       - 투자주 DB 등록 여부만 확인하여 있으면 릴레이션 연결, 없으면 공백 유지 (마스터 DB 퍼지 매칭 불필요)
+       - API에서 직접 추출된 6자리 공식 종목코드(티커)를 우선 적용
+       - 투자주 DB 등록 여부 확인 후, 미등록 시 자동 생성 및 릴레이션 연결
 
-    2. 해외/일본/미국 주식 (티커 부재 또는 외국 종목):
-       - 1순위: 투자주 DB에 이미 등록된 해외 종목(티커 또는 종목명)과 완전 일치 확인
-       - 2순위: 해외주식에 한해 상장주식DB 전체(마스터 DB)의 해외 종목 풀과 정규화 퍼지(Fuzzy >= 0.80) 매칭하여 글로벌 티커 추출
-       - 3순위: 미매칭 시 릴레이션 및 티커를 안전하게 공백 처리
+    2. 해외/일본/미국 주식:
+       - 1순위: 투자주 DB 캐시 완전 일치 확인
+       - 2순위: 마스터 DB 해외 종목 풀과 정규화 퍼지(Fuzzy >= 0.80) 매칭
+       - 3순위: 글로벌 금융 검색 엔진(Yahoo Finance Search)을 통한 실시간 티커 추출
+       - 4순위: 티커 확인 시 투자주 DB 자동 생성 및 릴레이션 연결
     """
     def __init__(self, client: Any):
         self.client = client
         self.inv_ticker_to_page: Dict[str, Dict[str, str]] = {}
         self.inv_name_to_page: Dict[str, Dict[str, str]] = {}
         self.master_foreign_candidates: List[Dict[str, str]] = []
+        self.online_search_cache: Dict[str, Optional[Tuple[str, str]]] = {}
         self._load_cache()
 
     def _load_cache(self) -> None:
@@ -323,11 +325,70 @@ class StockMatchEngine:
             print(f"      ⚠️ [투자주 DB 등록 실패] {name}({ticker}): {exc}", flush=True)
             return None
 
+    def _search_foreign_ticker(self, name: str) -> Optional[Tuple[str, str]]:
+        """글로벌 금융 데이터 검색 엔진을 통해 기업명으로 공식 티커 실시간 추출 (일본 .T 및 메모리 캐싱 적용)"""
+        norm_name = normalize_company_name(name)
+        search_query = norm_name or name
+        if not search_query or len(search_query) < 2:
+            return None
+
+        if search_query in self.online_search_cache:
+            return self.online_search_cache[search_query]
+
+        try:
+            url = "https://query2.finance.yahoo.com/v1/finance/search"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            params = {"q": search_query, "quotesCount": 6, "newsCount": 0}
+            
+            res = requests.get(url, params=params, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                quotes = data.get("quotes", [])
+                
+                # 1. 일본 주식 우선 탐색 (.T 심볼 또는 도쿄거래소 상장 우선 선택)
+                for q in quotes:
+                    quote_type = q.get("quoteType", "")
+                    symbol = q.get("symbol", "").strip().upper()
+                    exch = (q.get("exchange") or q.get("exchDisp") or "").upper()
+                    matched_name = q.get("shortname") or q.get("longname") or name
+
+                    if quote_type in ["EQUITY", "ETF"]:
+                        if symbol.endswith(".T") or "TOKYO" in exch or exch in ["JPX", "TYO"]:
+                            if not symbol.endswith(".T") and re.match(r'^\d{4}$', symbol):
+                                symbol = f"{symbol}.T"
+                            self.online_search_cache[search_query] = (symbol, matched_name)
+                            print(f"      🇯🇵 [일본 주식 .T 매칭] '{name}' ➔ 공식 티커: {symbol} ({matched_name})", flush=True)
+                            return symbol, matched_name
+
+                # 2. 일반 글로벌 주식(미국/유럽 등) 채택 (암호화폐/선물/외환 제외)
+                for q in quotes:
+                    quote_type = q.get("quoteType", "")
+                    symbol = q.get("symbol", "").strip().upper()
+                    matched_name = q.get("shortname") or q.get("longname") or name
+
+                    if symbol and quote_type in ["EQUITY", "ETF"] and not symbol.endswith("-USD"):
+                        # 일본 4자리 숫자 티커인 경우 .T 보정
+                        if re.match(r'^\d{4}$', symbol):
+                            symbol = f"{symbol}.T"
+                        self.online_search_cache[search_query] = (symbol, matched_name)
+                        print(f"      🔍 [글로벌 금융 검색] '{name}' ➔ 공식 티커: {symbol} ({matched_name})", flush=True)
+                        return symbol, matched_name
+
+            self.online_search_cache[search_query] = None
+            return None
+        except Exception:
+            self.online_search_cache[search_query] = None
+            return None
+
     def match(self, raw_ticker: str, name: str) -> Tuple[Optional[str], str]:
         """
         종목 매칭:
         - 한국주식: API 추출 6자리 코드 기준, 투자주 DB에 없으면 신규 생성 후 릴레이션 연결
-        - 해외주식: 마스터 DB 해외 종목 풀과 정규화 퍼지(유사도 80% 이상) 매칭 후 투자주 DB 미등록 시 자동 생성
+        - 해외주식: 
+          1단계) 투자주 DB 완전 일치 확인
+          2단계) 마스터 DB 퍼지 매칭
+          3단계) 글로벌 금융 검색 엔진(Yahoo Finance) 실시간 티커 추출
+          4단계) 티커 확인 시 투자주 DB 자동 생성 및 릴레이션 연결
         """
         t = raw_ticker.strip().upper()
         n = name.strip()
@@ -351,7 +412,7 @@ class StockMatchEngine:
         # ========================================================
         # CASE B: 해외/일본/미국 주식 (티커가 없거나 한국 코드가 아닌 외국 종목)
         # ========================================================
-        # 1. 투자주 DB에 이미 등록된 해외 종목인지 확인 (완전 일치)
+        # 1. 투자주 DB에 이미 등록된 해외 종목인지 확인 (티커 또는 종목명 완전 일치)
         if t and t in self.inv_ticker_to_page:
             match_info = self.inv_ticker_to_page[t]
             return match_info["id"], match_info["ticker"]
@@ -363,38 +424,42 @@ class StockMatchEngine:
             match_info = self.inv_name_to_page[n.replace(" ", "")]
             return match_info["id"], match_info["ticker"]
 
-        # 2. 해외주식에 한해 상장주식DB 전체 (마스터 DB) 해외 종목 풀과 퍼지(Fuzzy >= 0.80) 매칭
-        if n and self.master_foreign_candidates:
+        # 2. [최우선] 야후 파이낸스 검색을 통해 회사명 기준 공식 글로벌 티커 먼저 식별
+        matched_ticker = ""
+        matched_name = n
+        if n:
+            search_res = self._search_foreign_ticker(n)
+            if search_res:
+                matched_ticker, matched_name = search_res
+
+        # 3. 야후 파이낸스 미검색 시 보조: 마스터 DB 정규화 완전 일치만 제한적 확인 (퍼지 오매칭 방지)
+        if not matched_ticker and n and self.master_foreign_candidates:
             norm_target = normalize_company_name(n)
-            if norm_target:
-                best_ratio = 0.0
-                best_cand = None
+            if norm_target and len(norm_target) >= 3:
                 for cand in self.master_foreign_candidates:
-                    norm_c = cand["norm_name"]
-                    # 2-1. 정규화 후 완전 일치 또는 4글자 이상 상호 포함 (100% 신뢰)
-                    if norm_target == norm_c or (len(norm_target) >= 4 and (norm_target in norm_c or norm_c in norm_target)):
-                        best_ratio = 1.0
-                        best_cand = cand
+                    if norm_target == cand["norm_name"]:
+                        matched_ticker = cand["ticker"]
+                        matched_name = cand["name"]
                         break
-                    
-                    # 2-2. SequenceMatcher 유사도 계산 (임계값 0.80 이상)
-                    ratio = difflib.SequenceMatcher(None, norm_target, norm_c).ratio()
-                    if ratio > best_ratio and ratio >= 0.80:
-                        best_ratio = ratio
-                        best_cand = cand
 
-                if best_cand:
-                    inv_id = best_cand["inv_id"]
-                    if not inv_id and best_cand["ticker"] in self.inv_ticker_to_page:
-                        inv_id = self.inv_ticker_to_page[best_cand["ticker"]]["id"]
-                    
-                    # 마스터 DB와 매칭되었으나 투자주 DB에는 없는 경우 -> 자동 등록
-                    if not inv_id and best_cand["ticker"]:
-                        inv_id = self._create_investment_page(best_cand["ticker"], best_cand["name"])
-                    
-                    return inv_id, best_cand["ticker"]
+        # 4. 티커가 식별된 경우: 투자주 DB 매칭 확인 및 미등록 시 자동 생성
+        if matched_ticker:
+            # 일본 .T 등 접미사 분리 및 원본 티커 모두 확인
+            clean_mt = matched_ticker.split(".")[0].strip().upper()
+            inv_id = None
+            if clean_mt in self.inv_ticker_to_page:
+                inv_id = self.inv_ticker_to_page[clean_mt]["id"]
+            elif matched_ticker in self.inv_ticker_to_page:
+                inv_id = self.inv_ticker_to_page[matched_ticker]["id"]
+            elif matched_name in self.inv_name_to_page:
+                inv_id = self.inv_name_to_page[matched_name]["id"]
+            else:
+                # 투자주 DB에 없으면 야후 파이낸스 공식 티커로 신규 등록
+                inv_id = self._create_investment_page(matched_ticker, matched_name)
 
-        # 3. 미매칭 외국 종목: 원본에 유효한 해외 티커(예: AAPL)가 있으면 사용하고, 없으면 공백
+            return inv_id, matched_ticker
+
+        # 5. 미매칭 외국 종목: 원본에 유효한 해외 티커(예: AAPL)가 있으면 사용하고, 없으면 공백
         fallback_ticker = t if (re.match(r'^[A-Z0-9.\-_]{1,10}$', t) and not t.isdigit()) else ""
         return None, fallback_ticker
 
