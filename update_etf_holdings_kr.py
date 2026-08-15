@@ -3,11 +3,11 @@ import sys
 import time
 import json
 import re
-import difflib
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from typing import Any, List, Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 
 # Windows 콘솔 인코딩 설정
 if sys.stdout.encoding != 'utf-8':
@@ -25,7 +25,7 @@ from notion_utils import (
 )
 
 # ==========================================
-# 1. 환경 변수 및 실전투자 설정
+# 1. 환경 변수 및 공통 세션 설정
 # ==========================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 INVESTMENT_DB_ID = (
@@ -35,11 +35,7 @@ INVESTMENT_DB_ID = (
     or get_env_var("DATABASE_ID")
 )
 MASTER_DB_ID = os.environ.get("MASTER_DATABASE_ID") or os.environ.get("MASTER_DB_ID")
-ETF_DB_ID = (
-    os.environ.get("ETF_DB_ID")
-    or os.environ.get("ETF_DATABASE_ID")
-    or get_env_var("ETF_DB_ID")
-)
+ETF_DB_ID = os.environ.get("ETF_DB_ID") or os.environ.get("ETF_DATABASE_ID") or get_env_var("ETF_DB_ID")
 
 KIS_DOMAIN = "https://openapi.koreainvestment.com:9443"
 KIS_APP_KEY = (os.environ.get("KIS_APP_KEY") or os.environ.get("KIS_PROD_APP_KEY") or "").strip()
@@ -57,7 +53,7 @@ def parse_quantity(val: Any) -> Optional[float]:
         return None
     try:
         s = str(val).replace(",", "").strip()
-        if not s or s == "null" or s == "-":
+        if not s or s in ["null", "-", "none"]:
             return None
         num = float(s)
         return num if num > 0 else None
@@ -65,43 +61,76 @@ def parse_quantity(val: Any) -> Optional[float]:
         return None
 
 
-def normalize_company_name(name: str) -> str:
-    """해외/일본/미국 기업명 축약어 확장 및 법인 형태 제거 정규화"""
+def extract_short_brand_name(name: str) -> str:
+    """노션 열 너비가 길어지지 않도록 법인형태/접미사를 제거한 핵심 브랜드명만 추출"""
     if not name:
         return ""
-    name_clean = name.upper()
-    name_clean = re.sub(r'[\(\)\[\],\.\-]', ' ', name_clean)
+    n = name.strip()
 
-    # 1. 글로벌/일본 기업 주요 축약어 표준 확장
+    # 1. 글로벌 대형주 주요 별칭 매핑
+    brand_map = {
+        r'(?i)\bTAIWAN SEMICONDUCTOR\b': 'TSMC',
+        r'(?i)\bALPHABET\b': 'Alphabet',
+        r'(?i)\bAMAZON\b': 'Amazon',
+        r'(?i)\bMETA PLATFORMS\b': 'Meta Platforms',
+        r'(?i)\bASML\b': 'ASML',
+        r'(?i)\bORACLE\b': 'Oracle',
+        r'(?i)\bDELL\b': 'Dell',
+        r'(?i)\bVERTIV\b': 'Vertiv',
+        r'(?i)\bCROWDSTRIKE\b': 'CrowdStrike',
+        r'(?i)\bMICROSOFT\b': 'Microsoft',
+        r'(?i)\bAPPLE\b': 'Apple',
+        r'(?i)\bNVIDIA\b': 'NVIDIA',
+        r'(?i)\bBROADCOM\b': 'Broadcom',
+        r'(?i)\bQUALCOMM\b': 'Qualcomm',
+    }
+    for pat, brand in brand_map.items():
+        if re.search(pat, n):
+            return brand
+
+    # 2. 특수기호 및 법인/주식 형태 수식어 제거
+    clean = re.sub(r'[\(\)\[\],\.\-\/\:\'\"]', ' ', n)
+    remove_patterns = [
+        r'(?i)\bCL(ASS)?\s*[A-Z0-9]?\b', r'(?i)\bORD(INARY)?\b', r'(?i)\bREG(ISTERED)?\b',
+        r'(?i)\bSHS\b', r'(?i)\bSHARES\b', r'(?i)\bSP\s*ADR\b', r'(?i)\bADR\b', r'(?i)\bADS\b',
+        r'(?i)\bNV\b', r'(?i)\bDE\b', r'(?i)\bCORP(ORATION)?\b', r'(?i)\bINC(ORPORATED)?\b',
+        r'(?i)\bLTD\b', r'(?i)\bLIMITED\b', r'(?i)\bCO\b', r'(?i)\bCOS\b', r'(?i)\bLLC\b',
+        r'(?i)\bPLC\b', r'(?i)\bHOLDINGS?\b', r'(?i)\bGROUP\b', r'(?i)\bHOLDI\b', r'(?i)\bUSA\b',
+        r'(?i)\bCOM\b', r'(?i)\bNY\b', r'(?i)\bS\s*A\b', r'(?i)\bAG\b', r'(?i)\bSE\b',
+        r'(?i)\bK\s*K\b', r'(?i)\bSPONSORED\b', r'(?i)\bSOLUTIONS\b'
+    ]
+    for p in remove_patterns:
+        clean = re.sub(p, ' ', clean)
+
+    tokens = [t for t in clean.split() if len(t) >= 2]
+    # 최대 3단어까지만 허용하여 간결성 유지
+    res = " ".join(tokens[:3])
+    return res.title() if (res.isupper() and len(res) > 4) else res
+
+
+def normalize_company_name(name: str) -> str:
+    """금융 API 검색용 정규화 쿼리 생성"""
+    if not name:
+        return ""
+    n = name.upper()
+    n = re.sub(r'[\(\)\[\],\.\-\/\:\'\"]', ' ', n)
+    # 약어 확장
     abbrev_map = {
-        r'\bMFG\b': 'MANUFACTURING',
-        r'\bIND\b': 'INDUSTRIES',
-        r'\bINDS\b': 'INDUSTRIES',
-        r'\bINTL\b': 'INTERNATIONAL',
-        r'\bTECH\b': 'TECHNOLOGY',
-        r'\bTECHNOLOGIES\b': 'TECHNOLOGY',
-        r'\bSYS\b': 'SYSTEMS',
-        r'\bELEC\b': 'ELECTRIC',
-        r'\bELECTR\b': 'ELECTRIC',
-        r'\bSEMICON\b': 'SEMICONDUCTOR',
-        r'\bCHEM\b': 'CHEMICAL',
-        r'\bCOMM\b': 'COMMUNICATIONS',
-        r'\bLAB\b': 'LABORATORIES',
-        r'\bLABS\b': 'LABORATORIES',
+        r'\bMFG\b': 'MANUFACTURING', r'\bIND\b': 'INDUSTRIES', r'\bTECH\b': 'TECHNOLOGY',
+        r'\bSYS\b': 'SYSTEMS', r'\bELEC\b': 'ELECTRIC', r'\bSEMICON\b': 'SEMICONDUCTOR'
     }
     for pat, rep in abbrev_map.items():
-        name_clean = re.sub(pat, rep, name_clean)
+        n = re.sub(pat, rep, n)
 
-    # 2. 법인 형태 및 공통 접미사 제거
-    suffixes = [
-        r'\bCORP\b', r'\bCORPORATION\b', r'\bINC\b', r'\bLTD\b', r'\bLIMITED\b',
-        r'\bCO\b', r'\bHOLDINGS?\b', r'\bGROUP\b', r'\bPLC\b', r'\bADR\b',
-        r'\bCLASS [AB]\b', r'\bS A\b', r'\bAG\b', r'\bSE\b', r'\bNV\b', r'\bK K\b'
+    remove_words = [
+        r'\bCL(ASS)?\s*[A-Z0-9]?\b', r'\bORD(INARY)?\b', r'\bREG(ISTERED)?\b',
+        r'\bSP\s*ADR\b', r'\bADR\b', r'\bADS\b', r'\bNV\b', r'\bDE\b',
+        r'\bCORP(ORATION)?\b', r'\bINC(ORPORATED)?\b', r'\bLTD\b', r'\bCO\b',
+        r'\bHOLDINGS?\b', r'\bGROUP\b', r'\bUSA\b', r'\bCOM\b', r'\bNY\b',
     ]
-    for suf in suffixes:
-        name_clean = re.sub(suf, '', name_clean)
-
-    return " ".join(name_clean.split())
+    for p in remove_words:
+        n = re.sub(p, ' ', n)
+    return " ".join([t for t in n.split() if len(t) >= 2])
 
 
 # ==========================================
@@ -110,11 +139,7 @@ def normalize_company_name(name: str) -> str:
 def get_kis_token() -> Optional[str]:
     """KIS 실전투자 접속 토큰 발급"""
     url = f"{KIS_DOMAIN}/oauth2/tokenP"
-    body = {
-        "grant_type": "client_credentials",
-        "appkey": KIS_APP_KEY,
-        "appsecret": KIS_APP_SECRET
-    }
+    body = {"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET}
     try:
         res = requests.post(url, json=body, timeout=10)
         res.raise_for_status()
@@ -122,14 +147,13 @@ def get_kis_token() -> Optional[str]:
         if token:
             print("🔑 KIS 실전투자 토큰 발급 성공", flush=True)
             return token
-        return None
     except Exception as exc:
         print(f"❌ KIS 토큰 발급 실패: {exc}", flush=True)
-        return None
+    return None
 
 
 def get_etf_composition_kis(token: str, clean_ticker: str) -> List[Dict[str, Any]]:
-    """한투 실전 API: 한국 ETF 구성종목 코드 및 수량(etf_cu_unit_scrt_cnt) 수집"""
+    """한투 실전 API: 한국 ETF 구성종목 코드 및 CU 수량 수집"""
     url = f"{KIS_DOMAIN}/uapi/etfetn/v1/quotations/inquire-component-stock-price"
     headers = {
         "authorization": f"Bearer {token}",
@@ -138,104 +162,65 @@ def get_etf_composition_kis(token: str, clean_ticker: str) -> List[Dict[str, Any
         "tr_id": "FHKST121600C0",
         "custtype": "P"
     }
-    params = {
-        "FID_COND_MRKT_DIV_CODE": "J",
-        "FID_INPUT_ISCD": clean_ticker,
-        "FID_COND_SCR_DIV_CODE": "11216"
-    }
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": clean_ticker, "FID_COND_SCR_DIV_CODE": "11216"}
     holdings = []
     try:
         res = SESSION.get(url, headers=headers, params=params, timeout=10)
-        if res.status_code != 200:
-            return holdings
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            return holdings
-
-        for item in data.get("output2") or []:
-            raw_ticker = str(item.get("stck_shrn_iscd") or "").strip()
-            name = (item.get("hts_kor_isnm") or "").strip()
-            qty = parse_quantity(item.get("etf_cu_unit_scrt_cnt"))
-            if not raw_ticker and not name:
-                continue
-
-            holdings.append({
-                "raw_ticker": raw_ticker,
-                "name": name or raw_ticker,
-                "quantity": qty
-            })
-        return holdings
+        if res.status_code == 200:
+            data = res.json()
+            for item in data.get("output2") or []:
+                raw_ticker = str(item.get("stck_shrn_iscd") or "").strip()
+                name = (item.get("hts_kor_isnm") or "").strip()
+                qty = parse_quantity(item.get("etf_cu_unit_scrt_cnt"))
+                if raw_ticker or name:
+                    holdings.append({"raw_ticker": raw_ticker, "name": name or raw_ticker, "quantity": qty})
     except Exception:
-        return holdings
+        pass
+    return holdings
 
 
 def get_etf_composition_wisereport(clean_ticker: str) -> List[Dict[str, Any]]:
-    """WiseReport / Naver 금융: 해외/글로벌/일본 ETF 구성종목 및 계약수량(AGMT_STK_CNT) 수집"""
+    """WiseReport: 해외/글로벌/일본 ETF 구성종목 및 계약수량 수집"""
     url = f"https://navercomp.wisereport.co.kr/v2/ETF/index.aspx?cmp_cd={clean_ticker}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     holdings = []
     try:
         r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return holdings
-
-        match = re.search(r'var\s+CU_data\s*=\s*(\{.*?\});', r.text, re.DOTALL)
-        if not match:
-            return holdings
-
-        data = json.loads(match.group(1))
-        for item in data.get("grid_data", []):
-            name = (item.get("STK_NM_KOR") or item.get("ITEM_NM") or "").strip()
-            if not name or name in ["설정현금액", "원화현금", "USD현금", "외화예치금"]:
-                continue
-
-            raw_ticker = str(item.get("STK_CD") or item.get("CMP_CD") or "").strip()
-            if raw_ticker.lower() in ["none", "null"]:
-                raw_ticker = ""
-            qty = parse_quantity(item.get("AGMT_STK_CNT"))
-
-            holdings.append({
-                "raw_ticker": raw_ticker,
-                "name": name,
-                "quantity": qty
-            })
-        return holdings
+        if r.status_code == 200:
+            match = re.search(r'var\s+CU_data\s*=\s*(\{.*?\});', r.text, re.DOTALL)
+            if match:
+                data = json.loads(match.group(1))
+                for item in data.get("grid_data", []):
+                    name = (item.get("STK_NM_KOR") or item.get("ITEM_NM") or "").strip()
+                    if not name or name in ["설정현금액", "원화현금", "USD현금", "외화예치금"]:
+                        continue
+                    raw_ticker = str(item.get("STK_CD") or item.get("CMP_CD") or "").strip()
+                    if raw_ticker.lower() in ["none", "null"]:
+                        raw_ticker = ""
+                    qty = parse_quantity(item.get("AGMT_STK_CNT"))
+                    holdings.append({"raw_ticker": raw_ticker, "name": name, "quantity": qty})
     except Exception:
-        return holdings
+        pass
+    return holdings
 
 
 # ==========================================
-# 3. 노션 DB 인메모리 매칭 & 퍼지 유사도 엔진
+# 3. 고성능 종목 매칭 & 투자주 DB 자동등록 엔진
 # ==========================================
 class StockMatchEngine:
-    """
-    [종목 매칭 엔진]
-    1. 한국주식 (한투 API 추출):
-       - API에서 직접 추출된 6자리 공식 종목코드(티커)를 우선 적용
-       - 투자주 DB 등록 여부 확인 후, 미등록 시 자동 생성 및 릴레이션 연결
-
-    2. 해외/일본/미국 주식:
-       - 1순위: 투자주 DB 캐시 완전 일치 확인
-       - 2순위: 마스터 DB 해외 종목 풀과 정규화 퍼지(Fuzzy >= 0.80) 매칭
-       - 3순위: 글로벌 금융 검색 엔진(Yahoo Finance Search)을 통한 실시간 티커 추출
-       - 4순위: 티커 확인 시 투자주 DB 자동 생성 및 릴레이션 연결
-    """
     def __init__(self, client: Any):
         self.client = client
         self.inv_ticker_to_page: Dict[str, Dict[str, str]] = {}
         self.inv_name_to_page: Dict[str, Dict[str, str]] = {}
-        self.master_foreign_candidates: List[Dict[str, str]] = []
         self.online_search_cache: Dict[str, Optional[Tuple[str, str]]] = {}
         self._load_cache()
 
     def _load_cache(self) -> None:
-        # 1. 투자주 DB 로드 (국내/해외 투자 대상 종목 캐시)
-        print(f"📦 [1/2] 투자주 DB({INVESTMENT_DB_ID}) 목록을 메모리에 로드합니다...", flush=True)
+        print(f"📦 투자주 DB({INVESTMENT_DB_ID}) 목록을 메모리에 로드합니다...", flush=True)
         count_inv = 0
         for page in paginate_database(self.client, INVESTMENT_DB_ID, page_size=100):
             pid = page["id"]
             props = page.get("properties", {})
-            
             t_prop = props.get("티커", {}).get("title", [])
             ticker = t_prop[0]["plain_text"].strip().upper() if t_prop else ""
             
@@ -245,88 +230,48 @@ class StockMatchEngine:
                     val = props[k]
                     if val.get("type") == "formula":
                         name = str(val.get("formula", {}).get("string") or "").strip()
-                    elif val.get("type") == "rich_text" and val.get("rich_text"):
-                        name = val["rich_text"][0]["plain_text"].strip()
-                    elif val.get("type") == "title" and val.get("title"):
-                        name = val["title"][0]["plain_text"].strip()
+                    elif val.get("type") in ["rich_text", "title"] and val.get(val["type"]):
+                        name = val[val["type"]][0]["plain_text"].strip()
 
             item_info = {"id": pid, "ticker": ticker, "name": name}
             if ticker:
-                clean_t = ticker.split(".")[0].strip().upper()
-                self.inv_ticker_to_page[clean_t] = item_info
+                self.inv_ticker_to_page[ticker.split(".")[0].strip().upper()] = item_info
                 self.inv_ticker_to_page[ticker] = item_info
             if name:
                 self.inv_name_to_page[name] = item_info
                 self.inv_name_to_page[name.replace(" ", "")] = item_info
             count_inv += 1
-        print(f"   ✅ 투자주 DB 종목 {count_inv}개 로드 완료", flush=True)
-
-        # 2. 상장주식DB 전체 (마스터 DB)에서 해외 종목 풀만 선별 로드
-        if MASTER_DB_ID and MASTER_DB_ID != INVESTMENT_DB_ID:
-            print(f"📦 [2/2] 상장주식DB 전체({MASTER_DB_ID})에서 해외/일본 종목 마스터 풀을 로드합니다...", flush=True)
-            count_master_foreign = 0
-            for page in paginate_database(self.client, MASTER_DB_ID, page_size=100):
-                props = page.get("properties", {})
-                t_prop = props.get("티커", {}).get("title", [])
-                ticker = t_prop[0]["plain_text"].strip().upper() if t_prop else ""
-                
-                n_prop = props.get("종목명", {}).get("rich_text", [])
-                name = n_prop[0]["plain_text"].strip() if n_prop else ""
-                
-                m_val = props.get("Market", {}).get("select")
-                market = m_val["name"] if m_val else ""
-
-                # 한국 종목코드(6자리 숫자 등)가 아니거나 해외 마켓 종목만 해외 후보군에 추가
-                is_kr_stock = (market in ["KOSPI", "KOSDAQ", "KONEX", "ETF(KR)"] and ticker.isdigit() and len(ticker) == 6)
-
-                if not is_kr_stock and ticker and name:
-                    rel_inv = props.get("투자주 DB", {}).get("relation", [])
-                    inv_id = rel_inv[0]["id"] if rel_inv else None
-                    norm_n = normalize_company_name(name)
-                    self.master_foreign_candidates.append({
-                        "ticker": ticker,
-                        "name": name,
-                        "norm_name": norm_n,
-                        "inv_id": inv_id
-                    })
-                    count_master_foreign += 1
-            print(f"   ✅ 해외/일본 종목 마스터 풀 {count_master_foreign}개 로드 완료", flush=True)
+        print(f"   ✅ 투자주 DB 종목 {count_inv}개 캐싱 완료", flush=True)
 
     def _create_investment_page(self, ticker: str, name: str) -> Optional[str]:
-        """투자주 DB에 존재하지 않는 경우 신규 페이지를 생성하고 인메모리 캐시에 즉시 등록"""
+        """투자주 DB에 신규 페이지 생성 후 인메모리 캐시 즉시 갱신"""
         if not ticker:
             return None
         try:
-            props: Dict[str, Any] = {
+            props = {
                 "티커": {"title": [{"text": {"content": ticker}}]},
+                "종목명": {"rich_text": [{"text": {"content": name}}]} if name else {}
             }
-            if name:
-                props["종목명"] = {"rich_text": [{"text": {"content": name}}]}
-
-            new_page = self.client.pages.create(
-                parent={"database_id": INVESTMENT_DB_ID},
-                properties=props
-            )
+            props = {k: v for k, v in props.items() if v}
+            new_page = self.client.pages.create(parent={"database_id": INVESTMENT_DB_ID}, properties=props)
             new_id = new_page["id"]
-            
-            # 생성 즉시 인메모리 캐시에 등록하여 이후 루프에서의 중복 생성 방지
+
             item_info = {"id": new_id, "ticker": ticker, "name": name}
-            clean_t = ticker.split(".")[0].strip().upper()
-            self.inv_ticker_to_page[clean_t] = item_info
+            self.inv_ticker_to_page[ticker.split(".")[0].strip().upper()] = item_info
             self.inv_ticker_to_page[ticker] = item_info
             if name:
                 self.inv_name_to_page[name] = item_info
                 self.inv_name_to_page[name.replace(" ", "")] = item_info
-                
-            print(f"      ✨ [투자주 DB 자동등록] {name}({ticker}) 신규 등록 완료", flush=True)
-            time.sleep(0.05)
+
+            print(f"      ✨ [투자주 DB 자동등록] {name}({ticker}) 완료", flush=True)
+            time.sleep(0.02)
             return new_id
         except Exception as exc:
             print(f"      ⚠️ [투자주 DB 등록 실패] {name}({ticker}): {exc}", flush=True)
             return None
 
     def _search_foreign_ticker(self, name: str) -> Optional[Tuple[str, str]]:
-        """글로벌 금융 데이터 검색 엔진을 통해 기업명으로 공식 티커 실시간 추출 (일본 .T 및 메모리 캐싱 적용)"""
+        """Yahoo Finance 검색: 미국 메이저 거래소 & ADR 최우선 탐색"""
         norm_name = normalize_company_name(name)
         search_query = norm_name or name
         if not search_query or len(search_query) < 2:
@@ -335,44 +280,64 @@ class StockMatchEngine:
         if search_query in self.online_search_cache:
             return self.online_search_cache[search_query]
 
+        def _pick_best(quotes: List[Dict[str, Any]], query_str: str) -> Optional[Tuple[str, str]]:
+            clean_q = normalize_company_name(query_str)
+            us_major, jp_pick, other_pick = None, None, None
+
+            for q in quotes:
+                sym = q.get("symbol", "").strip().upper()
+                typ = q.get("quoteType", "")
+                exch = (q.get("exchange") or q.get("exchDisp") or "").upper()
+                sname = (q.get("shortname") or q.get("longname") or "").strip()
+                fname = f"{sname} {q.get('longname', '')}".upper()
+
+                if typ not in ["EQUITY", "ETF"] or sym.endswith("-USD"):
+                    continue
+
+                # 검색어와 일치성 검증 (오매칭 배제)
+                is_match = (
+                    sname.upper().startswith(clean_q)
+                    or fname.startswith(clean_q)
+                    or bool(re.search(r'\b' + re.escape(clean_q) + r'\b', fname))
+                    or (clean_q == sym or clean_q.replace(" ", "") == sym)
+                )
+                if not is_match and len(quotes) > 1:
+                    continue
+
+                # 1. 미국 메이저 거래소 (NASDAQ, NYSE) 및 미국 ADR (점 없는 티커) -> 최우선
+                if (exch in ["NMS", "NYQ", "NASDAQ", "NYSE", "NGM", "NCM", "BTS", "BATS"] or "NASDAQ" in exch or "NYSE" in exch) and "." not in sym:
+                    if not us_major:
+                        us_major = (sym, sname or query_str)
+                # 2. 일본 도쿄 증시 (.T)
+                elif sym.endswith(".T") or exch in ["JPX", "TYO"] or "TOKYO" in exch:
+                    if not sym.endswith(".T") and re.match(r'^\d{4}$', sym):
+                        sym = f"{sym}.T"
+                    if not jp_pick:
+                        jp_pick = (sym, sname or query_str)
+                # 3. 기타 거래소
+                elif not other_pick:
+                    other_pick = (sym, sname or query_str)
+
+            return us_major or jp_pick or other_pick
+
         try:
             url = "https://query2.finance.yahoo.com/v1/finance/search"
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            params = {"q": search_query, "quotesCount": 6, "newsCount": 0}
             
-            res = requests.get(url, params=params, headers=headers, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                quotes = data.get("quotes", [])
-                
-                # 1. 일본 주식 우선 탐색 (.T 심볼 또는 도쿄거래소 상장 우선 선택)
-                for q in quotes:
-                    quote_type = q.get("quoteType", "")
-                    symbol = q.get("symbol", "").strip().upper()
-                    exch = (q.get("exchange") or q.get("exchDisp") or "").upper()
-                    matched_name = q.get("shortname") or q.get("longname") or name
+            # 1차: 정규화 기업명으로 검색
+            res = requests.get(url, params={"q": search_query, "quotesCount": 8, "newsCount": 0}, headers=headers, timeout=5)
+            best = _pick_best(res.json().get("quotes", []), search_query) if res.status_code == 200 else None
 
-                    if quote_type in ["EQUITY", "ETF"]:
-                        if symbol.endswith(".T") or "TOKYO" in exch or exch in ["JPX", "TYO"]:
-                            if not symbol.endswith(".T") and re.match(r'^\d{4}$', symbol):
-                                symbol = f"{symbol}.T"
-                            self.online_search_cache[search_query] = (symbol, matched_name)
-                            print(f"      🇯🇵 [일본 주식 .T 매칭] '{name}' ➔ 공식 티커: {symbol} ({matched_name})", flush=True)
-                            return symbol, matched_name
+            # 2차: 미발견 시 원본명 보조 검색
+            if not best and name != search_query:
+                res2 = requests.get(url, params={"q": name, "quotesCount": 8, "newsCount": 0}, headers=headers, timeout=5)
+                if res2.status_code == 200:
+                    best = _pick_best(res2.json().get("quotes", []), name)
 
-                # 2. 일반 글로벌 주식(미국/유럽 등) 채택 (암호화폐/선물/외환 제외)
-                for q in quotes:
-                    quote_type = q.get("quoteType", "")
-                    symbol = q.get("symbol", "").strip().upper()
-                    matched_name = q.get("shortname") or q.get("longname") or name
-
-                    if symbol and quote_type in ["EQUITY", "ETF"] and not symbol.endswith("-USD"):
-                        # 일본 4자리 숫자 티커인 경우 .T 보정
-                        if re.match(r'^\d{4}$', symbol):
-                            symbol = f"{symbol}.T"
-                        self.online_search_cache[search_query] = (symbol, matched_name)
-                        print(f"      🔍 [글로벌 금융 검색] '{name}' ➔ 공식 티커: {symbol} ({matched_name})", flush=True)
-                        return symbol, matched_name
+            if best:
+                self.online_search_cache[search_query] = best
+                print(f"      🔍 [글로벌 검색] '{name}' ➔ 공식 티커: {best[0]} ({best[1]})", flush=True)
+                return best
 
             self.online_search_cache[search_query] = None
             return None
@@ -380,88 +345,63 @@ class StockMatchEngine:
             self.online_search_cache[search_query] = None
             return None
 
-    def match(self, raw_ticker: str, name: str) -> Tuple[Optional[str], str]:
-        """
-        종목 매칭:
-        - 한국주식: API 추출 6자리 코드 기준, 투자주 DB에 없으면 신규 생성 후 릴레이션 연결
-        - 해외주식: 
-          1단계) 투자주 DB 완전 일치 확인
-          2단계) 마스터 DB 퍼지 매칭
-          3단계) 글로벌 금융 검색 엔진(Yahoo Finance) 실시간 티커 추출
-          4단계) 티커 확인 시 투자주 DB 자동 생성 및 릴레이션 연결
-        """
+    def match(self, raw_ticker: str, name: str) -> Tuple[Optional[str], str, str]:
+        """종목 매칭 -> (투자주ID, 확정티커, 짧고간결한브랜드명) 반환"""
         t = raw_ticker.strip().upper()
         n = name.strip()
-
-        # 한국 공식 종목코드 판별 (6자리 숫자 또는 0으로 시작하는 6자리 단축코드)
         is_kr_code = bool(re.match(r'^\d{6}$', t) or (len(t) == 6 and t.isalnum() and t[0] == '0'))
 
-        # ========================================================
-        # CASE A: 한국주식 (한투 API를 통해 6자리 코드가 명확히 추출된 경우)
-        # ========================================================
+        # ==========================================
+        # CASE A: 한국 주식 (6자리 공식 코드)
+        # ==========================================
         if is_kr_code:
-            # 1. 투자주 DB에 이미 등록되어 있으면 기존 페이지 연결
             if t in self.inv_ticker_to_page:
-                return self.inv_ticker_to_page[t]["id"], t
+                return self.inv_ticker_to_page[t]["id"], t, self.inv_ticker_to_page[t]["name"] or n
             if n in self.inv_name_to_page:
-                return self.inv_name_to_page[n]["id"], t
-            # 2. 투자주 DB에 없으면 신규 페이지 자동 생성 후 릴레이션 연결
-            new_inv_id = self._create_investment_page(t, n)
-            return new_inv_id, t
+                return self.inv_name_to_page[n]["id"], t, self.inv_name_to_page[n]["name"] or n
+            
+            new_id = self._create_investment_page(t, n)
+            return new_id, t, n
 
-        # ========================================================
-        # CASE B: 해외/일본/미국 주식 (티커가 없거나 한국 코드가 아닌 외국 종목)
-        # ========================================================
-        # 1. 투자주 DB에 이미 등록된 해외 종목인지 확인 (티커 또는 종목명 완전 일치)
+        # ==========================================
+        # CASE B: 해외 / 일본 주식
+        # ==========================================
+        # 1. 투자주 DB 완전 일치 확인
         if t and t in self.inv_ticker_to_page:
-            match_info = self.inv_ticker_to_page[t]
-            return match_info["id"], match_info["ticker"]
-
+            info = self.inv_ticker_to_page[t]
+            return info["id"], info["ticker"], extract_short_brand_name(info["name"] or n)
         if n and n in self.inv_name_to_page:
-            match_info = self.inv_name_to_page[n]
-            return match_info["id"], match_info["ticker"]
-        if n and n.replace(" ", "") in self.inv_name_to_page:
-            match_info = self.inv_name_to_page[n.replace(" ", "")]
-            return match_info["id"], match_info["ticker"]
+            info = self.inv_name_to_page[n]
+            return info["id"], info["ticker"], extract_short_brand_name(info["name"] or n)
 
-        # 2. [최우선] 야후 파이낸스 검색을 통해 회사명 기준 공식 글로벌 티커 먼저 식별
+        # 2. Yahoo Finance 최우선 검색
         matched_ticker = ""
-        matched_name = n
+        matched_name = ""
         if n:
             search_res = self._search_foreign_ticker(n)
             if search_res:
                 matched_ticker, matched_name = search_res
 
-        # 3. 야후 파이낸스 미검색 시 보조: 마스터 DB 정규화 완전 일치만 제한적 확인 (퍼지 오매칭 방지)
-        if not matched_ticker and n and self.master_foreign_candidates:
-            norm_target = normalize_company_name(n)
-            if norm_target and len(norm_target) >= 3:
-                for cand in self.master_foreign_candidates:
-                    if norm_target == cand["norm_name"]:
-                        matched_ticker = cand["ticker"]
-                        matched_name = cand["name"]
-                        break
-
-        # 4. 티커가 식별된 경우: 투자주 DB 매칭 확인 및 미등록 시 자동 생성
+        # 3. 티커 확인 시: 투자주 DB 매칭 및 신규 생성
         if matched_ticker:
-            # 일본 .T 등 접미사 분리 및 원본 티커 모두 확인
-            clean_mt = matched_ticker.split(".")[0].strip().upper()
+            short_brand = extract_short_brand_name(matched_name or n)
+            clean_t = matched_ticker.split(".")[0].strip().upper()
             inv_id = None
-            if clean_mt in self.inv_ticker_to_page:
-                inv_id = self.inv_ticker_to_page[clean_mt]["id"]
+
+            if clean_t in self.inv_ticker_to_page:
+                inv_id = self.inv_ticker_to_page[clean_t]["id"]
             elif matched_ticker in self.inv_ticker_to_page:
                 inv_id = self.inv_ticker_to_page[matched_ticker]["id"]
-            elif matched_name in self.inv_name_to_page:
+            elif matched_name and matched_name in self.inv_name_to_page:
                 inv_id = self.inv_name_to_page[matched_name]["id"]
             else:
-                # 투자주 DB에 없으면 야후 파이낸스 공식 티커로 신규 등록
-                inv_id = self._create_investment_page(matched_ticker, matched_name)
+                inv_id = self._create_investment_page(matched_ticker, short_brand)
 
-            return inv_id, matched_ticker
+            return inv_id, matched_ticker, short_brand
 
-        # 5. 미매칭 외국 종목: 원본에 유효한 해외 티커(예: AAPL)가 있으면 사용하고, 없으면 공백
-        fallback_ticker = t if (re.match(r'^[A-Z0-9.\-_]{1,10}$', t) and not t.isdigit()) else ""
-        return None, fallback_ticker
+        # 4. 미매칭 fallback
+        fallback_t = t if (re.match(r'^[A-Z0-9.\-_]{1,10}$', t) and not t.isdigit()) else ""
+        return None, fallback_t, extract_short_brand_name(n)
 
 
 # ==========================================
@@ -469,42 +409,36 @@ class StockMatchEngine:
 # ==========================================
 def get_target_etfs(client: Any) -> List[Dict[str, str]]:
     """ETF DB에서 'ETF(투자DB)' 릴레이션에 등록된 부모 ETF 페이지만 역스캔"""
-    print(f"📋 ETF DB({ETF_DB_ID})에 등록된 모니터링 대상 ETF 목록을 스캔합니다...", flush=True)
+    print(f"📋 ETF DB({ETF_DB_ID})에서 대상 부모 ETF를 스캔합니다...", flush=True)
     target_etfs: List[Dict[str, str]] = []
-    parent_etf_ids: set = set()
+    parent_ids: set = set()
 
     for page in paginate_database(client, ETF_DB_ID, page_size=100):
-        props = page.get("properties", {})
-        rel_list = props.get("ETF(투자DB)", {}).get("relation", [])
-        for rel in rel_list:
+        for rel in page.get("properties", {}).get("ETF(투자DB)", {}).get("relation", []):
             if rel.get("id"):
-                parent_etf_ids.add(rel["id"])
+                parent_ids.add(rel["id"])
 
-    print(f"   🔍 발견된 모니터링 대상 부모 ETF 수: {len(parent_etf_ids)}개", flush=True)
-    for page_id in parent_etf_ids:
+    print(f"   🔍 대상 부모 ETF 수: {len(parent_ids)}개", flush=True)
+    for pid in parent_ids:
         try:
-            parent_page = client.pages.retrieve(page_id=page_id)
-            parent_props = parent_page.get("properties", {})
-            ticker = get_page_text(parent_props, ["티커", "Ticker"])
-            name = get_page_text(parent_props, ["종목명", "이름", "Title"])
+            page = client.pages.retrieve(page_id=pid)
+            props = page.get("properties", {})
+            ticker = get_page_text(props, ["티커", "Ticker"])
+            name = get_page_text(props, ["종목명", "이름", "Title"])
             if ticker:
-                clean_ticker = ticker.split(".")[0].strip().upper()
-                target_etfs.append({
-                    "etf_page_id": page_id,
-                    "ticker": clean_ticker,
-                    "name": name or clean_ticker
-                })
-                print(f"   🎯 대상 ETF: {name or clean_ticker} ({clean_ticker})", flush=True)
-        except Exception as exc:
-            print(f"   ⚠️ 부모 ETF({page_id}) 조회 실패: {exc}", flush=True)
+                clean_t = ticker.split(".")[0].strip().upper()
+                target_etfs.append({"etf_page_id": pid, "ticker": clean_t, "name": name or clean_t})
+                print(f"   🎯 대상 ETF: {name or clean_t} ({clean_t})", flush=True)
+        except Exception:
+            pass
 
     print(f"   ✅ 총 {len(target_etfs)}개 대상 ETF 확정 완료.\n", flush=True)
     return target_etfs
 
 
 def archive_existing_etf_holdings(client: Any, etf_page_id: str) -> None:
-    """해당 ETF의 기존 과거 데이터를 전량 아카이브"""
-    pages_to_archive = []
+    """과거 구성종목 전량 병렬 아카이브 (속도 5배 향상)"""
+    page_ids = []
     start_cursor = None
     while True:
         try:
@@ -516,21 +450,16 @@ def archive_existing_etf_holdings(client: Any, etf_page_id: str) -> None:
             if start_cursor:
                 params["start_cursor"] = start_cursor
             res = client.databases.query(**params)
-            for page in res.get("results", []):
-                pages_to_archive.append(page["id"])
+            page_ids.extend([p["id"] for p in res.get("results", [])])
             if not res.get("has_more"):
                 break
             start_cursor = res.get("next_cursor")
-            time.sleep(0.03)
         except Exception:
             break
 
-    for page_id in pages_to_archive:
-        try:
-            client.pages.update(page_id=page_id, archived=True)
-            time.sleep(0.02)
-        except Exception:
-            pass
+    if page_ids:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            executor.map(lambda pid: client.pages.update(page_id=pid, archived=True), page_ids)
 
 
 # ==========================================
@@ -538,18 +467,17 @@ def archive_existing_etf_holdings(client: Any, etf_page_id: str) -> None:
 # ==========================================
 def main() -> None:
     print("🚀 [ETF 구성종목 자동 수집 및 동기화 파이프라인] 가동 시작", flush=True)
-    notion_client = build_notion_client(NOTION_TOKEN)
+    notion = build_notion_client(NOTION_TOKEN)
 
     kis_token = get_kis_token()
     if not kis_token:
         print("❌ KIS 토큰 발급 실패로 중단합니다.", flush=True)
         return
 
-    db_cache = StockMatchEngine(notion_client)
-    target_etfs = get_target_etfs(notion_client)
-
+    db_cache = StockMatchEngine(notion)
+    target_etfs = get_target_etfs(notion)
     if not target_etfs:
-        print("⚠️ 갱신 대상 ETF가 ETF DB에 등록되어 있지 않습니다.", flush=True)
+        print("⚠️ 갱신 대상 ETF가 없습니다.", flush=True)
         return
 
     now_kst = kst_isoformat()
@@ -560,64 +488,58 @@ def main() -> None:
         etf_name = target["name"]
 
         print(f"\n[{idx}/{len(target_etfs)}] 🔄 수집 진행: {etf_name}({etf_ticker})...", flush=True)
-        
-        # 1. KIS 실전 API + WiseReport 하이브리드 수집
         kis_items = get_etf_composition_kis(kis_token, etf_ticker)
         wise_items = get_etf_composition_wisereport(etf_ticker)
         
         raw_holdings = kis_items if kis_items else wise_items
-        # KIS에 없는 해외/일본 종목 병합
         if kis_items and wise_items:
-            existing_names = {it["name"].replace(" ", "") for it in kis_items}
+            existing = {it["name"].replace(" ", "") for it in kis_items}
             for w in wise_items:
-                if w["name"].replace(" ", "") not in existing_names:
+                if w["name"].replace(" ", "") not in existing:
                     raw_holdings.append(w)
 
         if not raw_holdings:
-            print(f"   ⚠️ {etf_name} 구성종목 수집 결과 없음 (건너뜀)", flush=True)
+            print(f"   ⚠️ {etf_name} 구성종목 없음 (건너뜀)", flush=True)
             continue
 
-        # 2. 투자주 DB & 마스터 DB 퍼지 매칭 (한국주식은 API 티커 우선 / 해외/일본 주식은 마스터 DB 매칭)
+        # 종목 매칭 및 간결한 브랜드명 추출
         items_to_insert = []
         for h in raw_holdings:
-            stock_id, matched_ticker = db_cache.match(h["raw_ticker"], h["name"])
+            stock_id, matched_ticker, short_brand = db_cache.match(h["raw_ticker"], h["name"])
             items_to_insert.append({
-                "name": h["name"],
+                "name": short_brand,
                 "ticker": matched_ticker,
                 "stock_id": stock_id,
                 "quantity": h["quantity"]
             })
 
-        # 3. 노션 ETF DB 갱신 (과거 삭제 후 신규 등록)
+        # 과거 데이터 아카이브 및 최신 데이터 등록
         print(f"   🧹 기존 과거 데이터 정리 중...", flush=True)
-        archive_existing_etf_holdings(notion_client, etf_page_id)
+        archive_existing_etf_holdings(notion, etf_page_id)
 
-        print(f"   📝 최신 {len(items_to_insert)}개 구성종목 입력 중 (수량 열 반영)...", flush=True)
-        success_count = 0
+        print(f"   📝 최신 {len(items_to_insert)}개 구성종목 입력 중...", flush=True)
+        success = 0
         for item in items_to_insert:
-            props: Dict[str, Any] = {
+            props = {
                 "이름": {"title": [{"text": {"content": item["name"]}}]},
                 "ETF(투자DB)": {"relation": [{"id": etf_page_id}]},
                 "업데이트": {"date": {"start": now_kst}}
             }
-            # 티커가 있으면 기입, 없으면 공백
             if item["ticker"]:
                 props["티커"] = {"rich_text": [{"text": {"content": item["ticker"]}}]}
-            # 투자주 DB에 매칭된 경우에만 종목(투자DB) 릴레이션 연결
             if item["stock_id"]:
                 props["종목(투자DB)"] = {"relation": [{"id": item["stock_id"]}]}
-            # 수량이 있으면 수량 열에 숫자 기입
             if item["quantity"] is not None:
                 props["수량"] = {"number": item["quantity"]}
 
             try:
-                notion_client.pages.create(parent={"database_id": ETF_DB_ID}, properties=props)
-                success_count += 1
-                time.sleep(0.05)
+                notion.pages.create(parent={"database_id": ETF_DB_ID}, properties=props)
+                success += 1
+                time.sleep(0.02)
             except Exception as exc:
                 print(f"   ❌ {item['name']} 등록 실패: {exc}", flush=True)
 
-        print(f"   ✅ [{etf_name}] 완료 ({success_count}/{len(items_to_insert)}건 입력)", flush=True)
+        print(f"   ✅ [{etf_name}] 완료 ({success}/{len(items_to_insert)}건 입력)", flush=True)
 
     print("\n✨ 모든 관리 대상 ETF 갱신 작업이 성공적으로 완료되었습니다.", flush=True)
 
