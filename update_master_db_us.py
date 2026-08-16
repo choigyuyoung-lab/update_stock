@@ -187,16 +187,22 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
     if blue_chip_tags:
         update_props["우량주"] = {"multi_select": [{"name": tag} for tag in blue_chip_tags]}
 
+    # 5. 벤치마크 관계형 속성 반영 (미국 주식은 K산업BM을 항상 빈 값으로 초기화)
+    update_props["K산업BM"] = {"relation": []}
+
     if market_label == "기타":
         update_props["시장BM"] = {"relation": []}
         update_props["G산업BM"] = {"relation": []}
     else:
-        if target_m_t and target_m_t != raw_t:
-            if m_id := config["ticker_to_id"].get(target_m_t):
-                update_props["시장BM"] = {"relation": [{"id": m_id}]}
-        if target_ind_t and target_ind_t != raw_t:
-            if ind_id := config["ticker_to_id"].get(target_ind_t):
-                update_props["G산업BM"] = {"relation": [{"id": ind_id}]}
+        if target_m_t and target_m_t != raw_t and (m_id := config["ticker_to_id"].get(target_m_t)):
+            update_props["시장BM"] = {"relation": [{"id": m_id}]}
+        else:
+            update_props["시장BM"] = {"relation": []}
+
+        if target_ind_t and target_ind_t != raw_t and (ind_id := config["ticker_to_id"].get(target_ind_t)):
+            update_props["G산업BM"] = {"relation": [{"id": ind_id}]}
+        else:
+            update_props["G산업BM"] = {"relation": []}
 
     if safe_page_update(client, pid, update_props):
         logger.info(f"   ✅ [US] {raw_t} ({name}) 업데이트 완료")

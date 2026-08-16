@@ -204,17 +204,20 @@ def process_page_kr(page: Dict[str, Any], engine: StockAutomationEngineKR, clien
     if blue_chip_tags:
         update_props["우량주"] = {"multi_select": [{"name": tag} for tag in blue_chip_tags]}
 
-    if target_m_t and target_m_t != clean_t:
-        if m_id := config["ticker_to_id"].get(target_m_t):
-            update_props["시장BM"] = {"relation": [{"id": m_id}]}
+    if target_m_t and target_m_t != clean_t and (m_id := config["ticker_to_id"].get(target_m_t)):
+        update_props["시장BM"] = {"relation": [{"id": m_id}]}
+    else:
+        update_props["시장BM"] = {"relation": []}
 
-    if target_k_ind_t and target_k_ind_t != clean_t:
-        if k_id := config["ticker_to_id"].get(target_k_ind_t):
-            update_props["K산업BM"] = {"relation": [{"id": k_id}]}
+    if target_k_ind_t and target_k_ind_t != clean_t and (k_id := config["ticker_to_id"].get(target_k_ind_t)):
+        update_props["K산업BM"] = {"relation": [{"id": k_id}]}
+    else:
+        update_props["K산업BM"] = {"relation": []}
 
-    if target_g_ind_t and target_g_ind_t != clean_t:
-        if g_id := config["ticker_to_id"].get(target_g_ind_t):
-            update_props["G산업BM"] = {"relation": [{"id": g_id}]}
+    if target_g_ind_t and target_g_ind_t != clean_t and (g_id := config["ticker_to_id"].get(target_g_ind_t)):
+        update_props["G산업BM"] = {"relation": [{"id": g_id}]}
+    else:
+        update_props["G산업BM"] = {"relation": []}
 
     return pid, update_props, clean_t, stock_name
 
