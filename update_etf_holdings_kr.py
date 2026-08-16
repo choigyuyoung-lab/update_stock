@@ -84,26 +84,25 @@ def is_derivative_or_cash(name: str, raw_ticker: str = "") -> bool:
     if not name:
         return True
     n = name.strip()
-    n_clean = n.replace(" ", "")
+    n_clean = n.replace(" ", "").upper()
     t = (raw_ticker or "").strip().upper()
 
-    # 1. 현금/예치금/금리형 자산
+    # 1. 한글 및 명확한 현금/예치금/금리형 자산
     cash_keywords = [
         "설정현금액", "원화현금", "USD현금", "외화예치금", "예탁금", "미수금", "예치금",
-        "KOFR", "CD금리", "SOFR", "CASH", "현금", "콜론", "RP"
+        "KOFR", "CD금리", "SOFR", "콜론", "RP형", "원화RP", "외화RP"
     ]
     for kw in cash_keywords:
-        if kw in n_clean:
+        if kw.upper() in n_clean:
             return True
 
+    # 단독 현금/RP (단어 경계 체크: CORP 등의 영문 기업명 부분 일치 원천 방지)
+    if re.search(r'\b(CASH|RP|MMF)\b', n, re.IGNORECASE) or n_clean in ["CASH", "RP", "현금"]:
+        return True
+
     # 2. 파생상품 (선물, 옵션, 스왑 등)
-    deriv_keywords = [
-        "개별선물", "선물", "위클리", "콜옵션", "풋옵션", "옵션",
-        "스왑", "SWAP", "FUTURES", "FUT", "OPTION"
-    ]
-    for kw in deriv_keywords:
-        if kw in n_clean:
-            return True
+    if re.search(r'(선물|위클리|콜옵션|풋옵션|옵션|스왑|\bSWAP\b|\bFUTURES\b|\bFUT\b|\bOPTION\b)', n, re.IGNORECASE):
+        return True
 
     # 3. 정규식 패턴 (연월 만기 선물/옵션: 2026 09 SK하이닉스개별선물, 코스피위클리M 2608W3 등)
     patterns = [
@@ -113,8 +112,6 @@ def is_derivative_or_cash(name: str, raw_ticker: str = "") -> bool:
         r'코스닥\s*선물',
         r'KOSDAQ\s*선물',
         r'미국\s*달러\s*선물',
-        r'\bFUT\b',
-        r'\bSWAP\b'
     ]
     for pat in patterns:
         if re.search(pat, n, re.IGNORECASE):
