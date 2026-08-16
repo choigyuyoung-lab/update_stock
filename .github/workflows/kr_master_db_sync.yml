@@ -21,6 +21,15 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+
+    # 🌟 KIS API 토큰 24시간 재사용 캐시 (하루 알림 1회 제한)
+    - name: Restore / Save KIS Token Cache
+      uses: actions/cache@v4
+      with:
+        path: .kis_token_cache.json
+        key: kis-token-cache-${{ github.run_id }}
+        restore-keys: |
+          kis-token-cache-
         
     - name: Run KR Update
       env:

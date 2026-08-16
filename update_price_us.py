@@ -11,6 +11,7 @@ Yahoo Finance(yfinance)를 호출하여 미국/해외 상장 주식 및 ADR의 �
 # ==============================================================================
 # 0. 라이브러리 임포트 및 시스템 설정
 # ==============================================================================
+import os
 import sys
 import time
 import logging
@@ -37,6 +38,7 @@ from notion_utils import (
     get_env_var,
     get_page_text,
     kst_isoformat,
+    set_page_date_property,
     paginate_database,
     safe_page_update,
     get_http_session,
@@ -49,7 +51,12 @@ from notion_utils import (
 # 1. 환경 변수 및 로거 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-DATABASE_ID = get_env_var("DATABASE_ID")
+DATABASE_ID = (
+    os.environ.get("DATABASE_ID")
+    or os.environ.get("MASTER_DATABASE_ID")
+    or os.environ.get("MASTER_DB_ID")
+    or get_env_var("DATABASE_ID")
+)
 
 SESSION = get_http_session()
 
@@ -136,10 +143,9 @@ def build_price_update_for_page(
             upd["전일 종가"] = {"number": previous_close}
         
         if upd:
-            if "마지막 업데이트" in props:
-                upd["마지막 업데이트"] = {"date": {"start": kst_isoformat()}}
+            set_page_date_property(upd, props)
             
-            price_str = f"{round(current_price, 2)}" if is_valid_num(current_price) else "N/A"
+            price_str = f"{round(current_price, 2)}" if current_price is not None and is_valid_num(current_price) else "N/A"
             return (page["id"], ticker, upd, price_str)
         else:
             logger.warning(f"⚠️ [{ticker}] 유효한 데이터 없음")

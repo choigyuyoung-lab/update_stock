@@ -26,14 +26,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 🌟 KIS API 토큰 24시간 재사용 캐시 (하루 알림 1회 제한)
+      - name: Restore / Save KIS Token Cache
+        uses: actions/cache@v4
+        with:
+          path: .kis_token_cache.json
+          key: kis-token-cache-${{ github.run_id }}
+          restore-keys: |
+            kis-token-cache-
+
       - name: Run KR Finance Update
         env:
           # 노션 연결 정보
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
           
-          # 🌟 사용자님의 GitHub Secrets 이름과 일치시켰습니다.
-          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          # KIS 실전투자 및 모의투자 키 설정
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_PROD_APP_SECRET }}
+          KIS_PROD_APP_KEY: ${{ secrets.KIS_PROD_APP_KEY }}
+          KIS_PROD_APP_SECRET: ${{ secrets.KIS_PROD_APP_SECRET }}
+          KIS_VTS_APP_KEY: ${{ secrets.KIS_VTS_APP_KEY }}
+          KIS_VTS_APP_SECRET: ${{ secrets.KIS_VTS_APP_SECRET }}
           
         run: python update_finance_kr.py

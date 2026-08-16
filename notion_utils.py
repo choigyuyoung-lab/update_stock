@@ -397,9 +397,60 @@ def get_page_text(props: Dict[str, Any], names: List[str]) -> str:
     return ""
 
 
+def set_page_date_property(
+    props_to_update: Dict[str, Any],
+    existing_page_props: Dict[str, Any],
+    candidate_names: Optional[List[str]] = None,
+    iso_date_str: Optional[str] = None,
+) -> str:
+    """
+    기존 노션 페이지의 속성 목록을 확인하여 실제 존재하는 날짜 컬럼명으로 업데이트 프로퍼티를 설정합니다.
+    기본 탐색 순서: ["마지막 업데이트", "업데이트 일자", "업데이트", "최종수정일", "수정일", "일자"]
+    매칭된 속성명을 반환합니다.
+    """
+    if candidate_names is None:
+        candidate_names = ["마지막 업데이트", "업데이트 일자", "업데이트", "최종수정일", "수정일", "일자"]
+    
+    date_val = iso_date_str or kst_isoformat()
+    
+    # 1. 기존 속성 중 후보와 일치하는 것이 있는지 탐색
+    for name in candidate_names:
+        if name in existing_page_props:
+            props_to_update[name] = {"date": {"start": date_val}}
+            return name
+            
+    # 2. 일치하는 컬럼이 없으면 후보 중 첫 번째 이름으로 기본 설정
+    default_name = candidate_names[0]
+    props_to_update[default_name] = {"date": {"start": date_val}}
+    return default_name
+
+
 # ==============================================================================
-# 6. 한국투자증권(KIS) API 인증 관리
+# 6. 한국투자증권(KIS) API 인증 관리 (지능형 디스크 캐싱)
 # ==============================================================================
+TOKEN_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kis_token_cache.json")
+
+
+def _load_token_cache() -> Dict[str, Any]:
+    """로컬에 캐시된 KIS 토큰 파일을 읽어옵니다."""
+    if os.path.exists(TOKEN_CACHE_FILE):
+        try:
+            with open(TOKEN_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_token_cache(cache_data: Dict[str, Any]) -> None:
+    """KIS 토큰 정보를 로컬 캐시 파일에 안전하게 저장합니다."""
+    try:
+        with open(TOKEN_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def _request_kis_token(
     url_base: str,
     app_key: str,
@@ -408,10 +459,25 @@ def _request_kis_token(
     base_delay: float = 1.5,
     env_name: str = "모의투자"
 ) -> Optional[str]:
-    """한투 API 액세스 토큰을 발급받는 내부 헬퍼 함수"""
+    """한투 API 액세스 토큰을 발급받거나 유효한 캐시 토큰을 반환합니다."""
     if not app_key or not app_secret:
         return None
 
+    # 1. 캐시 검증: 만료 10분 전까지는 기존 토큰 즉시 재사용
+    cache_key = f"{url_base}_{app_key[:6]}"
+    cache_data = _load_token_cache()
+    cached_entry = cache_data.get(cache_key)
+
+    if cached_entry and isinstance(cached_entry, dict):
+        cached_token = cached_entry.get("token")
+        expires_at = cached_entry.get("expires_at", 0)
+        remaining_sec = expires_at - time.time()
+        if cached_token and remaining_sec > 600:
+            remaining_min = int(remaining_sec) // 60
+            print(f"   ⚡ [{env_name}] 유효한 캐시 토큰 재사용 (만료까지 {remaining_min}분 남음)")
+            return str(cached_token)
+
+    # 2. 신규 토큰 발급 요청
     url = f"{url_base}/oauth2/tokenP"
     body = {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}
 
@@ -425,9 +491,20 @@ def _request_kis_token(
                 continue
 
             res.raise_for_status()
-            token = res.json().get("access_token")
+            res_json = res.json()
+            token = res_json.get("access_token")
+            expires_in = res_json.get("expires_in", 86400)
+            
             if token:
-                return token
+                # 캐시 저장 (안전 버퍼 포함)
+                cache_data[cache_key] = {
+                    "token": token,
+                    "expires_at": time.time() + float(expires_in),
+                    "created_at": kst_isoformat(),
+                    "env_name": env_name
+                }
+                _save_token_cache(cache_data)
+                return str(token)
             else:
                 print(f"   ⚠️ [{env_name}] KIS 토큰 응답에서 access_token을 찾을 수 없음")
         except Exception as exc:
@@ -443,12 +520,9 @@ def _request_kis_token(
 def get_kis_auth_context(max_retries: int = 2, base_delay: float = 1.5) -> Optional[Dict[str, Any]]:
     """
     한국투자증권 인증 컨텍스트를 반환합니다.
-    1차로 모의투자 서버(VTS) 연결을 시도하고, 실패 시 실전투자 서버(PROD)로 자동 전환(Fallback)합니다.
+    기본적으로 실전투자 서버(PROD)를 1순위로 연결하며, 실전 인증 실패 시 모의투자 서버(VTS)로 자동 전환(Fallback)합니다.
     """
-    # 1. 키 설정 수집
-    vts_app_key = os.environ.get("KIS_VTS_APP_KEY") or os.environ.get("KIS_APP_KEY") or ""
-    vts_app_secret = os.environ.get("KIS_VTS_APP_SECRET") or os.environ.get("KIS_APP_SECRET") or ""
-
+    # 1. 키 설정 수집 (실전투자 키 우선 매핑)
     prod_app_key = (
         os.environ.get("KIS_PROD_APP_KEY")
         or os.environ.get("KIS_REAL_APP_KEY")
@@ -462,31 +536,11 @@ def get_kis_auth_context(max_retries: int = 2, base_delay: float = 1.5) -> Optio
         or ""
     )
 
-    # 2. 모의투자(VTS) 시도
-    if vts_app_key and vts_app_secret:
-        print("🔄 [KIS API] 모의투자(VTS) 서버 토큰 발급 시도 중...")
-        token = _request_kis_token(
-            url_base=KIS_VTS_URL,
-            app_key=vts_app_key,
-            app_secret=vts_app_secret,
-            max_retries=max_retries,
-            base_delay=base_delay,
-            env_name="모의투자(VTS)"
-        )
-        if token:
-            print("✅ [KIS API] 모의투자(VTS) 서버 인증 성공")
-            return {
-                "token": token,
-                "url_base": KIS_VTS_URL,
-                "app_key": vts_app_key,
-                "app_secret": vts_app_secret,
-                "env_type": "VTS"
-            }
-        print("⚠️ [KIS API] 모의투자 서버 응답 실패. 실전투자(PROD) 서버로 전환(Fallback) 시도...")
+    vts_app_key = os.environ.get("KIS_VTS_APP_KEY") or ""
+    vts_app_secret = os.environ.get("KIS_VTS_APP_SECRET") or ""
 
-    # 3. 실전투자(PROD) Fallback 시도
+    # 2. 실전투자(PROD) 우선 시도
     if prod_app_key and prod_app_secret:
-        print("🔄 [KIS API] 실전투자(PROD) 서버 토큰 발급 시도 중...")
         token = _request_kis_token(
             url_base=KIS_PROD_URL,
             app_key=prod_app_key,
@@ -496,7 +550,7 @@ def get_kis_auth_context(max_retries: int = 2, base_delay: float = 1.5) -> Optio
             env_name="실전투자(PROD)"
         )
         if token:
-            print("✅ [KIS API] 실전투자(PROD) 서버 인증 성공")
+            print("✅ [KIS API] 실전투자(PROD) 서버 인증 완료")
             return {
                 "token": token,
                 "url_base": KIS_PROD_URL,
@@ -504,8 +558,29 @@ def get_kis_auth_context(max_retries: int = 2, base_delay: float = 1.5) -> Optio
                 "app_secret": prod_app_secret,
                 "env_type": "PROD"
             }
+        print("⚠️ [KIS API] 실전투자 서버 응답 실패. 모의투자(VTS) 서버로 전환(Fallback) 시도...")
 
-    print("❌ [KIS API] 모의투자 및 실전투자 서버 모두 토큰 발급에 실패하였습니다.")
+    # 3. 모의투자(VTS) Fallback 시도
+    if vts_app_key and vts_app_secret:
+        token = _request_kis_token(
+            url_base=KIS_VTS_URL,
+            app_key=vts_app_key,
+            app_secret=vts_app_secret,
+            max_retries=max_retries,
+            base_delay=base_delay,
+            env_name="모의투자(VTS)"
+        )
+        if token:
+            print("✅ [KIS API] 모의투자(VTS) 서버 인증 완료")
+            return {
+                "token": token,
+                "url_base": KIS_VTS_URL,
+                "app_key": vts_app_key,
+                "app_secret": vts_app_secret,
+                "env_type": "VTS"
+            }
+
+    print("❌ [KIS API] 실전투자 및 모의투자 서버 모두 토큰 발급에 실패하였습니다.")
     return None
 
 

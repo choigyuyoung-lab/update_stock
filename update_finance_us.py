@@ -12,6 +12,7 @@ Yahoo Finance(yfinance)를 호출하여 미국/해외 상장 주식 및 ADR의 �
 # ==============================================================================
 # 0. 라이브러리 임포트 및 시스템 설정
 # ==============================================================================
+import os
 import sys
 import time
 import logging
@@ -33,6 +34,7 @@ from notion_utils import (
     get_env_var,
     get_page_text,
     kst_isoformat,
+    set_page_date_property,
     paginate_database,
     safe_page_update,
     get_http_session,
@@ -46,7 +48,12 @@ from notion_utils import (
 # 1. 환경 변수 및 로거 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-DATABASE_ID = get_env_var("DATABASE_ID")
+DATABASE_ID = (
+    os.environ.get("DATABASE_ID")
+    or os.environ.get("MASTER_DATABASE_ID")
+    or os.environ.get("MASTER_DB_ID")
+    or get_env_var("DATABASE_ID")
+)
 
 SESSION = get_http_session()
 
@@ -95,10 +102,11 @@ def get_us_fin_optimized(
                     "BPS": safe_float(info.get("bookValue")),
                     "목표주가": safe_float(info.get('targetMeanPrice')),
                     "52주 최고가": safe_float(info.get("fiftyTwoWeekHigh")) or res["52주 최고가"],
-                    "52주 최저가": safe_float(info.get("fiftyTwoWeekLow")) or res["52주 최저가"]
+                    "52주 최저가": safe_float(info.get("fiftyTwoWeekLow")) or res["52주 최저가"],
                 })
-                if is_valid_num(info.get("dividendYield")):
-                    res["배당수익률"] = float(info.get("dividendYield")) * 100
+                div_yield = safe_float(info.get("dividendYield"))
+                if div_yield is not None:
+                    res["배당수익률"] = div_yield * 100
                     
                 rec_key = str(info.get('recommendationKey', '')).lower()
                 opinion_map = {"strong_buy": "적극매수", "buy": "매수", "hold": "중립", "underperform": "매도", "sell": "적극매도"}
@@ -165,8 +173,7 @@ def build_finance_update_for_page(
         if fin_data.get("의견") and "목표가 범위" in props:
             update_props["목표가 범위"] = {"select": {"name": fin_data["의견"]}}
         
-        if "마지막 업데이트" in props:
-            update_props["마지막 업데이트"] = {"date": {"start": kst_isoformat()}}
+        set_page_date_property(update_props, props)
 
         if not update_props:
             logger.info(f"⚠️ [{ticker}] 업데이트할 유효 데이터 없음")

@@ -11,6 +11,7 @@ update_price_kr.py
 # ==============================================================================
 # 0. 라이브러리 임포트 및 시스템 설정
 # ==============================================================================
+import os
 import sys
 import time
 from datetime import datetime
@@ -34,6 +35,7 @@ from notion_utils import (
     paginate_database,
     safe_page_update,
     RETRY_STATUS_CODES,
+    set_page_date_property,
     get_kis_auth_context,
     get_http_session,
     is_kr_ticker,
@@ -45,7 +47,12 @@ from notion_utils import (
 # 1. 환경 변수 및 공통 세션 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-DATABASE_ID = get_env_var("DATABASE_ID")
+DATABASE_ID = (
+    os.environ.get("DATABASE_ID")
+    or os.environ.get("MASTER_DATABASE_ID")
+    or os.environ.get("MASTER_DB_ID")
+    or get_env_var("DATABASE_ID")
+)
 
 SESSION = get_http_session()
 
@@ -144,9 +151,7 @@ def build_update_for_page(
     if is_valid_num(price_data.get("전일 종가")):
         update_props["전일 종가"] = {"number": price_data["전일 종가"]}
         
-    if "마지막 업데이트" in props:
-        now_str = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
-        update_props["마지막 업데이트"] = {"date": {"start": now_str}}
+    set_page_date_property(update_props, props)
 
     if not update_props:
         print(f"⚠️ [{ticker}] 업데이트할 유효한 데이터 없음")

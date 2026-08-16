@@ -10,6 +10,7 @@ update_master_db_us.py
 # ==============================================================================
 # 0. 라이브러리 임포트 및 시스템 설정
 # ==============================================================================
+import os
 import sys
 import io
 import logging
@@ -34,6 +35,7 @@ from notion_utils import (
     paginate_database,
     safe_page_update,
     kst_isoformat,
+    set_page_date_property,
     extract_short_brand_name,
     is_kr_ticker,
     make_rich_text,
@@ -47,8 +49,17 @@ from notion_utils import (
 # 1. 환경 변수 및 로거 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-MASTER_DATABASE_ID = get_env_var("MASTER_DATABASE_ID")
-BENCHMARK_DATABASE_ID = get_env_var("BENCHMARK_DATABASE_ID")
+MASTER_DATABASE_ID = (
+    os.environ.get("MASTER_DATABASE_ID")
+    or os.environ.get("MASTER_DB_ID")
+    or os.environ.get("DATABASE_ID")
+    or get_env_var("MASTER_DATABASE_ID")
+)
+BENCHMARK_DATABASE_ID = (
+    os.environ.get("BENCHMARK_DATABASE_ID")
+    or os.environ.get("BENCHMARK_DB_ID")
+    or get_env_var("BENCHMARK_DATABASE_ID")
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("MasterSyncUS")
@@ -219,8 +230,8 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
         "Market": {"select": {"name": market_label}},
         "US_섹터": make_rich_text(sec),
         "US_업종": make_rich_text(ind),
-        "업데이트 일자": {"date": {"start": kst_isoformat()}},
     }
+    set_page_date_property(update_props, props)
 
     # 4. 우량주 태깅
     blue_chip_tags = []
@@ -265,7 +276,7 @@ def main() -> None:
     logger.info(f"📡 노션 DB 수집 완료: 총 {len(all_pages)}개 페이지 대상 병렬 처리 시작...")
 
     if all_pages:
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(process_page_us, page, engine, client, config) for page in all_pages]
             for future in futures:
                 try:

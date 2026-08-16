@@ -52,8 +52,17 @@ from notion_utils import (
 # 1. 환경 변수 및 로거 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-MASTER_DATABASE_ID = get_env_var("MASTER_DATABASE_ID")
-BENCHMARK_DATABASE_ID = get_env_var("BENCHMARK_DATABASE_ID")
+MASTER_DATABASE_ID = (
+    os.environ.get("MASTER_DATABASE_ID")
+    or os.environ.get("MASTER_DB_ID")
+    or os.environ.get("DATABASE_ID")
+    or get_env_var("MASTER_DATABASE_ID")
+)
+BENCHMARK_DATABASE_ID = (
+    os.environ.get("BENCHMARK_DATABASE_ID")
+    or os.environ.get("BENCHMARK_DB_ID")
+    or get_env_var("BENCHMARK_DATABASE_ID")
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("BenchmarkSync")

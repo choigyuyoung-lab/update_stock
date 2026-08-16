@@ -8,6 +8,17 @@ __pycache__/
 !.github/workflows/
 !*.yml
 
+# 토큰 캐시 및 임시 파일
+.kis_token_cache.json
+.kis_cache.json
+*.cache.json
+
+# 백업 및 임시 아카이브 디렉토리
+backup/
+*.bak
+*.temp
+*.old
+
 # 파이참 기본 생성 파일들
 shelf/
 workspace.xml
@@ -16,3 +27,4 @@ queries/
 dataSources/
 dataSources.local.xml
 # created by virtualenv automatically ....
+

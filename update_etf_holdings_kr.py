@@ -36,6 +36,7 @@ from notion_utils import (
     paginate_database,
     get_page_text,
     kst_isoformat,
+    set_page_date_property,
     get_kis_auth_context,
     extract_short_brand_name,
     search_foreign_ticker,
@@ -190,6 +191,7 @@ class StockMatchEngine:
         self.client = client
         self.inv_ticker_to_page: Dict[str, Dict[str, str]] = {}
         self.inv_name_to_page: Dict[str, Dict[str, str]] = {}
+        self.inv_id_to_page: Dict[str, Dict[str, str]] = {}
         self.online_search_cache: Dict[str, Optional[Tuple[str, str]]] = {}
         self._load_cache()
 
@@ -212,6 +214,7 @@ class StockMatchEngine:
                         name = val[val["type"]][0]["plain_text"].strip()
 
             item_info = {"id": pid, "ticker": ticker, "name": name}
+            self.inv_id_to_page[pid] = item_info
             if ticker:
                 self.inv_ticker_to_page[ticker.split(".")[0].strip().upper()] = item_info
                 self.inv_ticker_to_page[ticker] = item_info
@@ -235,6 +238,7 @@ class StockMatchEngine:
             new_id = new_page["id"]
 
             item_info = {"id": new_id, "ticker": ticker, "name": name}
+            self.inv_id_to_page[new_id] = item_info
             self.inv_ticker_to_page[ticker.split(".")[0].strip().upper()] = item_info
             self.inv_ticker_to_page[ticker] = item_info
             if name:
@@ -329,31 +333,31 @@ class StockMatchEngine:
 # 5. 대상 ETF 식별 및 증분 Upsert 동기화
 # ==============================================================================
 def get_target_etfs(client: Any, db_cache: StockMatchEngine) -> List[Dict[str, str]]:
-    """ETF DB 및 지표지수 DB에서 갱신 대상 부모 ETF 식별"""
-    print(f"📋 ETF DB({ETF_DB_ID}) 및 지표 DB에서 대상 부모 ETF를 스캔합니다...", flush=True)
+    """ETF 구성종목 DB에 등록된 부모 ETF만 정확히 식별 (지표 DB 전체 스캔 배제)"""
+    print(f"📋 ETF DB({ETF_DB_ID})에서 등록된 부모 ETF를 스캔합니다...", flush=True)
     target_etfs: List[Dict[str, str]] = []
     parent_ids: set = set()
 
-    # 1. ETF DB에서 기존 등록된 부모 ETF ID 역스캔
+    # 1. ETF DB에서 사용자가 입력/연결한 부모 ETF ID 역스캔
     for page in paginate_database(client, ETF_DB_ID, page_size=100):
         for rel in page.get("properties", {}).get("ETF(투자DB)", {}).get("relation", []):
             if rel.get("id"):
                 parent_ids.add(rel["id"])
 
-    # 2. 지표지수(벤치마크) DB가 설정되어 있다면 지표 ETF도 대상에 자동 편입
-    if BENCHMARK_DB_ID:
-        try:
-            for bm_page in paginate_database(client, BENCHMARK_DB_ID, page_size=100):
-                bm_props = bm_page.get("properties", {})
-                bm_ticker = get_page_text(bm_props, ["티커", "Ticker"]).upper().strip()
-                clean_bm_t = bm_ticker.split(".")[0].strip()
-                if clean_bm_t in db_cache.inv_ticker_to_page:
-                    parent_ids.add(db_cache.inv_ticker_to_page[clean_bm_t]["id"])
-        except Exception:
-            pass
-
-    print(f"   🔍 대상 부모 ETF 수: {len(parent_ids)}개", flush=True)
+    print(f"   🔍 등록된 부모 ETF 수: {len(parent_ids)}개", flush=True)
     for pid in parent_ids:
+        # 인메모리 캐시에서 0ms 즉시 조회
+        if pid in db_cache.inv_id_to_page:
+            info = db_cache.inv_id_to_page[pid]
+            ticker = info.get("ticker", "")
+            name = info.get("name", "")
+            if ticker:
+                clean_t = ticker.split(".")[0].strip().upper()
+                target_etfs.append({"etf_page_id": pid, "ticker": clean_t, "name": name or clean_t})
+                print(f"   🎯 대상 ETF: {name or clean_t} ({clean_t})", flush=True)
+                continue
+
+        # 캐시에 없는 경우에만 단건 API 조회
         try:
             page = client.pages.retrieve(page_id=pid)
             props = page.get("properties", {})
@@ -382,21 +386,23 @@ def sync_etf_holdings_upsert(
     client: Any,
     etf_page_id: str,
     items_to_insert: List[Dict[str, Any]],
-    now_kst: str
+    now_kst: Optional[str] = None
 ) -> Tuple[int, int, int]:
     """
-    증분 업데이트(Upsert) 엔진:
-    - 기존 노션 등록 종목 조회
-    - 최신 종목 매칭: 수량 변경 시 수정(Update), 신규 편입 시 생성(Create)
-    - 편출되거나 수량 0인 종목: 아카이브(Archive)
-    반환: (생성 건수, 수정 건수, 삭제 건수)
+    개별 ETF에 대해 지능형 증분 동기화(Upsert) 및 편출입 상태 관리(Soft Delete)를 수행합니다.
+    1. 신규 편입: 생성 (상태: 편입(보유), 편입일: 오늘, 수량: 최신 수량)
+    2. 유지/재편입: 수정 (상태: 편입(보유), 수량 갱신, 과거 편출일 초기화)
+    3. 편출(제외): 수정 (상태: 편출, 수량: 0, 편출일: 오늘) ➔ 아카이브 대신 이력 보존
     """
-    # 1. 기존 노션 ETF DB의 해당 ETF 자식 종목 목록 조회
+    now_kst = now_kst or kst_isoformat()
+    today_date_str = now_kst[:10]  # YYYY-MM-DD
+
+    # 1. 해당 부모 ETF에 연결된 기존 레코드 전량 조회
     existing_pages = []
     start_cursor = None
     while True:
         try:
-            params = {
+            params: Dict[str, Any] = {
                 "database_id": ETF_DB_ID,
                 "filter": {"property": "ETF(투자DB)", "relation": {"contains": etf_page_id}},
                 "page_size": 100
@@ -416,6 +422,7 @@ def sync_etf_holdings_upsert(
     existing_by_ticker: Dict[str, Dict[str, Any]] = {}
     existing_by_name: Dict[str, Dict[str, Any]] = {}
     all_existing_ids: set = set()
+    id_to_existing_info: Dict[str, Dict[str, Any]] = {}
 
     for page in existing_pages:
         pid = page["id"]
@@ -432,14 +439,23 @@ def sync_etf_holdings_upsert(
         stock_rels = props.get("종목(투자DB)", {}).get("relation", [])
         page_stock_id = stock_rels[0]["id"] if stock_rels else None
 
+        page_status = props.get("상태", {}).get("select", {})
+        page_status_name = page_status.get("name") if page_status else ""
+
+        page_out_date = props.get("편출일", {}).get("date")
+
         info = {
             "id": pid,
             "name": page_name,
             "ticker": page_ticker,
             "quantity": page_qty,
-            "stock_id": page_stock_id
+            "stock_id": page_stock_id,
+            "status": page_status_name,
+            "out_date": page_out_date,
+            "properties": props
         }
         all_existing_ids.add(pid)
+        id_to_existing_info[pid] = info
         if page_ticker:
             existing_by_ticker[page_ticker] = info
             existing_by_ticker[page_ticker.split(".")[0].strip().upper()] = info
@@ -448,7 +464,7 @@ def sync_etf_holdings_upsert(
             existing_by_name[page_name.replace(" ", "")] = info
 
     matched_page_ids: set = set()
-    created_cnt, updated_cnt, archived_cnt = 0, 0, 0
+    created_cnt, updated_cnt, excluded_cnt = 0, 0, 0
 
     # 2. 최신 수집 데이터 순회 및 수정/생성
     for item in items_to_insert:
@@ -470,65 +486,108 @@ def sync_etf_holdings_upsert(
             matched_info = existing_by_name[item_name.replace(" ", "")]
 
         if matched_info and matched_info["id"] not in matched_page_ids:
-            # CASE A: 기존 레코드 존재 ➔ 수정(Update)
+            # CASE A: 기존 레코드 존재 ➔ 유지 또는 재편입 업데이트
             pid = matched_info["id"]
             matched_page_ids.add(pid)
+            page_props = matched_info.get("properties", {})
 
-            update_props = {}
+            update_props: Dict[str, Any] = {}
+            need_update = False
+
+            # 수량 변동 확인
             if item_qty is not None and matched_info["quantity"] != item_qty:
                 update_props["수량"] = {"number": item_qty}
+                need_update = True
+
+            # 티커 보강
             if item_ticker and matched_info["ticker"] != item_ticker:
                 update_props["티커"] = {"rich_text": [{"text": {"content": item_ticker}}]}
+                need_update = True
+
+            # 종목 연결 보강
             if item_stock_id and matched_info["stock_id"] != item_stock_id:
                 update_props["종목(투자DB)"] = {"relation": [{"id": item_stock_id}]}
-            
-            # 업데이트 일시는 항상 갱신
-            update_props["업데이트"] = {"date": {"start": now_kst}}
+                need_update = True
 
-            try:
-                client.pages.update(page_id=pid, properties=update_props)
-                updated_cnt += 1
-                time.sleep(0.01)
-            except Exception as e:
-                print(f"      ❌ {item_name} 수정 실패: {e}", flush=True)
+            # 상태 동기화 (기존이 '편출'이거나 비어있으면 '편입(보유)'로 복귀)
+            if "상태" in page_props:
+                if matched_info.get("status") != "편입(보유)":
+                    update_props["상태"] = {"select": {"name": "편입(보유)"}}
+                    need_update = True
+                    # 재편입 시 과거 편출일 초기화
+                    if "편출일" in page_props and matched_info.get("out_date"):
+                        update_props["편출일"] = None
+                        need_update = True
+
+            # 편입일 미설정 시 보강
+            if "편입일" in page_props and not page_props.get("편입일", {}).get("date"):
+                update_props["편입일"] = {"date": {"start": today_date_str}}
+                need_update = True
+
+            if need_update:
+                set_page_date_property(update_props, page_props, candidate_names=["업데이트", "마지막 업데이트", "업데이트 일자"], iso_date_str=now_kst)
+                try:
+                    client.pages.update(page_id=pid, properties=update_props)
+                    updated_cnt += 1
+                    time.sleep(0.01)
+                except Exception as e:
+                    print(f"      ❌ {item_name} 수정 실패: {e}", flush=True)
 
         else:
             # CASE B: 신규 편입 종목 ➔ 생성(Create)
-            props = {
+            new_props: Dict[str, Any] = {
                 "이름": {"title": [{"text": {"content": item_name}}]},
                 "ETF(투자DB)": {"relation": [{"id": etf_page_id}]},
-                "업데이트": {"date": {"start": now_kst}}
+                "상태": {"select": {"name": "편입(보유)"}},
+                "편입일": {"date": {"start": today_date_str}},
             }
+            set_page_date_property(new_props, {}, candidate_names=["업데이트", "마지막 업데이트", "업데이트 일자"], iso_date_str=now_kst)
             if item_ticker:
-                props["티커"] = {"rich_text": [{"text": {"content": item_ticker}}]}
+                new_props["티커"] = {"rich_text": [{"text": {"content": item_ticker}}]}
             if item_stock_id:
-                props["종목(투자DB)"] = {"relation": [{"id": item_stock_id}]}
+                new_props["종목(투자DB)"] = {"relation": [{"id": item_stock_id}]}
             if item_qty is not None:
-                props["수량"] = {"number": item_qty}
+                new_props["수량"] = {"number": item_qty}
 
             try:
-                new_p = client.pages.create(parent={"database_id": ETF_DB_ID}, properties=props)
+                new_p = client.pages.create(parent={"database_id": ETF_DB_ID}, properties=new_props)
                 created_cnt += 1
                 matched_page_ids.add(new_p["id"])
                 time.sleep(0.01)
             except Exception as e:
                 print(f"      ❌ {item_name} 생성 실패: {e}", flush=True)
 
-    # 3. 편출된 종목(기존에 있었으나 이번 수집에서 빠진 종목) 아카이브
-    to_archive = list(all_existing_ids - matched_page_ids)
-    if to_archive:
-        def _archive_page(pid: str):
-            try:
-                client.pages.update(page_id=pid, archived=True)
-                return True
-            except Exception:
+    # 3. 편출된 종목 처리 (상태: 편출, 수량: 0, 편출일: 오늘 기록 ➔ Soft Delete)
+    to_exclude_ids = list(all_existing_ids - matched_page_ids)
+    if to_exclude_ids:
+        def _exclude_page(pid: str) -> bool:
+            info = id_to_existing_info.get(pid, {})
+            # 이미 편출 상태이고 수량이 0인 경우 불필요한 추가 API 호출 생략
+            if info.get("status") == "편출" and info.get("quantity") == 0:
                 return False
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(_archive_page, to_archive))
-            archived_cnt = sum(1 for r in results if r)
+            page_props = info.get("properties", {})
+            exclude_props: Dict[str, Any] = {
+                "상태": {"select": {"name": "편출"}},
+                "수량": {"number": 0},
+            }
+            if "편출일" in page_props:
+                exclude_props["편출일"] = {"date": {"start": today_date_str}}
 
-    return created_cnt, updated_cnt, archived_cnt
+            set_page_date_property(exclude_props, page_props, candidate_names=["업데이트", "마지막 업데이트", "업데이트 일자"], iso_date_str=now_kst)
+
+            try:
+                client.pages.update(page_id=pid, properties=exclude_props)
+                return True
+            except Exception as e:
+                print(f"      ⚠️ 편출 상태 업데이트 실패 ({info.get('name', pid)}): {e}", flush=True)
+                return False
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(_exclude_page, to_exclude_ids))
+            excluded_cnt = sum(1 for r in results if r)
+
+    return created_cnt, updated_cnt, excluded_cnt
 
 
 # ==============================================================================
@@ -581,13 +640,13 @@ def main() -> None:
                 "quantity": h["quantity"]
             })
 
-        # 지능형 증분 동기화 (Upsert: 수정 + 추가 + 편출종목 아카이브)
+        # 지능형 증분 동기화 (Upsert: 편입(보유) 생성/수정 + 편출 상태/수량0 관리)
         print(f"   ⚡ 최신 {len(items_to_insert)}개 구성종목 증분 동기화(Upsert) 진행 중...", flush=True)
-        created_cnt, updated_cnt, archived_cnt = sync_etf_holdings_upsert(
+        created_cnt, updated_cnt, excluded_cnt = sync_etf_holdings_upsert(
             notion, etf_page_id, items_to_insert, now_kst
         )
 
-        print(f"   ✅ [{etf_name}] 완료 (생성: {created_cnt}건 | 수정: {updated_cnt}건 | 삭제/아카이브: {archived_cnt}건)", flush=True)
+        print(f"   ✅ [{etf_name}] 완료 (생성(신규편입): {created_cnt}건 | 수정(유지): {updated_cnt}건 | 편출: {excluded_cnt}건)", flush=True)
 
     print("\n✨ 모든 관리 대상 ETF 갱신 작업이 성공적으로 완료되었습니다.", flush=True)
 

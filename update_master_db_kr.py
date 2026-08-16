@@ -10,6 +10,7 @@ update_master_db_kr.py
 # ==============================================================================
 # 0. 라이브러리 임포트 및 시스템 설정
 # ==============================================================================
+import os
 import sys
 import re
 import time
@@ -34,6 +35,7 @@ from notion_utils import (
     safe_page_update,
     make_rich_text,
     kst_isoformat,
+    set_page_date_property,
     get_kis_auth_context,
     get_http_session,
     is_kr_ticker,
@@ -48,8 +50,17 @@ from notion_utils import (
 # 1. 환경 변수 및 로깅 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-MASTER_DATABASE_ID = get_env_var("MASTER_DATABASE_ID")
-BENCHMARK_DATABASE_ID = get_env_var("BENCHMARK_DATABASE_ID")
+MASTER_DATABASE_ID = (
+    os.environ.get("MASTER_DATABASE_ID")
+    or os.environ.get("MASTER_DB_ID")
+    or os.environ.get("DATABASE_ID")
+    or get_env_var("MASTER_DATABASE_ID")
+)
+BENCHMARK_DATABASE_ID = (
+    os.environ.get("BENCHMARK_DATABASE_ID")
+    or os.environ.get("BENCHMARK_DB_ID")
+    or get_env_var("BENCHMARK_DATABASE_ID")
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("MasterSyncKR")
@@ -179,7 +190,7 @@ def process_page_kr(
 
     # 한투 API를 통해 정밀 시장 구분(KOSPI200, KSQ150 여부) 확인
     kis_info = engine.get_kis_market_info(clean_t)
-    rprs_m = (kis_info.get("rprs_market") if kis_info else "").upper()
+    rprs_m = (kis_info.get("rprs_market") or "").upper() if kis_info else ""
 
     if is_etf or rprs_m == "ETF":
         market_label = "ETF(KR)"
@@ -231,8 +242,8 @@ def process_page_kr(
         "Market": {"select": {"name": market_label}},
         "KR_섹터": make_rich_text(sec_val),
         "KR_산업": make_rich_text(ind_val),
-        "업데이트 일자": {"date": {"start": kst_isoformat()}},
     }
+    set_page_date_property(update_props, props)
 
     if blue_chip_tags:
         update_props["우량주"] = {"multi_select": [{"name": tag} for tag in blue_chip_tags]}
