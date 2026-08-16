@@ -1,8 +1,32 @@
-import logging
+"""
+update_finance_us.py
+=====================
+Yahoo Finance(yfinance)를 호출하여 미국/해외 상장 주식 및 ADR의 밸류에이션 지표,
+배당수익률, 52주 최고/최저가, 목표주가, 투자의견, 최근 20영업일 직전 고점/저점을 수집하여
+노션(Notion) 데이터베이스에 배치 업데이트합니다.
+- 데이터 소스: Yahoo Finance (yfinance API)
+- 수집 지표: PER, 추정PER, EPS, 추정EPS, PBR, BPS, 배당수익률, 52주 최고/최저, 목표주가, 투자의견, 직전고점/저점
+- 안정성: fast_info 우선 추출 및 타임아웃 지수 재시도, 배치 기반 노션 API 전송
+"""
+
+# ==============================================================================
+# 0. 라이브러리 임포트 및 시스템 설정
+# ==============================================================================
+import sys
 import time
+import logging
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
+
 import yfinance as yf
+
+# Windows 콘솔 인코딩 안전화
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 from notion_utils import (
     build_notion_client,
@@ -17,22 +41,32 @@ from notion_utils import (
     safe_float,
 )
 
+
+# ==============================================================================
+# 1. 환경 변수 및 로거 설정
+# ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 DATABASE_ID = get_env_var("DATABASE_ID")
-notion = build_notion_client(NOTION_TOKEN)
 
 SESSION = get_http_session()
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("FinanceSyncUS")
 
 
-def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 2.0) -> dict:
+# ==============================================================================
+# 2. 해외 주식 재무/기술 지표 수집부 (Yahoo Finance)
+# ==============================================================================
+def get_us_fin_optimized(
+    ticker: str,
+    max_retries: int = 3,
+    base_delay: float = 2.0
+) -> Dict[str, Any]:
     """
     Yahoo Finance에서 해외 주식 재무 데이터를 조회합니다.
-    네트워크 에러나 타임아웃이 발생하면 2~3초 대기 후 최대 3번까지 재시도합니다.
+    네트워크 에러나 타임아웃이 발생하면 지수 백오프 후 최대 3번까지 재시도합니다.
     """
-    res = {
+    res: Dict[str, Any] = {
         "PER": None, "추정PER": None, "EPS": None, "추정EPS": None, 
         "PBR": None, "BPS": None, "배당수익률": None,
         "52주 최고가": None, "52주 최저가": None, "목표주가": None, "의견": None,
@@ -44,7 +78,7 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
         try:
             stock = yf.Ticker(ticker, session=SESSION)
             
-            # 1. fast_info에서 52주 가격 정보 먼저 추출
+            # 1. fast_info에서 52주 가격 정보 먼저 추출 (고속)
             f_info = stock.fast_info
             res["52주 최고가"] = safe_float(f_info.get('year_high'))
             res["52주 최저가"] = safe_float(f_info.get('year_low'))
@@ -99,11 +133,15 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
             logger.warning(f"   ❌ [{ticker}] 데이터 수집 실패 (시도 {attempt}/{max_retries}): {exc}")
             return res
     
-    logger.warning(f"   ❌ [{ticker}] 최대 재시도 횟수 초과")
     return res
 
 
-def build_finance_update_for_page(page):
+# ==============================================================================
+# 3. 개별 페이지 재무 분석 및 페이로드 빌더
+# ==============================================================================
+def build_finance_update_for_page(
+    page: Dict[str, Any]
+) -> Optional[Tuple[str, str, Dict[str, Any], str]]:
     """개별 해외 주식 페이지의 재무 데이터를 수집하고 업데이트 정보를 반환합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
@@ -124,7 +162,7 @@ def build_finance_update_for_page(page):
             if is_valid_num(fin_data.get(key)) and key in props
         }
 
-        if fin_data.get("의견"):
+        if fin_data.get("의견") and "목표가 범위" in props:
             update_props["목표가 범위"] = {"select": {"name": fin_data["의견"]}}
         
         if "마지막 업데이트" in props:
@@ -142,9 +180,15 @@ def build_finance_update_for_page(page):
         return None
 
 
-def batch_collect_us_finance_data(pages: list, max_workers: int = 5):
-    """ 여러 페이지의 해외 주식 재무 데이터를 병렬로 수집합니다. """
-    updates = []
+# ==============================================================================
+# 4. 배치 수집 및 노션 다중 스레드 반영
+# ==============================================================================
+def batch_collect_us_finance_data(
+    pages: List[Dict[str, Any]],
+    max_workers: int = 5
+) -> List[Tuple[str, str, Dict[str, Any], str]]:
+    """여러 페이지의 해외 주식 재무 데이터를 병렬로 수집합니다."""
+    updates: List[Tuple[str, str, Dict[str, Any], str]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(build_finance_update_for_page, page): page for page in pages}
         
@@ -161,8 +205,13 @@ def batch_collect_us_finance_data(pages: list, max_workers: int = 5):
     return updates
 
 
-def batch_update_us_finance_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.3):
-    """ 배치 단위로 노션 해외 주식 재무 정보 페이지를 업데이트합니다. """
+def batch_update_us_finance_pages(
+    notion_client: Any,
+    updates: List[Tuple[str, str, Dict[str, Any], str]],
+    batch_size: int = 10,
+    delay_between_batches: float = 0.3
+) -> None:
+    """배치 단위로 노션 해외 주식 재무 정보 페이지를 업데이트합니다."""
     if not updates:
         return
     
@@ -200,20 +249,25 @@ def batch_update_us_finance_pages(notion_client, updates: list, batch_size: int 
     logger.info(f"\n✨ 해외 주식 재무 정보 배치 업데이트 완료: 성공 {success_count}개, 실패 {fail_count}개")
 
 
-def main():
+# ==============================================================================
+# 5. 메인 실행 함수
+# ==============================================================================
+def main() -> None:
+    """해외 주식 재무 정보 일괄 업데이트 메인 파이프라인"""
+    notion_client = build_notion_client(NOTION_TOKEN)
     kst = timezone(timedelta(hours=9))
     logger.info(f"🌍 [해외 주식 재무 업데이트] 시작 - {datetime.now(kst)}")
     
     all_pages = []
     
     logger.info("📋 노션 데이터베이스 스캔 중...")
-    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
+    for page in paginate_database(notion_client, DATABASE_ID, page_size=100, retry_delay=0.3):
         all_pages.append(page)
     
     logger.info(f"📊 총 {len(all_pages)}개 항목 발견")
     
     batch_collect_size = 20
-    updates = []
+    updates: List[Tuple[str, str, Dict[str, Any], str]] = []
     
     for batch_idx, i in enumerate(range(0, len(all_pages), batch_collect_size), 1):
         batch = all_pages[i : i + batch_collect_size]
@@ -227,9 +281,11 @@ def main():
     
     if updates:
         logger.info(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
-        batch_update_us_finance_pages(notion, updates, batch_size=10, delay_between_batches=0.3)
+        batch_update_us_finance_pages(notion_client, updates, batch_size=10, delay_between_batches=0.3)
     else:
         logger.warning("⚠️ 업데이트할 항목이 없습니다.")
+
+    logger.info("✨ 해외 주식 재무 정보 업데이트 프로세스가 완료되었습니다.")
 
 
 if __name__ == "__main__":

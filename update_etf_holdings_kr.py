@@ -1,16 +1,30 @@
+"""
+update_etf_holdings_kr.py
+==========================
+국내 상장 ETF의 구성종목(Holdings/PDF) 및 편입 수량을 수집하여
+노션(Notion)의 ETF 구성종목 DB에 지능형 증분 동기화(Upsert)를 수행합니다.
+- 데이터 소스: 한국투자증권(KIS) Open API + WiseReport
+- 필터링: 선물/옵션/스왑/현금 등 비주식 파생자산 원천 제외
+- 동기화: 수량 변경 종목 수정(Update), 신규 종목 생성(Create), 편출 종목 아카이브(Archive)
+"""
+
+# ==============================================================================
+# 0. 라이브러리 임포트 및 시스템 설정
+# ==============================================================================
 import os
 import sys
 import time
 import json
 import re
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
 from typing import Any, List, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
-# Windows 콘솔 인코딩 설정
-if sys.stdout.encoding != 'utf-8':
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
+
+# Windows 콘솔 인코딩 안전화
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
@@ -29,9 +43,10 @@ from notion_utils import (
     is_kr_ticker,
 )
 
-# ==========================================
+
+# ==============================================================================
 # 1. 환경 변수 및 공통 세션 설정
-# ==========================================
+# ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 INVESTMENT_DB_ID = (
     os.environ.get("DATABASE_ID")
@@ -41,13 +56,16 @@ INVESTMENT_DB_ID = (
 )
 MASTER_DB_ID = os.environ.get("MASTER_DATABASE_ID") or os.environ.get("MASTER_DB_ID")
 ETF_DB_ID = os.environ.get("ETF_DB_ID") or os.environ.get("ETF_DATABASE_ID") or get_env_var("ETF_DB_ID")
+BENCHMARK_DB_ID = os.environ.get("BENCHMARK_DATABASE_ID") or os.environ.get("BENCHMARK_DB_ID")
 
 SESSION = get_http_session()
 
 
-
+# ==============================================================================
+# 2. 데이터 정제 및 파생자산 필터링
+# ==============================================================================
 def parse_quantity(val: Any) -> Optional[float]:
-    """수량 문자열/숫자를 안전하게 float로 파싱"""
+    """수량 문자열/숫자를 안전하게 float로 파싱합니다."""
     if val is None:
         return None
     try:
@@ -60,36 +78,55 @@ def parse_quantity(val: Any) -> Optional[float]:
         return None
 
 
-def normalize_company_name(name: str) -> str:
-    """금융 API 검색용 정규화 쿼리 생성"""
+def is_derivative_or_cash(name: str, raw_ticker: str = "") -> bool:
+    """선물, 옵션, 스왑, 현금, 금리상품 등 비주식 파생자산을 필터링합니다."""
     if not name:
-        return ""
-    n = name.upper()
-    n = re.sub(r'[\(\)\[\],\.\-\/\:\'\"]', ' ', n)
-    # 약어 확장
-    abbrev_map = {
-        r'\bMFG\b': 'MANUFACTURING', r'\bIND\b': 'INDUSTRIES', r'\bTECH\b': 'TECHNOLOGY',
-        r'\bSYS\b': 'SYSTEMS', r'\bELEC\b': 'ELECTRIC', r'\bSEMICON\b': 'SEMICONDUCTOR'
-    }
-    for pat, rep in abbrev_map.items():
-        n = re.sub(pat, rep, n)
+        return True
+    n = name.strip()
+    n_clean = n.replace(" ", "")
+    t = (raw_ticker or "").strip().upper()
 
-    remove_words = [
-        r'\bCL(ASS)?\s*[A-Z0-9]?\b', r'\bORD(INARY)?\b', r'\bREG(ISTERED)?\b',
-        r'\bSP\s*ADR\b', r'\bADR\b', r'\bADS\b', r'\bNV\b', r'\bDE\b',
-        r'\bCORP(ORATION)?\b', r'\bINC(ORPORATED)?\b', r'\bLTD\b', r'\bCO\b',
-        r'\bHOLDINGS?\b', r'\bGROUP\b', r'\bUSA\b', r'\bCOM\b', r'\bNY\b',
+    # 1. 현금/예치금/금리형 자산
+    cash_keywords = [
+        "설정현금액", "원화현금", "USD현금", "외화예치금", "예탁금", "미수금", "예치금",
+        "KOFR", "CD금리", "SOFR", "CASH", "현금", "콜론", "RP"
     ]
-    for p in remove_words:
-        n = re.sub(p, ' ', n)
-    return " ".join([t for t in n.split() if len(t) >= 2])
+    for kw in cash_keywords:
+        if kw in n_clean:
+            return True
+
+    # 2. 파생상품 (선물, 옵션, 스왑 등)
+    deriv_keywords = [
+        "개별선물", "선물", "위클리", "콜옵션", "풋옵션", "옵션",
+        "스왑", "SWAP", "FUTURES", "FUT", "OPTION"
+    ]
+    for kw in deriv_keywords:
+        if kw in n_clean:
+            return True
+
+    # 3. 정규식 패턴 (연월 만기 선물/옵션: 2026 09 SK하이닉스개별선물, 코스피위클리M 2608W3 등)
+    patterns = [
+        r'^\d{4}\s*\d{2}\s*.*선물',
+        r'코스피\s*위클리',
+        r'KOSPI\s*위클리',
+        r'코스닥\s*선물',
+        r'KOSDAQ\s*선물',
+        r'미국\s*달러\s*선물',
+        r'\bFUT\b',
+        r'\bSWAP\b'
+    ]
+    for pat in patterns:
+        if re.search(pat, n, re.IGNORECASE):
+            return True
+
+    return False
 
 
-# ==========================================
-# 2. 한국투자증권 실전/모의 API & WiseReport 수집부
-# ==========================================
+# ==============================================================================
+# 3. 한국투자증권 실전/모의 API & WiseReport 수집부
+# ==============================================================================
 def get_etf_composition_kis(kis_ctx: Optional[Dict[str, Any]], clean_ticker: str) -> List[Dict[str, Any]]:
-    """한투 API (모의/실전 자동 Fallback): 한국 ETF 구성종목 코드 및 CU 수량 수집"""
+    """한투 API (모의/실전 자동 Fallback): 한국 ETF 구성종목 코드 및 CU 수량 수집 (선물/현금 제외)"""
     if not kis_ctx or not isinstance(kis_ctx, dict) or not kis_ctx.get("token"):
         return []
     url = f"{kis_ctx['url_base']}/uapi/etfetn/v1/quotations/inquire-component-stock-price"
@@ -109,8 +146,10 @@ def get_etf_composition_kis(kis_ctx: Optional[Dict[str, Any]], clean_ticker: str
             for item in data.get("output2") or []:
                 raw_ticker = str(item.get("stck_shrn_iscd") or "").strip()
                 name = (item.get("hts_kor_isnm") or "").strip()
+                if is_derivative_or_cash(name, raw_ticker):
+                    continue
                 qty = parse_quantity(item.get("etf_cu_unit_scrt_cnt"))
-                if raw_ticker or name:
+                if (raw_ticker or name) and qty is not None and qty > 0:
                     holdings.append({"raw_ticker": raw_ticker, "name": name or raw_ticker, "quantity": qty})
     except Exception:
         pass
@@ -118,7 +157,7 @@ def get_etf_composition_kis(kis_ctx: Optional[Dict[str, Any]], clean_ticker: str
 
 
 def get_etf_composition_wisereport(clean_ticker: str) -> List[Dict[str, Any]]:
-    """WiseReport: 해외/글로벌/일본 ETF 구성종목 및 계약수량 수집"""
+    """WiseReport: 해외/글로벌/일본 ETF 구성종목 및 계약수량 수집 (선물/현금 제외)"""
     url = f"https://navercomp.wisereport.co.kr/v2/ETF/index.aspx?cmp_cd={clean_ticker}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     holdings = []
@@ -130,21 +169,22 @@ def get_etf_composition_wisereport(clean_ticker: str) -> List[Dict[str, Any]]:
                 data = json.loads(match.group(1))
                 for item in data.get("grid_data", []):
                     name = (item.get("STK_NM_KOR") or item.get("ITEM_NM") or "").strip()
-                    if not name or name in ["설정현금액", "원화현금", "USD현금", "외화예치금"]:
-                        continue
                     raw_ticker = str(item.get("STK_CD") or item.get("CMP_CD") or "").strip()
+                    if is_derivative_or_cash(name, raw_ticker):
+                        continue
                     if raw_ticker.lower() in ["none", "null"]:
                         raw_ticker = ""
                     qty = parse_quantity(item.get("AGMT_STK_CNT"))
-                    holdings.append({"raw_ticker": raw_ticker, "name": name, "quantity": qty})
+                    if qty is not None and qty > 0:
+                        holdings.append({"raw_ticker": raw_ticker, "name": name, "quantity": qty})
     except Exception:
         pass
     return holdings
 
 
-# ==========================================
-# 3. 고성능 종목 매칭 & 투자주 DB 자동등록 엔진
-# ==========================================
+# ==============================================================================
+# 4. 고성능 종목 매칭 & 투자주 DB 자동등록 엔진
+# ==============================================================================
 class StockMatchEngine:
     def __init__(self, client: Any):
         self.client = client
@@ -285,19 +325,32 @@ class StockMatchEngine:
         return None, fallback_t, short_brand
 
 
-# ==========================================
-# 4. 대상 ETF 식별 및 노션 동기화
-# ==========================================
-def get_target_etfs(client: Any) -> List[Dict[str, str]]:
-    """ETF DB에서 'ETF(투자DB)' 릴레이션에 등록된 부모 ETF 페이지만 역스캔"""
-    print(f"📋 ETF DB({ETF_DB_ID})에서 대상 부모 ETF를 스캔합니다...", flush=True)
+# ==============================================================================
+# 5. 대상 ETF 식별 및 증분 Upsert 동기화
+# ==============================================================================
+def get_target_etfs(client: Any, db_cache: StockMatchEngine) -> List[Dict[str, str]]:
+    """ETF DB 및 지표지수 DB에서 갱신 대상 부모 ETF 식별"""
+    print(f"📋 ETF DB({ETF_DB_ID}) 및 지표 DB에서 대상 부모 ETF를 스캔합니다...", flush=True)
     target_etfs: List[Dict[str, str]] = []
     parent_ids: set = set()
 
+    # 1. ETF DB에서 기존 등록된 부모 ETF ID 역스캔
     for page in paginate_database(client, ETF_DB_ID, page_size=100):
         for rel in page.get("properties", {}).get("ETF(투자DB)", {}).get("relation", []):
             if rel.get("id"):
                 parent_ids.add(rel["id"])
+
+    # 2. 지표지수(벤치마크) DB가 설정되어 있다면 지표 ETF도 대상에 자동 편입
+    if BENCHMARK_DB_ID:
+        try:
+            for bm_page in paginate_database(client, BENCHMARK_DB_ID, page_size=100):
+                bm_props = bm_page.get("properties", {})
+                bm_ticker = get_page_text(bm_props, ["티커", "Ticker"]).upper().strip()
+                clean_bm_t = bm_ticker.split(".")[0].strip()
+                if clean_bm_t in db_cache.inv_ticker_to_page:
+                    parent_ids.add(db_cache.inv_ticker_to_page[clean_bm_t]["id"])
+        except Exception:
+            pass
 
     print(f"   🔍 대상 부모 ETF 수: {len(parent_ids)}개", flush=True)
     for pid in parent_ids:
@@ -313,13 +366,33 @@ def get_target_etfs(client: Any) -> List[Dict[str, str]]:
         except Exception:
             pass
 
-    print(f"   ✅ 총 {len(target_etfs)}개 대상 ETF 확정 완료.\n", flush=True)
-    return target_etfs
+    # 중복 제거
+    unique_targets = []
+    seen = set()
+    for t in target_etfs:
+        if t["etf_page_id"] not in seen:
+            seen.add(t["etf_page_id"])
+            unique_targets.append(t)
+
+    print(f"   ✅ 총 {len(unique_targets)}개 대상 ETF 확정 완료.\n", flush=True)
+    return unique_targets
 
 
-def archive_existing_etf_holdings(client: Any, etf_page_id: str) -> None:
-    """과거 구성종목 전량 병렬 아카이브 (속도 5배 향상)"""
-    page_ids = []
+def sync_etf_holdings_upsert(
+    client: Any,
+    etf_page_id: str,
+    items_to_insert: List[Dict[str, Any]],
+    now_kst: str
+) -> Tuple[int, int, int]:
+    """
+    증분 업데이트(Upsert) 엔진:
+    - 기존 노션 등록 종목 조회
+    - 최신 종목 매칭: 수량 변경 시 수정(Update), 신규 편입 시 생성(Create)
+    - 편출되거나 수량 0인 종목: 아카이브(Archive)
+    반환: (생성 건수, 수정 건수, 삭제 건수)
+    """
+    # 1. 기존 노션 ETF DB의 해당 ETF 자식 종목 목록 조회
+    existing_pages = []
     start_cursor = None
     while True:
         try:
@@ -331,23 +404,138 @@ def archive_existing_etf_holdings(client: Any, etf_page_id: str) -> None:
             if start_cursor:
                 params["start_cursor"] = start_cursor
             res = client.databases.query(**params)
-            page_ids.extend([p["id"] for p in res.get("results", [])])
+            existing_pages.extend(res.get("results", []))
             if not res.get("has_more"):
                 break
             start_cursor = res.get("next_cursor")
-        except Exception:
+        except Exception as e:
+            print(f"      ⚠️ 기존 데이터 조회 중 오류: {e}", flush=True)
             break
 
-    if page_ids:
+    # 기존 데이터 인덱싱: ticker -> page_info, name -> page_info
+    existing_by_ticker: Dict[str, Dict[str, Any]] = {}
+    existing_by_name: Dict[str, Dict[str, Any]] = {}
+    all_existing_ids: set = set()
+
+    for page in existing_pages:
+        pid = page["id"]
+        props = page.get("properties", {})
+        
+        name_list = props.get("이름", {}).get("title", [])
+        page_name = name_list[0]["plain_text"].strip() if name_list else ""
+        
+        ticker_list = props.get("티커", {}).get("rich_text", [])
+        page_ticker = ticker_list[0]["plain_text"].strip().upper() if ticker_list else ""
+        
+        page_qty = props.get("수량", {}).get("number")
+        
+        stock_rels = props.get("종목(투자DB)", {}).get("relation", [])
+        page_stock_id = stock_rels[0]["id"] if stock_rels else None
+
+        info = {
+            "id": pid,
+            "name": page_name,
+            "ticker": page_ticker,
+            "quantity": page_qty,
+            "stock_id": page_stock_id
+        }
+        all_existing_ids.add(pid)
+        if page_ticker:
+            existing_by_ticker[page_ticker] = info
+            existing_by_ticker[page_ticker.split(".")[0].strip().upper()] = info
+        if page_name:
+            existing_by_name[page_name] = info
+            existing_by_name[page_name.replace(" ", "")] = info
+
+    matched_page_ids: set = set()
+    created_cnt, updated_cnt, archived_cnt = 0, 0, 0
+
+    # 2. 최신 수집 데이터 순회 및 수정/생성
+    for item in items_to_insert:
+        item_ticker = (item.get("ticker") or "").strip().upper()
+        clean_t = item_ticker.split(".")[0].strip().upper() if item_ticker else ""
+        item_name = (item.get("name") or "").strip()
+        item_qty = item.get("quantity")
+        item_stock_id = item.get("stock_id")
+
+        # 기존 레코드 매칭 시도
+        matched_info = None
+        if clean_t and clean_t in existing_by_ticker:
+            matched_info = existing_by_ticker[clean_t]
+        elif item_ticker and item_ticker in existing_by_ticker:
+            matched_info = existing_by_ticker[item_ticker]
+        elif item_name and item_name in existing_by_name:
+            matched_info = existing_by_name[item_name]
+        elif item_name and item_name.replace(" ", "") in existing_by_name:
+            matched_info = existing_by_name[item_name.replace(" ", "")]
+
+        if matched_info and matched_info["id"] not in matched_page_ids:
+            # CASE A: 기존 레코드 존재 ➔ 수정(Update)
+            pid = matched_info["id"]
+            matched_page_ids.add(pid)
+
+            update_props = {}
+            if item_qty is not None and matched_info["quantity"] != item_qty:
+                update_props["수량"] = {"number": item_qty}
+            if item_ticker and matched_info["ticker"] != item_ticker:
+                update_props["티커"] = {"rich_text": [{"text": {"content": item_ticker}}]}
+            if item_stock_id and matched_info["stock_id"] != item_stock_id:
+                update_props["종목(투자DB)"] = {"relation": [{"id": item_stock_id}]}
+            
+            # 업데이트 일시는 항상 갱신
+            update_props["업데이트"] = {"date": {"start": now_kst}}
+
+            try:
+                client.pages.update(page_id=pid, properties=update_props)
+                updated_cnt += 1
+                time.sleep(0.01)
+            except Exception as e:
+                print(f"      ❌ {item_name} 수정 실패: {e}", flush=True)
+
+        else:
+            # CASE B: 신규 편입 종목 ➔ 생성(Create)
+            props = {
+                "이름": {"title": [{"text": {"content": item_name}}]},
+                "ETF(투자DB)": {"relation": [{"id": etf_page_id}]},
+                "업데이트": {"date": {"start": now_kst}}
+            }
+            if item_ticker:
+                props["티커"] = {"rich_text": [{"text": {"content": item_ticker}}]}
+            if item_stock_id:
+                props["종목(투자DB)"] = {"relation": [{"id": item_stock_id}]}
+            if item_qty is not None:
+                props["수량"] = {"number": item_qty}
+
+            try:
+                new_p = client.pages.create(parent={"database_id": ETF_DB_ID}, properties=props)
+                created_cnt += 1
+                matched_page_ids.add(new_p["id"])
+                time.sleep(0.01)
+            except Exception as e:
+                print(f"      ❌ {item_name} 생성 실패: {e}", flush=True)
+
+    # 3. 편출된 종목(기존에 있었으나 이번 수집에서 빠진 종목) 아카이브
+    to_archive = list(all_existing_ids - matched_page_ids)
+    if to_archive:
+        def _archive_page(pid: str):
+            try:
+                client.pages.update(page_id=pid, archived=True)
+                return True
+            except Exception:
+                return False
+
         with ThreadPoolExecutor(max_workers=5) as executor:
-            executor.map(lambda pid: client.pages.update(page_id=pid, archived=True), page_ids)
+            results = list(executor.map(_archive_page, to_archive))
+            archived_cnt = sum(1 for r in results if r)
+
+    return created_cnt, updated_cnt, archived_cnt
 
 
-# ==========================================
-# 5. 메인 파이프라인
-# ==========================================
+# ==============================================================================
+# 6. 메인 파이프라인
+# ==============================================================================
 def main() -> None:
-    print("🚀 [ETF 구성종목 자동 수집 및 동기화 파이프라인] 가동 시작", flush=True)
+    print("🚀 [ETF 구성종목 자동 수집 및 증분 Upsert 파이프라인] 가동 시작", flush=True)
     notion = build_notion_client(NOTION_TOKEN)
 
     kis_ctx = get_kis_auth_context()
@@ -355,7 +543,7 @@ def main() -> None:
         print("⚠️ KIS 토큰 발급 실패: WiseReport 수집 전용 모드로 진행합니다.", flush=True)
 
     db_cache = StockMatchEngine(notion)
-    target_etfs = get_target_etfs(notion)
+    target_etfs = get_target_etfs(notion, db_cache)
     if not target_etfs:
         print("⚠️ 갱신 대상 ETF가 없습니다.", flush=True)
         return
@@ -379,7 +567,7 @@ def main() -> None:
                     raw_holdings.append(w)
 
         if not raw_holdings:
-            print(f"   ⚠️ {etf_name} 구성종목 없음 (건너뜀)", flush=True)
+            print(f"   ⚠️ {etf_name} 유효 구성종목 없음 (건너뜀)", flush=True)
             continue
 
         # 종목 매칭 및 간결한 브랜드명 추출
@@ -393,33 +581,13 @@ def main() -> None:
                 "quantity": h["quantity"]
             })
 
-        # 과거 데이터 아카이브 및 최신 데이터 등록
-        print(f"   🧹 기존 과거 데이터 정리 중...", flush=True)
-        archive_existing_etf_holdings(notion, etf_page_id)
+        # 지능형 증분 동기화 (Upsert: 수정 + 추가 + 편출종목 아카이브)
+        print(f"   ⚡ 최신 {len(items_to_insert)}개 구성종목 증분 동기화(Upsert) 진행 중...", flush=True)
+        created_cnt, updated_cnt, archived_cnt = sync_etf_holdings_upsert(
+            notion, etf_page_id, items_to_insert, now_kst
+        )
 
-        print(f"   📝 최신 {len(items_to_insert)}개 구성종목 입력 중...", flush=True)
-        success = 0
-        for item in items_to_insert:
-            props = {
-                "이름": {"title": [{"text": {"content": item["name"]}}]},
-                "ETF(투자DB)": {"relation": [{"id": etf_page_id}]},
-                "업데이트": {"date": {"start": now_kst}}
-            }
-            if item["ticker"]:
-                props["티커"] = {"rich_text": [{"text": {"content": item["ticker"]}}]}
-            if item["stock_id"]:
-                props["종목(투자DB)"] = {"relation": [{"id": item["stock_id"]}]}
-            if item["quantity"] is not None:
-                props["수량"] = {"number": item["quantity"]}
-
-            try:
-                notion.pages.create(parent={"database_id": ETF_DB_ID}, properties=props)
-                success += 1
-                time.sleep(0.02)
-            except Exception as exc:
-                print(f"   ❌ {item['name']} 등록 실패: {exc}", flush=True)
-
-        print(f"   ✅ [{etf_name}] 완료 ({success}/{len(items_to_insert)}건 입력)", flush=True)
+        print(f"   ✅ [{etf_name}] 완료 (생성: {created_cnt}건 | 수정: {updated_cnt}건 | 삭제/아카이브: {archived_cnt}건)", flush=True)
 
     print("\n✨ 모든 관리 대상 ETF 갱신 작업이 성공적으로 완료되었습니다.", flush=True)
 

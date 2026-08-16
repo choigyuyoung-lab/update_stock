@@ -1,28 +1,45 @@
+"""
+notion_utils.py
+================
+노션(Notion) 데이터베이스 연동, 한국투자증권(KIS) API 인증,
+주식 티커/종목명 정제 및 벤치마크 매칭을 위한 통합 유틸리티 모듈입니다.
+"""
+
+# ==============================================================================
+# 0. 라이브러리 임포트 및 시스템 설정
+# ==============================================================================
 import os
 import sys
 import json
 import re
 import math
+import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from dotenv import load_dotenv
-load_dotenv()
-import time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo  # 🌟 파이썬 3.9+ 해외 서버 시간 왜곡 차단 표준 라이브러리
-from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 
-# Windows 콘솔 utf-8 인코딩 안전화
+from notion_client import Client
+from notion_client.errors import HTTPResponseError
+
+# .env 환경변수 로드
+load_dotenv()
+
+# Windows 콘솔 UTF-8 출력 안전화
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
         pass
 
-from notion_client import Client
-from notion_client.errors import HTTPResponseError
 
+# ==============================================================================
+# 1. 공통 상수 및 네트워크 세션 관리
+# ==============================================================================
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_PAGE_SIZE = 100
 
@@ -31,19 +48,18 @@ KIS_PROD_URL = "https://openapi.koreainvestment.com:9443"
 
 
 def get_http_session(user_agent: Optional[str] = None) -> requests.Session:
-    """Connection: close 및 지수 백오프 Retry가 탑재된 고신뢰성 HTTP 세션을 생성합니다."""
+    """Connection: close 및 지수 백오프 Retry가 적용된 고신뢰성 HTTP 세션을 반환합니다."""
     session = requests.Session()
-    headers = {"Connection": "close"}
-    if user_agent:
-        headers["User-Agent"] = user_agent
-    else:
-        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    headers = {
+        "Connection": "close",
+        "User-Agent": user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     session.headers.update(headers)
 
     retries = Retry(
         total=3,
         backoff_factor=0.2,
-        status_forcelist=[429, 500, 502, 503, 504],
+        status_forcelist=list(RETRY_STATUS_CODES),
         raise_on_status=False
     )
     session.mount("https://", HTTPAdapter(max_retries=retries))
@@ -51,27 +67,42 @@ def get_http_session(user_agent: Optional[str] = None) -> requests.Session:
     return session
 
 
+# ==============================================================================
+# 2. 환경 변수 및 시간 처리 유틸리티
+# ==============================================================================
+def get_env_var(name: str, required: bool = True, default: Optional[str] = None) -> str:
+    """환경 변수를 안전하게 가져옵니다. 필수 변수 누락 시 오류를 발생시킵니다."""
+    value: Optional[str] = os.environ.get(name, default)
+    if required and not value:
+        raise EnvironmentError(f"환경 변수 {name}이(가) 설정되지 않았습니다.")
+    return cast(str, value)
+
+
+def kst_isoformat() -> str:
+    """전 세계 어느 가상 서버에서 실행되든 한국 표준시(KST, Asia/Seoul)를 기준으로 ISO 일시를 반환합니다."""
+    return datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+
+
+# ==============================================================================
+# 3. 데이터 검증 및 변환 유틸리티
+# ==============================================================================
 def is_kr_ticker(ticker: str) -> bool:
-    """
-    국내 종목코드(보통주, 알파벳 포함 신형 우선주/전환주, .KS/.KQ)를 정밀 판별합니다.
-    """
+    """국내 종목코드(보통주, 신형 우선주, .KS/.KQ 접미사 포함)를 정밀 판별합니다."""
     if not ticker:
         return False
     
     t = ticker.strip().upper()
     
-    # 1. 해외 거래소 접미어가 명시된 경우 -> 무조건 해외(False)
+    # 1. 해외 거래소 접미어가 명시된 경우 -> 해외(False)
     if t.endswith((".T", ".TA", ".TW", ".HK", ".L", ".DE", ".AS", ".PA", ".SW", ".CO")):
         return False
 
-    # 2. 국내 거래소 접미어가 붙은 경우 (.KS, .KQ) -> 무조건 국내(True)
+    # 2. 국내 거래소 접미어가 붙은 경우 (.KS, .KQ) -> 국내(True)
     if t.endswith((".KS", ".KQ")):
         return True
 
-    # 3. 접미어 분리 후 순수 티커 검사
+    # 3. 접미어 분리 후 순수 티커 검사 (6자리 & 숫자로 시작하는 KRX 코드)
     clean_t = t.split(".")[0].strip()
-
-    # 4. KRX 6자리 표준 코드 판별 (6자리 & 숫자로 시작 & 영문+숫자)
     if len(clean_t) == 6 and clean_t[0].isdigit() and clean_t.isalnum():
         return True
 
@@ -79,13 +110,13 @@ def is_kr_ticker(ticker: str) -> bool:
 
 
 def is_valid_num(value: Any) -> bool:
-    """숫자 값이 유효한지 검증합니다 (NaN, Inf, None, 빈문자열 차단)."""
+    """숫자 값이 유효한지 검증합니다 (NaN, Inf, None, 빈문자열, 특수문자 차단)."""
     if value is None:
         return False
     try:
         if isinstance(value, str):
             clean = value.replace(",", "").strip()
-            if not clean or clean.lower() in ["null", "none", "nan", "-"]:
+            if not clean or clean.lower() in ["null", "none", "nan", "-", ""]:
                 return False
             val = float(clean)
         else:
@@ -96,7 +127,7 @@ def is_valid_num(value: Any) -> bool:
 
 
 def safe_float(value: Any) -> Optional[float]:
-    """문자열/숫자를 안전하게 float로 변환합니다. 0이거나 유효하지 않으면 None 반환."""
+    """문자열/숫자를 안전하게 float로 변환합니다. 유효하지 않거나 0이면 None을 반환합니다."""
     if not is_valid_num(value):
         return None
     try:
@@ -107,64 +138,21 @@ def safe_float(value: Any) -> Optional[float]:
 
 
 def make_rich_text(val: Any) -> Dict[str, Any]:
-    """노션 rich_text 속성 객체를 생성합니다."""
+    """노션 rich_text 속성 구조 객체를 생성합니다."""
     text_val = str(val).strip() if val is not None else ""
     return {"rich_text": [{"text": {"content": text_val}}]} if text_val else {"rich_text": []}
 
 
-def search_foreign_ticker(name: str) -> Optional[Tuple[str, str]]:
-    """
-    야후 파이낸스 Search API를 통해 종목명으로 미국 메이저 거래소(NYSE, NASDAQ) 상장 티커 및 ADR 티커를 동적으로 추출합니다.
-    """
-    if not name:
-        return None
-
-    short_brand = extract_short_brand_name(name)
-    query = "Taiwan Semiconductor" if short_brand.upper() == "TSMC" else (short_brand or name)
-
-    try:
-        url = "https://query2.finance.yahoo.com/v1/finance/search"
-        session = get_http_session()
-        r = session.get(url, params={"q": query, "quotesCount": 6, "newsCount": 0}, timeout=5)
-        if r.status_code != 200:
-            return None
-
-        quotes = r.json().get("quotes", [])
-        us_pick, jp_pick, other_pick = None, None, None
-
-        for q in quotes:
-            sym = q.get("symbol", "").strip().upper()
-            typ = q.get("quoteType", "")
-            exch = (q.get("exchange") or q.get("exchDisp") or "").upper()
-            sname = (q.get("shortname") or q.get("longname") or "").strip()
-
-            if typ not in ["EQUITY", "ETF"] or sym.endswith("-USD"):
-                continue
-
-            # 1. 미국 메이저 거래소 상장주 및 ADR (점 없는 티커 최우선)
-            if ("." not in sym) and any(m in exch for m in ["NY", "NASD", "NMS", "BATS", "NGM", "NCM"]):
-                if not us_pick:
-                    us_pick = (sym, short_brand or sname)
-            # 2. 일본 도쿄 증시 (.T)
-            elif sym.endswith(".T") or "TOKYO" in exch or "JPX" in exch:
-                if not jp_pick:
-                    jp_pick = (sym if sym.endswith(".T") else f"{sym}.T", short_brand or sname)
-            # 3. 기타 해외 증시
-            elif not other_pick:
-                other_pick = (sym, short_brand or sname)
-
-        return us_pick or jp_pick or other_pick
-    except Exception:
-        return None
-
-
+# ==============================================================================
+# 4. 종목명 정제 및 글로벌 티커 검색
+# ==============================================================================
 def extract_short_brand_name(name: str) -> str:
-    """노션 열 너비가 길어지지 않도록 법인형태/접미사를 제거한 핵심 브랜드명만 추출"""
+    """노션 열 너비 및 가독성을 위해 법인형태/접미사를 제거한 핵심 브랜드명을 추출합니다."""
     if not name:
         return ""
     n = name.strip()
 
-    # 1. 글로벌 대형주 주요 별칭 매핑
+    # 1. 글로벌/일본 대형주 주요 별칭 매핑
     brand_map = {
         r'(?i)\bTAIWAN SEMICONDUCTOR\b': 'TSMC',
         r'(?i)\bALPHABET\b': 'Alphabet',
@@ -186,12 +174,21 @@ def extract_short_brand_name(name: str) -> str:
         r'(?i)\bTOYOTA(\s+MOTOR)?\b': 'Toyota',
         r'(?i)\bSONY(\s+GROUP)?\b': 'Sony',
         r'(?i)\bSAP(\s+SE)?\b': 'SAP',
+        r'(?i)\bMURATA(\s+MFG|\s+MANUFACTURING)?\b': 'Murata',
+        r'(?i)\bKEYENCE(\s+CORP)?\b': 'Keyence',
+        r'(?i)\bTOKYO\s+ELECTRON\b': 'Tokyo Electron',
+        r'(?i)\bSHIN[\s\-]ETSU(\s+CHEMICAL)?\b': 'Shin-Etsu',
+        r'(?i)\bHOYA(\s+CORP)?\b': 'Hoya',
+        r'(?i)\bLASERTEC\b': 'Lasertec',
+        r'(?i)\bDISCO(\s+CORP)?\b': 'Disco',
+        r'(?i)\bADVANTEST\b': 'Advantest',
+        r'(?i)\bHITACHI\b': 'Hitachi',
     }
     for pat, brand in brand_map.items():
         if re.search(pat, n):
             return brand
 
-    # 2. 특수기호 및 법인/주식 형태 수식어 제거
+    # 2. 특수기호 및 법인 형태 수식어 제거
     clean = re.sub(r'[\(\)\[\],\.\-\/\:\'\"]', ' ', n)
     remove_patterns = [
         r'(?i)\bCL(ASS)?\s*[A-Z0-9]?\b', r'(?i)\bORD(INARY)?\b', r'(?i)\bREG(ISTERED)?\b',
@@ -200,7 +197,8 @@ def extract_short_brand_name(name: str) -> str:
         r'(?i)\bLTD\b', r'(?i)\bLIMITED\b', r'(?i)\bCO\b', r'(?i)\bCOS\b', r'(?i)\bLLC\b',
         r'(?i)\bPLC\b', r'(?i)\bHOLDINGS?\b', r'(?i)\bGROUP\b', r'(?i)\bHOLDI\b', r'(?i)\bUSA\b',
         r'(?i)\bCOM\b', r'(?i)\bNY\b', r'(?i)\bS\s*A\b', r'(?i)\bAG\b', r'(?i)\bSE\b',
-        r'(?i)\bK\s*K\b', r'(?i)\bSPONSORED\b', r'(?i)\bSOLUTIONS\b'
+        r'(?i)\bK\s*K\b', r'(?i)\bSPONSORED\b', r'(?i)\bSOLUTIONS\b',
+        r'(?i)\bMFG\b', r'(?i)\bMANUFACTURING\b', r'(?i)\bIND\b', r'(?i)\bINDUSTRIES\b'
     ]
     for p in remove_patterns:
         clean = re.sub(p, ' ', clean)
@@ -211,14 +209,78 @@ def extract_short_brand_name(name: str) -> str:
     return res.title() if (res.isupper() and len(res) > 4) else res
 
 
-def get_env_var(name: str, required: bool = True, default: Optional[str] = None) -> str:
-    value: Optional[str] = os.environ.get(name, default)
-    if required and not value:
-        raise EnvironmentError(f"환경 변수 {name}이(가) 설정되지 않았습니다.")
-    return cast(str, value)
+def search_foreign_ticker(name: str) -> Optional[Tuple[str, str]]:
+    """야후 파이낸스 Search API를 통해 미국 메이저 거래소(NYSE, NASDAQ), ADR 및 글로벌 거래소 상장 티커를 추출합니다."""
+    if not name:
+        return None
+
+    short_brand = extract_short_brand_name(name)
+    
+    # 다중 검색 후보군 생성
+    search_queries: List[str] = []
+    if short_brand.upper() == "TSMC":
+        search_queries.append("Taiwan Semiconductor")
+    elif short_brand.upper() in ["MURATA", "MURATA MFG"]:
+        search_queries.extend(["Murata Manufacturing", "Murata", "MRAAY"])
+    elif short_brand:
+        search_queries.append(short_brand)
+    
+    # 약어 확장 및 원본 정제 후보 추가
+    mfg_expanded = re.sub(r'(?i)\bMFG\b', 'MANUFACTURING', name).strip()
+    clean_raw = re.sub(r'[\(\)\[\],\.\-\/\:\'\"]', ' ', name).strip()
+    for cand in [mfg_expanded, clean_raw, name]:
+        if cand and cand not in search_queries:
+            search_queries.append(cand)
+
+    session = get_http_session()
+    url = "https://query2.finance.yahoo.com/v1/finance/search"
+
+    try:
+        for q in search_queries:
+            r = session.get(url, params={"q": q, "quotesCount": 6, "newsCount": 0}, timeout=5)
+            if r.status_code != 200:
+                continue
+
+            quotes = r.json().get("quotes", [])
+            if not quotes:
+                continue
+
+            us_pick, jp_pick, other_pick = None, None, None
+            for item in quotes:
+                sym = str(item.get("symbol") or "").strip().upper()
+                typ = item.get("quoteType", "")
+                exch = str(item.get("exchange") or item.get("exchDisp") or "").upper()
+                sname = str(item.get("shortname") or item.get("longname") or "").strip()
+
+                if typ not in ["EQUITY", "ETF"] or sym.endswith("-USD"):
+                    continue
+
+                # 1. 미국 메이저 거래소 상장주 및 ADR / OTC (점 없는 티커 최우선)
+                if ("." not in sym) and any(m in exch for m in ["NY", "NASD", "NMS", "BATS", "NGM", "NCM", "PNK", "OTC"]):
+                    if not us_pick:
+                        us_pick = (sym, short_brand or sname)
+                # 2. 일본 도쿄 증시 (.T)
+                elif sym.endswith(".T") or "TOKYO" in exch or "JPX" in exch:
+                    if not jp_pick:
+                        jp_pick = (sym if sym.endswith(".T") else f"{sym}.T", short_brand or sname)
+                # 3. 기타 해외 증시
+                elif not other_pick:
+                    other_pick = (sym, short_brand or sname)
+
+            best = us_pick or jp_pick or other_pick
+            if best:
+                return best
+
+        return None
+    except Exception:
+        return None
 
 
+# ==============================================================================
+# 5. 노션 API 클라이언트 및 데이터베이스 연동
+# ==============================================================================
 def build_notion_client(auth_token: str, use_httpx: bool = False, timeout: float = 60.0) -> Client:
+    """공식 notion_client Client 인스턴스를 생성합니다."""
     if use_httpx:
         import httpx
         httpx_client: Any = httpx.Client(timeout=timeout)
@@ -227,6 +289,7 @@ def build_notion_client(auth_token: str, use_httpx: bool = False, timeout: float
 
 
 def _format_notion_error(error: Exception) -> str:
+    """노션 API 오류 발생 시 상태 코드 및 메시지를 포맷팅합니다."""
     if isinstance(error, HTTPResponseError):
         status = getattr(error, "status", None)
         message = getattr(error, "message", None) or str(error)
@@ -243,6 +306,7 @@ def safe_databases_query(
     max_retries: int = 3,
     retry_delay: float = 2.0,
 ) -> Dict[str, Any]:
+    """재시도(Retry) 로직이 포함된 안전한 노션 데이터베이스 쿼리 함수"""
     attempt = 1
     while True:
         try:
@@ -273,6 +337,7 @@ def paginate_database(
     page_size: int = DEFAULT_PAGE_SIZE,
     retry_delay: float = 1.0,
 ) -> Iterable[Dict[str, Any]]:
+    """노션 데이터베이스 전체 페이지를 페이지네이션하며 하나씩 yield하는 Generator"""
     start_cursor = None
     while True:
         response = safe_databases_query(client, database_id, start_cursor=start_cursor, page_size=page_size)
@@ -291,6 +356,7 @@ def safe_page_update(
     max_retries: int = 3,
     retry_delay: float = 2.0,
 ) -> bool:
+    """재시도 로직이 포함된 안전한 노션 페이지 속성 갱신 함수"""
     if not properties:
         return False
 
@@ -319,6 +385,7 @@ def safe_page_update(
 
 
 def get_page_text(props: Dict[str, Any], names: List[str]) -> str:
+    """노션 페이지의 title 또는 rich_text 속성에서 첫 번째로 발견된 문자열 텍스트를 추출합니다."""
     for name in names:
         prop = props.get(name, {})
         for key in ("title", "rich_text"):
@@ -330,12 +397,17 @@ def get_page_text(props: Dict[str, Any], names: List[str]) -> str:
     return ""
 
 
-def kst_isoformat() -> str:
-    """🌟 전 세계 어느 가상 서버에서 실행되든 실제 대한민국 서울 표준시(KST)를 절대값으로 계산해 반환합니다."""
-    return datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
-
-
-def _request_kis_token(url_base: str, app_key: str, app_secret: str, max_retries: int = 2, base_delay: float = 1.5, env_name: str = "모의투자") -> Optional[str]:
+# ==============================================================================
+# 6. 한국투자증권(KIS) API 인증 관리
+# ==============================================================================
+def _request_kis_token(
+    url_base: str,
+    app_key: str,
+    app_secret: str,
+    max_retries: int = 2,
+    base_delay: float = 1.5,
+    env_name: str = "모의투자"
+) -> Optional[str]:
     """한투 API 액세스 토큰을 발급받는 내부 헬퍼 함수"""
     if not app_key or not app_secret:
         return None
@@ -437,6 +509,17 @@ def get_kis_auth_context(max_retries: int = 2, base_delay: float = 1.5) -> Optio
     return None
 
 
+# ==============================================================================
+# 7. 벤치마크 및 키워드 매칭 엔진
+# ==============================================================================
+def parse_keywords(kw_raw: str, fallback_summary: str = "") -> List[str]:
+    """쉼표, 세미콜론, 줄바꿈 등으로 구분된 키워드 문자열을 대문자 정규화 리스트로 파싱합니다."""
+    keywords = [k.strip().upper() for k in re.split(r'[,;|\n]+', kw_raw or "") if k.strip()]
+    if not keywords and fallback_summary:
+        keywords = [fallback_summary.strip().upper()]
+    return keywords
+
+
 def match_keyword(kw: str, text: str) -> bool:
     """단어 길이 및 영문 단어 경계(\\b)를 고려한 고정밀 키워드 매칭 함수"""
     if not kw or len(kw) < 2:
@@ -457,11 +540,4 @@ def find_best_bm(text: str, candidates: List[Dict[str, Any]]) -> Optional[str]:
                     best_len = len(kw)
                     best_bm = bm["ticker"]
     return best_bm
-
-
-def parse_keywords(kw_raw: str, fallback_summary: str = "") -> List[str]:
-    """쉼표, 세미콜론, 줄바꿈 등으로 구분된 키워드 문자열을 정규화된 리스트로 파싱합니다."""
-    keywords = [k.strip().upper() for k in re.split(r'[,;|\n]+', kw_raw or "") if k.strip()]
-    if not keywords and fallback_summary:
-        keywords = [fallback_summary.strip().upper()]
-    return keywords
+

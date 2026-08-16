@@ -1,11 +1,31 @@
-import logging
+"""
+update_master_db_us.py
+=======================
+미국/글로벌 상장 주식(S&P 500, NASDAQ, NYSE, 글로벌 ADR, ETF)의 마스터 메타데이터를 노션 상장주식 DB에 동기화합니다.
+- 데이터 소스: FinanceDataReader (S&P 500, NASDAQ, NYSE) + yfinance
+- 메타데이터: 종목명(간결한 브랜드명), 마켓(NASDAQ/NYSE/AMEX/ETF), US_섹터, US_업종, 우량주(S&P500/나스닥100) 태깅
+- 지표 연동: 지표 DB의 매칭키워드를 기반으로 시장BM(SPY/QQQ/ONEQ/VTI), G산업BM 동적 릴레이션 연결
+"""
+
+# ==============================================================================
+# 0. 라이브러리 임포트 및 시스템 설정
+# ==============================================================================
+import sys
 import io
+import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import pandas as pd
 import yfinance as yf
 import FinanceDataReader as fdr
+
+# Windows 콘솔 인코딩 안전화
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 from notion_utils import (
     build_notion_client,
@@ -23,21 +43,22 @@ from notion_utils import (
     parse_keywords,
 )
 
-# ---------------------------------------------------------
-# 1. 환경 변수 및 설정
-# ---------------------------------------------------------
+# ==============================================================================
+# 1. 환경 변수 및 로거 설정
+# ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 MASTER_DATABASE_ID = get_env_var("MASTER_DATABASE_ID")
 BENCHMARK_DATABASE_ID = get_env_var("BENCHMARK_DATABASE_ID")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("MasterSyncUS")
 
-# ---------------------------------------------------------
-# 2. 지표 DB 분석 (관계형 ID 매핑 및 키워드 인덱싱)
-# ---------------------------------------------------------
+# ==============================================================================
+# 2. 지표 DB 동적 분석 (관계형 ID 매핑 및 키워드 인덱싱)
+# ==============================================================================
 def get_dynamic_config_us(client: Any) -> Dict[str, Any]:
-    """지표지수 DB의 티커 및 매칭키워드 수집"""
+    """지표지수 DB의 미국/글로벌 티커 및 매칭키워드 수집"""
+    logger.info("🔍 지표지수 DB 동적 분석 및 글로벌 매칭키워드 로드 시작...")
     config = {"ticker_to_id": {}, "benchmarks": []}
     try:
         for page in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.2):
@@ -65,10 +86,11 @@ def get_dynamic_config_us(client: Any) -> Dict[str, Any]:
         logger.error(f"❌ 지표 로드 실패: {e}")
     return config
 
-# ---------------------------------------------------------
-# 3. 데이터 엔진 (인메모리 인덱스 & 실시간 캐시)
-# ---------------------------------------------------------
+# ==============================================================================
+# 3. 미국 주식 데이터 엔진 (인메모리 인덱스 & 실시간 캐시)
+# ==============================================================================
 class StockAutomationEngineUS:
+    """S&P500 / NASDAQ / NYSE 인메모리 패스트트랙 및 yfinance 폴백 엔진"""
     def __init__(self):
         logger.info("📡 미국 주식 마스터 엔진 가동 (S&P500 / NASDAQ / NYSE 인메모리 패스트트랙)...")
         self.session = get_http_session()
@@ -97,7 +119,7 @@ class StockAutomationEngineUS:
 
         self.nasdaq_100 = self._get_nas100()
 
-    def _get_nas100(self):
+    def _get_nas100(self) -> Set[str]:
         """Wikipedia를 활용한 나스닥 100 종목코드 수집"""
         urls = [
             'https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies',
@@ -124,10 +146,11 @@ class StockAutomationEngineUS:
             return "NYSE"
         return "기타"
 
-# ---------------------------------------------------------
+# ==============================================================================
 # 4. 페이지 처리 (기본 정보 자동 기입 + 지표 동적 매핑)
-# ---------------------------------------------------------
-def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, client: Any, config: Dict[str, Any]):
+# ==============================================================================
+def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, client: Any, config: Dict[str, Any]) -> None:
+    """개별 미국 주식 페이지의 섹터/업종/벤치마크 매핑 정보를 분석하고 즉시 갱신합니다."""
     pid, props = page["id"], page.get("properties", {})
     raw_t = get_page_text(props, ["티커", "Ticker"]).upper()
     if not raw_t or is_kr_ticker(raw_t):
@@ -139,7 +162,7 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
     market_label = engine.get_market_label(raw_t)
     target_m_t, target_ind_t = None, None
 
-    # 1. S&P 500 인메모리 패스트트랙 (느린 YFinance 웹 호출 생략 -> 1ms 처리)
+    # 1. S&P 500 인메모리 패스트트랙
     if raw_t in engine.sp500_dict:
         sp_item = engine.sp500_dict[raw_t]
         name = extract_short_brand_name(sp_item.get('Name', raw_t))
@@ -174,7 +197,7 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
             logger.warning(f"⚠️ [{raw_t}] YFinance 조회 실패: {exc}")
             name = raw_t
 
-    # 3. 시장BM 및 G산업BM 노션 지표 DB 매칭키워드 기반 순수 동적 매핑
+    # 3. 시장BM 및 G산업BM 매칭
     if market_label != "기타":
         if raw_t in engine.nasdaq_100:
             target_m_t = "QQQ"
@@ -199,7 +222,7 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
         "업데이트 일자": {"date": {"start": kst_isoformat()}},
     }
 
-    # 4. 우량주 태깅 (S&P 500, NASDAQ 100)
+    # 4. 우량주 태깅
     blue_chip_tags = []
     if raw_t in engine.sp500_dict:
         blue_chip_tags.append("S&P 500")
@@ -209,9 +232,8 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
     if blue_chip_tags:
         update_props["우량주"] = {"multi_select": [{"name": tag} for tag in blue_chip_tags]}
 
-    # 5. 벤치마크 관계형 속성 반영 (미국 주식은 K산업BM을 항상 빈 값으로 초기화)
+    # 5. 벤치마크 관계형 속성 반영
     update_props["K산업BM"] = {"relation": []}
-
     if market_label == "기타":
         update_props["시장BM"] = {"relation": []}
         update_props["G산업BM"] = {"relation": []}
@@ -229,17 +251,18 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
     if safe_page_update(client, pid, update_props):
         logger.info(f"   ✅ [US] {raw_t} ({name}) 업데이트 완료")
 
-# ---------------------------------------------------------
-# 5. 메인 함수 (페이지네이션 적용)
-# ---------------------------------------------------------
-def main():
+# ==============================================================================
+# 5. 메인 실행 함수
+# ==============================================================================
+def main() -> None:
+    """미국/글로벌 주식 마스터 DB 동기화 메인 파이프라인"""
     client = build_notion_client(NOTION_TOKEN, use_httpx=True, timeout=60.0)
 
     config = get_dynamic_config_us(client)
     engine = StockAutomationEngineUS()
 
     all_pages = [page for page in paginate_database(client, MASTER_DATABASE_ID, page_size=100, retry_delay=0.1)]
-    logger.info("📡 노션 DB 수집 및 페이지네이션 처리 중...")
+    logger.info(f"📡 노션 DB 수집 완료: 총 {len(all_pages)}개 페이지 대상 병렬 처리 시작...")
 
     if all_pages:
         with ThreadPoolExecutor(max_workers=5) as executor:

@@ -1,8 +1,34 @@
+"""
+update_finance_kr.py
+=====================
+한국투자증권(KIS) Open API를 호출하여 국내 상장 주식의 재무 지표, 투자의견, 52주 신고/신저가,
+및 최근 20영업일 직전 고점/저점을 수집하여 노션 데이터베이스에 배치 업데이트합니다.
+- 데이터 소스:
+  1. KIS 기본 시세/투자지표 API (FHKST01010100) : PER, PBR, EPS, BPS, 배당수익률, 52주 최고/최저, 업종PER
+  2. KIS 투자의견 API (HHDFS76700100) : 목표주가, 추정PER, 추정EPS, 투자의견
+  3. KIS 일봉 차트 API (FHKST03010100) : 최근 20영업일 스윙 직전고점/직전저점
+- 안정성: 지수 백오프 기반 재시도 및 안전 배치 업데이트
+"""
+
+# ==============================================================================
+# 0. 라이브러리 임포트 및 시스템 설정
+# ==============================================================================
+import sys
 import time
-import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+
+# Windows 콘솔 인코딩 안전화
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 from notion_utils import (
     build_notion_client,
     get_env_var,
@@ -16,18 +42,30 @@ from notion_utils import (
     safe_float,
 )
 
-# 1. 환경 변수 및 설정 로드 (.env 연동)
+
+# ==============================================================================
+# 1. 환경 변수 및 공통 세션 설정
+# ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 DATABASE_ID = get_env_var("DATABASE_ID")
 
 SESSION = get_http_session()
 
 
-def get_finance_data(ticker: str, kis_ctx: dict, max_retries: int = 4, base_delay: float = 3.0) -> dict:
-    """ 한투 API에서 국내 주식 재무 데이터를 조회합니다. """
+# ==============================================================================
+# 2. 한국투자증권 다단계 재무/기술 지표 수집부
+# ==============================================================================
+def get_finance_data(
+    ticker: str,
+    kis_ctx: Dict[str, Any],
+    max_retries: int = 4,
+    base_delay: float = 3.0
+) -> Dict[str, Any]:
+    """한투 API에서 국내 주식 재무 데이터(기본정보, 투자의견, 일봉차트 직전고저점)를 조회합니다."""
     if not kis_ctx or not isinstance(kis_ctx, dict) or not kis_ctx.get("token"):
         return {}
-    clean_ticker = ticker.split(".")[0]
+
+    clean_ticker = ticker.split(".")[0].strip()
     token = kis_ctx["token"]
     url_base = kis_ctx["url_base"]
     app_key = kis_ctx["app_key"]
@@ -40,7 +78,7 @@ def get_finance_data(ticker: str, kis_ctx: dict, max_retries: int = 4, base_dela
         "custtype": "P",
     }
 
-    # 1단계: 기본 정보 조회 (필수 - 재시도 적용)
+    # 1단계: 기본 정보 조회 (필수 - 지수 백오프 재시도 적용)
     output = {}
     for attempt in range(1, max_retries + 1):
         try:
@@ -64,7 +102,7 @@ def get_finance_data(ticker: str, kis_ctx: dict, max_retries: int = 4, base_dela
         except (requests.exceptions.RequestException, ValueError) as exc:
             if attempt < max_retries:
                 delay = base_delay * (2 ** (attempt - 1))
-                print(f"   ⚠️ [{ticker}] KIS 기본정보 네트워크/통신 에러. {delay}초 대기 후 재시도 ({attempt}/{max_retries}): {exc}")
+                print(f"   ⚠️ [{ticker}] KIS 기본정보 통신 에러. {delay}초 대기 후 재시도 ({attempt}/{max_retries}): {exc}")
                 time.sleep(delay)
                 continue
             print(f"❌ [{ticker}] KIS API(기본정보) 요청 실패 (최대 재시도 초과): {exc}")
@@ -72,7 +110,7 @@ def get_finance_data(ticker: str, kis_ctx: dict, max_retries: int = 4, base_dela
 
     time.sleep(0.1)
 
-    # 2단계: 투자의견 조회 (비필수 - 재시도 없음)
+    # 2단계: 투자의견 조회 (비필수)
     opinion = {}
     try:
         response = SESSION.get(
@@ -89,7 +127,7 @@ def get_finance_data(ticker: str, kis_ctx: dict, max_retries: int = 4, base_dela
 
     time.sleep(0.1)
 
-    # 3단계: 일봉 차트 조회 및 직전 고점/저점 계산 (비필수 - 기간 40일)
+    # 3단계: 일봉 차트 조회 및 최근 20영업일 직전 고점/저점 계산
     swing_high = None
     swing_low = None
     try:
@@ -149,7 +187,13 @@ def get_finance_data(ticker: str, kis_ctx: dict, max_retries: int = 4, base_dela
     }
 
 
-def build_finance_update_for_page(page, kis_ctx: dict):
+# ==============================================================================
+# 3. 개별 페이지 재무 분석 및 페이로드 빌더
+# ==============================================================================
+def build_finance_update_for_page(
+    page: Dict[str, Any],
+    kis_ctx: Dict[str, Any]
+) -> Optional[Tuple[str, str, Dict[str, Any], str]]:
     """개별 노션 페이지의 티커를 추출하여 데이터를 수집하고 구조화합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
@@ -173,7 +217,7 @@ def build_finance_update_for_page(page, kis_ctx: dict):
         if data.get(field) is not None and field in props
     }
     
-    if data.get("의견"):
+    if data.get("의견") and "목표가 범위" in props:
         update_props["목표가 범위"] = {"select": {"name": data["의견"]}}
     
     if "마지막 업데이트" in props:
@@ -194,8 +238,16 @@ def build_finance_update_for_page(page, kis_ctx: dict):
     return (page["id"], ticker, update_props, preview)
 
 
-def batch_collect_finance_data(pages: list, kis_ctx: dict, max_workers: int = 3):
-    updates = []
+# ==============================================================================
+# 4. 배치 수집 및 노션 다중 스레드 반영
+# ==============================================================================
+def batch_collect_finance_data(
+    pages: List[Dict[str, Any]],
+    kis_ctx: Dict[str, Any],
+    max_workers: int = 3
+) -> List[Tuple[str, str, Dict[str, Any], str]]:
+    """여러 페이지의 국내 주식 재무 데이터를 병렬로 수집합니다."""
+    updates: List[Tuple[str, str, Dict[str, Any], str]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(build_finance_update_for_page, page, kis_ctx): page for page in pages}
         
@@ -212,7 +264,13 @@ def batch_collect_finance_data(pages: list, kis_ctx: dict, max_workers: int = 3)
     return updates
 
 
-def batch_update_finance_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.3):
+def batch_update_finance_pages(
+    notion_client: Any,
+    updates: List[Tuple[str, str, Dict[str, Any], str]],
+    batch_size: int = 10,
+    delay_between_batches: float = 0.3
+) -> None:
+    """수집된 재무 정보를 배치화하여 노션에 안전하게 반영합니다."""
     if not updates:
         return
     
@@ -250,7 +308,11 @@ def batch_update_finance_pages(notion_client, updates: list, batch_size: int = 1
     print(f"\n✨ 재무 정보 배치 업데이트 완료: 성공 {success_count}개, 실패 {fail_count}개")
 
 
+# ==============================================================================
+# 5. 메인 실행 함수
+# ==============================================================================
 def main() -> None:
+    """국내 주식 재무 정보 일괄 업데이트 메인 파이프라인"""
     notion = build_notion_client(NOTION_TOKEN)
     kis_ctx = get_kis_auth_context()
     if not kis_ctx:
@@ -267,7 +329,7 @@ def main() -> None:
     print(f"📊 총 {len(all_pages)}개 항목 발견")
     
     batch_collect_size = 15
-    updates = []
+    updates: List[Tuple[str, str, Dict[str, Any], str]] = []
     
     for batch_idx, i in enumerate(range(0, len(all_pages), batch_collect_size), 1):
         batch = all_pages[i : i + batch_collect_size]
@@ -284,6 +346,8 @@ def main() -> None:
         batch_update_finance_pages(notion, updates, batch_size=10, delay_between_batches=0.5)
     else:
         print("⚠️ 업데이트할 항목이 없습니다.")
+
+    print("✨ 국내 주식 재무 정보 업데이트 프로세스가 완료되었습니다.")
 
 
 if __name__ == "__main__":

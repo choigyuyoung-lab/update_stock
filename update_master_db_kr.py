@@ -1,11 +1,31 @@
+"""
+update_master_db_kr.py
+=======================
+한국 상장 주식(KOSPI, KOSDAQ, ETF)의 마스터 메타데이터를 노션(Notion) 상장주식 DB에 동기화합니다.
+- 데이터 소스: FinanceDataReader (KRX-DESC, ETF/KR) + 한국투자증권(KIS) Open API
+- 메타데이터: 종목명, 마켓(KOSPI/KOSDAQ/ETF), KR_섹터, KR_산업, 우량주(K200/K150) 태깅
+- 지표 연동: 지표 DB의 매칭키워드를 기반으로 시장BM, K산업BM, G산업BM 동적 릴레이션 연결
+"""
+
+# ==============================================================================
+# 0. 라이브러리 임포트 및 시스템 설정
+# ==============================================================================
+import sys
 import re
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Optional, Dict, List
+from typing import Any, Optional, Dict, List, Tuple
 
 import pandas as pd
 import FinanceDataReader as fdr
+
+# Windows 콘솔 인코딩 안전화
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 from notion_utils import (
     build_notion_client,
@@ -23,22 +43,25 @@ from notion_utils import (
     parse_keywords,
 )
 
-# ---------------------------------------------------------
-# 1. 환경 변수 및 설정
-# ---------------------------------------------------------
+
+# ==============================================================================
+# 1. 환경 변수 및 로깅 설정
+# ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 MASTER_DATABASE_ID = get_env_var("MASTER_DATABASE_ID")
 BENCHMARK_DATABASE_ID = get_env_var("BENCHMARK_DATABASE_ID")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("MasterSyncKR")
 
-# ---------------------------------------------------------
+
+# ==============================================================================
 # 2. 지표 DB 동적 분석 (관계형 ID 매핑 및 키워드 인덱싱)
-# ---------------------------------------------------------
-def get_dynamic_config(client) -> Dict[str, Any]:
+# ==============================================================================
+def get_dynamic_config(client: Any) -> Dict[str, Any]:
+    """지표지수 DB를 스캔하여 티커별 Notion ID 매핑 및 키워드 목록을 동적으로 구성합니다."""
     logger.info("🔍 지표지수 DB 동적 분석 및 매칭키워드 로드 시작...")
-    config = {"ticker_to_id": {}, "benchmarks": []}
+    config: Dict[str, Any] = {"ticker_to_id": {}, "benchmarks": []}
     try:
         for page in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.2):
             props = page.get("properties", {})
@@ -66,16 +89,19 @@ def get_dynamic_config(client) -> Dict[str, Any]:
         logger.error(f"❌ 지표 DB 로드 실패: {e}")
     return config
 
-# ---------------------------------------------------------
+
+# ==============================================================================
 # 3. 한국 주식 데이터 엔진 (FDR + KIS API 연동)
-# ---------------------------------------------------------
+# ==============================================================================
 class StockAutomationEngineKR:
+    """FinanceDataReader 및 KIS 시세 조회를 결합한 한국 주식 메타데이터 엔진"""
+
     def __init__(self, kis_ctx: Optional[Dict[str, Any]] = None):
         logger.info("📡 한국 주식 마스터 엔진 가동 (FDR + KIS API)...")
         self.kis_ctx = kis_ctx
         self.session = get_http_session()
 
-        # FDR 오픈 피드를 통한 초고속 메모리 로드 (0.5초 소요, KRX 스크래핑 차단 0%)
+        # FDR 오픈 피드를 통한 초고속 메모리 로드
         try:
             self.df_kr_desc = fdr.StockListing('KRX-DESC').set_index('Code')
         except Exception as exc:
@@ -115,10 +141,17 @@ class StockAutomationEngineKR:
             pass
         return None
 
-# ---------------------------------------------------------
+
+# ==============================================================================
 # 4. 페이지 처리 (기본 정보 + K산업BM / G산업BM / 시장BM 동적 매핑)
-# ---------------------------------------------------------
-def process_page_kr(page: Dict[str, Any], engine: StockAutomationEngineKR, client: Any, config: Dict[str, Any]):
+# ==============================================================================
+def process_page_kr(
+    page: Dict[str, Any],
+    engine: StockAutomationEngineKR,
+    client: Any,
+    config: Dict[str, Any]
+) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
+    """개별 한국 주식 페이지의 섹터/산업/벤치마크 매핑 정보를 분석하고 업데이트 페이로드를 생성합니다."""
     pid, props = page["id"], page.get("properties", {})
     ticker_prop = props.get("티커") or props.get("Ticker")
     if not ticker_prop:
@@ -221,10 +254,12 @@ def process_page_kr(page: Dict[str, Any], engine: StockAutomationEngineKR, clien
 
     return pid, update_props, clean_t, stock_name
 
-# ---------------------------------------------------------
+
+# ==============================================================================
 # 5. 메인 실행 함수
-# ---------------------------------------------------------
-def main():
+# ==============================================================================
+def main() -> None:
+    """한국 주식 마스터 DB 동기화 메인 파이프라인"""
     client = build_notion_client(NOTION_TOKEN, use_httpx=True, timeout=60.0)
     kis_ctx = get_kis_auth_context()
     config = get_dynamic_config(client)
@@ -266,6 +301,7 @@ def main():
                 time.sleep(0.1)
 
     logger.info("✨ 한국 주식 마스터 DB 통합 업데이트 프로세스 완료")
+
 
 if __name__ == "__main__":
     main()
