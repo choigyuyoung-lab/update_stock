@@ -1,34 +1,13 @@
 import logging
-import math
 import time
-import warnings  # 👈 이 줄이 반드시 들어가 있어야 합니다!
+import warnings
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
 import yfinance as yf
 
-# 🌟 yfinance용 글로벌 HTTP 세션 설정 (Connection: close 및 자동 재시도 적용)
-SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Connection": "close"
-})
-retries = Retry(
-    total=3,
-    backoff_factor=0.2,
-    status_forcelist=[429, 500, 502, 503, 504],
-    raise_on_status=False
-)
-SESSION.mount("https://", HTTPAdapter(max_retries=retries))
-
-
-# 👈 2. yfinance 및 pandas에서 발생하는 FutureWarning 경고 숨기기
+# yfinance 및 pandas 경고 숨기기
 warnings.filterwarnings("ignore", category=FutureWarning, module="yfinance")
 warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
-
 
 from notion_utils import (
     build_notion_client,
@@ -37,29 +16,24 @@ from notion_utils import (
     kst_isoformat,
     paginate_database,
     safe_page_update,
+    get_http_session,
+    is_kr_ticker,
+    is_valid_num,
 )
 
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 DATABASE_ID = get_env_var("DATABASE_ID")
 notion = build_notion_client(NOTION_TOKEN)
 
+SESSION = get_http_session()
+
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
-
-def is_valid(val):
-    if val is None: return False
-    try:
-        if isinstance(val, str): return False
-        return not (math.isnan(val) or math.isinf(val))
-    except:
-        return False
 
 
 def get_stock_data(ticker: str, max_retries: int = 3, base_delay: float = 2.0) -> tuple:
     """
     Yahoo Finance에서 주식 데이터를 조회합니다.
-    네트워크 에러나 타임아웃이 발생하면 2~3초 대기 후 최대 3번까지 재시도합니다.
-    
     Returns: (current_price, previous_close) 튜플. 실패 시 (None, None) 반환
     """
     attempt = 1
@@ -84,7 +58,6 @@ def get_stock_data(ticker: str, max_retries: int = 3, base_delay: float = 2.0) -
             return (current_price, previous_close)
             
         except (ConnectionError, TimeoutError) as exc:
-            # 네트워크 관련 에러는 재시도
             if attempt < max_retries:
                 delay = base_delay * attempt
                 logger.info(f"   ⚠️ [{ticker}] 네트워크 에러 재시도 {attempt}/{max_retries}, {delay}초 대기")
@@ -95,7 +68,6 @@ def get_stock_data(ticker: str, max_retries: int = 3, base_delay: float = 2.0) -
             return (None, None)
             
         except Exception as exc:
-            # 기타 에러도 재시도 시도
             if attempt < max_retries:
                 delay = base_delay * attempt
                 logger.info(f"   ⚠️ [{ticker}] 조회 실패 재시도 {attempt}/{max_retries}, {delay}초 대기: {exc}")
@@ -113,29 +85,24 @@ def build_price_update_for_page(page):
     """개별 해외 주식 페이지의 가격 데이터를 수집하고 업데이트 정보를 반환합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
-    if not ticker:
-        return None
-
-    # 국내 주식은 제외
-    is_kr = (ticker.endswith((".KS", ".KQ")) or (len(ticker) >= 6 and ticker[0].isdigit())) and not ticker.endswith((".T", ".TA", ".TW"))
-    if is_kr:
+    if not ticker or is_kr_ticker(ticker):
         return None
 
     try:
         current_price, previous_close = get_stock_data(ticker)
         
         upd = {}
-        if is_valid(current_price):
+        if is_valid_num(current_price):
             upd["현재가"] = {"number": current_price}
         
-        if is_valid(previous_close) and "전일 종가" in props:
+        if is_valid_num(previous_close) and "전일 종가" in props:
             upd["전일 종가"] = {"number": previous_close}
         
         if upd:
             if "마지막 업데이트" in props:
                 upd["마지막 업데이트"] = {"date": {"start": kst_isoformat()}}
             
-            price_str = f"{round(current_price, 2)}" if is_valid(current_price) else "N/A"
+            price_str = f"{round(current_price, 2)}" if is_valid_num(current_price) else "N/A"
             return (page["id"], ticker, upd, price_str)
         else:
             logger.warning(f"⚠️ [{ticker}] 유효한 데이터 없음")
@@ -147,9 +114,7 @@ def build_price_update_for_page(page):
 
 
 def batch_collect_us_price_data(pages: list, max_workers: int = 5):
-    """
-    여러 페이지의 해외 주식 가격 데이터를 병렬로 수집합니다.
-    """
+    """ 여러 페이지의 해외 주식 가격 데이터를 병렬로 수집합니다. """
     updates = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(build_price_update_for_page, page): page for page in pages}
@@ -168,9 +133,7 @@ def batch_collect_us_price_data(pages: list, max_workers: int = 5):
 
 
 def batch_update_us_price_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.3):
-    """
-    배치 단위로 노션 해외 주식 가격 페이지를 업데이트합니다.
-    """
+    """ 배치 단위로 노션 해외 주식 가격 페이지를 업데이트합니다. """
     if not updates:
         return
     
@@ -214,14 +177,12 @@ def main():
     
     all_pages = []
     
-    # 1단계: 모든 페이지 수집
     logger.info("📋 노션 데이터베이스 스캔 중...")
     for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
         all_pages.append(page)
     
     logger.info(f"📊 총 {len(all_pages)}개 항목 발견")
     
-    # 2단계: 배치 크기로 그룹화하여 데이터 수집 (병렬화)
     batch_collect_size = 35
     updates = []
     
@@ -232,17 +193,15 @@ def main():
         batch_updates = batch_collect_us_price_data(batch, max_workers=6)
         updates.extend(batch_updates)
         
-        # 배치 간에 짧은 대기 (API 제한 준수)
         if i + batch_collect_size < len(all_pages):
             time.sleep(0.5)
     
-    # 3단계: 수집된 데이터를 배치로 노션에 업데이트
     if updates:
         logger.info(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
         batch_update_us_price_pages(notion, updates, batch_size=12, delay_between_batches=0.3)
     else:
         logger.warning("⚠️ 업데이트할 항목이 없습니다.")
-    
+
+
 if __name__ == "__main__":
     main()
-

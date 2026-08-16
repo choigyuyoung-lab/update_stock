@@ -1,27 +1,8 @@
 import logging
-import math
 import time
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
 import yfinance as yf
-
-# 🌟 yfinance용 글로벌 HTTP 세션 설정 (Connection: close 및 자동 재시도 적용)
-SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Connection": "close"
-})
-retries = Retry(
-    total=3,
-    backoff_factor=0.2,
-    status_forcelist=[429, 500, 502, 503, 504],
-    raise_on_status=False
-)
-SESSION.mount("https://", HTTPAdapter(max_retries=retries))
 
 from notion_utils import (
     build_notion_client,
@@ -30,22 +11,21 @@ from notion_utils import (
     kst_isoformat,
     paginate_database,
     safe_page_update,
+    get_http_session,
+    is_kr_ticker,
+    is_valid_num,
+    safe_float,
 )
 
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 DATABASE_ID = get_env_var("DATABASE_ID")
 notion = build_notion_client(NOTION_TOKEN)
 
+SESSION = get_http_session()
+
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def is_valid(val):
-    if val is None: return False
-    try:
-        if isinstance(val, str): return False
-        return not (math.isnan(val) or math.isinf(val))
-    except:
-        return False
 
 def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 2.0) -> dict:
     """
@@ -64,27 +44,27 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
         try:
             stock = yf.Ticker(ticker, session=SESSION)
             
-            # 1. 속도가 빠른 fast_info에서 52주 가격 정보 먼저 추출
+            # 1. fast_info에서 52주 가격 정보 먼저 추출
             f_info = stock.fast_info
-            res["52주 최고가"] = f_info.get('year_high')
-            res["52주 최저가"] = f_info.get('year_low')
+            res["52주 최고가"] = safe_float(f_info.get('year_high'))
+            res["52주 최저가"] = safe_float(f_info.get('year_low'))
 
-            # 2. 나머지 재무 정보는 info에서 추출 (해외 주식의 경우 여기서 시간이 걸릴 수 있음)
+            # 2. 나머지 재무 정보는 info에서 추출
             info = stock.info
             if info:
                 res.update({
-                    "PER": info.get("trailingPE"),
-                    "추정PER": info.get("forwardPE"),
-                    "EPS": info.get("trailingEps"),
-                    "추정EPS": info.get("forwardEps"),
-                    "PBR": info.get("priceToBook"),
-                    "BPS": info.get("bookValue"),
-                    "목표주가": info.get('targetMeanPrice'),
-                    "52주 최고가": info.get("fiftyTwoWeekHigh"),
-                    "52주 최저가": info.get("fiftyTwoWeekLow")
+                    "PER": safe_float(info.get("trailingPE")),
+                    "추정PER": safe_float(info.get("forwardPE")),
+                    "EPS": safe_float(info.get("trailingEps")),
+                    "추정EPS": safe_float(info.get("forwardEps")),
+                    "PBR": safe_float(info.get("priceToBook")),
+                    "BPS": safe_float(info.get("bookValue")),
+                    "목표주가": safe_float(info.get('targetMeanPrice')),
+                    "52주 최고가": safe_float(info.get("fiftyTwoWeekHigh")) or res["52주 최고가"],
+                    "52주 최저가": safe_float(info.get("fiftyTwoWeekLow")) or res["52주 최저가"]
                 })
-                if info.get("dividendYield"):
-                    res["배당수익률"] = info.get("dividendYield") * 100
+                if is_valid_num(info.get("dividendYield")):
+                    res["배당수익률"] = float(info.get("dividendYield")) * 100
                     
                 rec_key = str(info.get('recommendationKey', '')).lower()
                 opinion_map = {"strong_buy": "적극매수", "buy": "매수", "hold": "중립", "underperform": "매도", "sell": "적극매도"}
@@ -94,13 +74,12 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
             hist = stock.history(period="40d")
             if not hist.empty:
                 recent_20 = hist.tail(20)
-                res["직전고점"] = float(recent_20["High"].max())
-                res["직전저점"] = float(recent_20["Low"].min())
+                res["직전고점"] = safe_float(recent_20["High"].max())
+                res["직전저점"] = safe_float(recent_20["Low"].min())
 
             return res
             
         except (ConnectionError, TimeoutError) as exc:
-            # 네트워크 관련 에러는 재시도
             if attempt < max_retries:
                 delay = base_delay * attempt
                 logger.info(f"   ⚠️ [{ticker}] 네트워크 에러 재시도 {attempt}/{max_retries}, {delay}초 대기")
@@ -111,7 +90,6 @@ def get_us_fin_optimized(ticker: str, max_retries: int = 3, base_delay: float = 
             return res
             
         except Exception as exc:
-            # 기타 에러도 재시도 시도
             if attempt < max_retries:
                 delay = base_delay * attempt
                 logger.info(f"   ⚠️ [{ticker}] 조회 실패 재시도 {attempt}/{max_retries}, {delay}초 대기: {exc}")
@@ -129,12 +107,7 @@ def build_finance_update_for_page(page):
     """개별 해외 주식 페이지의 재무 데이터를 수집하고 업데이트 정보를 반환합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
-    if not ticker:
-        return None
-
-    # 국내 주식은 제외
-    is_kr = (ticker.endswith((".KS", ".KQ")) or (len(ticker) >= 6 and ticker[0].isdigit())) and not ticker.endswith((".T", ".TA", ".TW"))
-    if is_kr:
+    if not ticker or is_kr_ticker(ticker):
         return None
 
     number_keys = [
@@ -148,7 +121,7 @@ def build_finance_update_for_page(page):
         update_props = {
             key: {"number": fin_data[key]}
             for key in number_keys
-            if is_valid(fin_data.get(key)) and key in props
+            if is_valid_num(fin_data.get(key)) and key in props
         }
 
         if fin_data.get("의견"):
@@ -170,9 +143,7 @@ def build_finance_update_for_page(page):
 
 
 def batch_collect_us_finance_data(pages: list, max_workers: int = 5):
-    """
-    여러 페이지의 해외 주식 재무 데이터를 병렬로 수집합니다.
-    """
+    """ 여러 페이지의 해외 주식 재무 데이터를 병렬로 수집합니다. """
     updates = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(build_finance_update_for_page, page): page for page in pages}
@@ -191,9 +162,7 @@ def batch_collect_us_finance_data(pages: list, max_workers: int = 5):
 
 
 def batch_update_us_finance_pages(notion_client, updates: list, batch_size: int = 10, delay_between_batches: float = 0.3):
-    """
-    배치 단위로 노션 해외 주식 재무 정보 페이지를 업데이트합니다.
-    """
+    """ 배치 단위로 노션 해외 주식 재무 정보 페이지를 업데이트합니다. """
     if not updates:
         return
     
@@ -237,15 +206,13 @@ def main():
     
     all_pages = []
     
-    # 1단계: 모든 페이지 수집
     logger.info("📋 노션 데이터베이스 스캔 중...")
     for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
         all_pages.append(page)
     
     logger.info(f"📊 총 {len(all_pages)}개 항목 발견")
     
-    # 2단계: 배치 크기로 그룹화하여 데이터 수집 (병렬화)
-    batch_collect_size = 20  # 재무 정보는 시간이 걸리므로 작게
+    batch_collect_size = 20
     updates = []
     
     for batch_idx, i in enumerate(range(0, len(all_pages), batch_collect_size), 1):
@@ -255,17 +222,17 @@ def main():
         batch_updates = batch_collect_us_finance_data(batch, max_workers=4)
         updates.extend(batch_updates)
         
-        # 배치 간에 대기 (API 제한 준수)
         if i + batch_collect_size < len(all_pages):
             time.sleep(1.5)
     
-    # 3단계: 수집된 데이터를 배치로 노션에 업데이트
     if updates:
         logger.info(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
         batch_update_us_finance_pages(notion, updates, batch_size=10, delay_between_batches=0.3)
     else:
         logger.warning("⚠️ 업데이트할 항목이 없습니다.")
 
+
 if __name__ == "__main__":
     main()
+
 
