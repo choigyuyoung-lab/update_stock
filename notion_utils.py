@@ -313,7 +313,18 @@ def safe_databases_query(
             params = {"database_id": database_id, "page_size": page_size}
             if start_cursor:
                 params["start_cursor"] = start_cursor
-            return cast(Dict[str, Any], client.databases.query(**params))
+            if hasattr(client, "databases") and hasattr(client.databases, "query"):
+                return cast(Dict[str, Any], client.databases.query(**params))
+            elif hasattr(client, "data_sources") and hasattr(client.data_sources, "query"):
+                db_info = client.databases.retrieve(database_id=database_id)
+                data_sources = db_info.get("data_sources", [])
+                ds_id = data_sources[0]["id"] if data_sources else database_id
+                ds_params = {"data_source_id": ds_id, "page_size": page_size}
+                if start_cursor:
+                    ds_params["start_cursor"] = start_cursor
+                return cast(Dict[str, Any], client.data_sources.query(**ds_params))
+            else:
+                return cast(Dict[str, Any], client.databases.query(**params))
         except HTTPResponseError as error:
             status = getattr(error, "status", None)
             if status in RETRY_STATUS_CODES and attempt < max_retries:

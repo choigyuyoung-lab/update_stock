@@ -1,6 +1,6 @@
 # 1. 환경 변수 및 노션 공식 SDK
 python-dotenv>=1.0.0
-notion-client>=2.2.1
+notion-client>=2.2.1,<3.0.0
 
 # 2. 금융 데이터 수집 패키지
 yfinance>=0.2.31

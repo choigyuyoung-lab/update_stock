@@ -406,7 +406,22 @@ def sync_etf_holdings_upsert(
             }
             if start_cursor:
                 params["start_cursor"] = start_cursor
-            res = client.databases.query(**params)
+            if hasattr(client, "databases") and hasattr(client.databases, "query"):
+                res = client.databases.query(**params)
+            elif hasattr(client, "data_sources") and hasattr(client.data_sources, "query"):
+                db_info = client.databases.retrieve(database_id=ETF_DB_ID)
+                data_sources = db_info.get("data_sources", [])
+                ds_id = data_sources[0]["id"] if data_sources else ETF_DB_ID
+                ds_params = {
+                    "data_source_id": ds_id,
+                    "filter": params.get("filter"),
+                    "page_size": params.get("page_size", 100)
+                }
+                if start_cursor:
+                    ds_params["start_cursor"] = start_cursor
+                res = client.data_sources.query(**ds_params)
+            else:
+                res = client.databases.query(**params)
             existing_pages.extend(res.get("results", []))
             if not res.get("has_more"):
                 break
