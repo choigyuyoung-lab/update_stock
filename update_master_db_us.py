@@ -70,7 +70,7 @@ def get_dynamic_config_us(client: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------
 class StockAutomationEngineUS:
     def __init__(self):
-        logger.info("📡 미국 주식 마스터 엔진 가동 (S&P500 인메모리 패스트트랙)...")
+        logger.info("📡 미국 주식 마스터 엔진 가동 (S&P500 / NASDAQ / NYSE 인메모리 패스트트랙)...")
         self.session = get_http_session()
 
         try:
@@ -81,10 +81,24 @@ class StockAutomationEngineUS:
             self.df_sp500 = pd.DataFrame(columns=['Symbol', 'Name', 'Sector', 'Industry'])
             self.sp500_dict = {}
 
+        try:
+            df_nasdaq = fdr.StockListing('NASDAQ')
+            self.nasdaq_symbols = set(df_nasdaq['Symbol'].astype(str).str.strip().str.upper())
+        except Exception as e:
+            logger.warning(f"⚠️ NASDAQ 리스트 로드 실패: {e}")
+            self.nasdaq_symbols = set()
+
+        try:
+            df_nyse = fdr.StockListing('NYSE')
+            self.nyse_symbols = set(df_nyse['Symbol'].astype(str).str.strip().str.upper())
+        except Exception as e:
+            logger.warning(f"⚠️ NYSE 리스트 로드 실패: {e}")
+            self.nyse_symbols = set()
+
         self.nasdaq_100 = self._get_nas100()
 
     def _get_nas100(self):
-        """StringIO와 pandas를 활용한 나스닥 100 스크래핑"""
+        """Wikipedia를 활용한 나스닥 100 종목코드 수집"""
         urls = [
             'https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies',
             'https://en.wikipedia.org/wiki/Nasdaq-100'
@@ -100,13 +114,13 @@ class StockAutomationEngineUS:
                                 return set(df[col].astype(str).str.strip().str.upper().tolist())
             except Exception as e:
                 logger.warning(f"⚠️ 나스닥 100 수집 실패 ({url}): {e}")
-            return set()
+        return set()
 
     def get_market_label(self, clean_t: str) -> str:
         """상세 마켓 판별 로직"""
-        if clean_t in self.nasdaq_100:
+        if clean_t in self.nasdaq_symbols or clean_t in self.nasdaq_100:
             return "NASDAQ"
-        if clean_t in self.sp500_dict:
+        if clean_t in self.nyse_symbols or clean_t in self.sp500_dict:
             return "NYSE"
         return "기타"
 
@@ -131,7 +145,7 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
         name = extract_short_brand_name(sp_item.get('Name', raw_t))
         sec = sp_item.get('Sector', '')
         ind = sp_item.get('Industry', '')
-        market_label = "NASDAQ" if raw_t in engine.nasdaq_100 else "NYSE"
+        market_label = "NASDAQ" if raw_t in engine.nasdaq_100 or raw_t in engine.nasdaq_symbols else "NYSE"
     else:
         # 2. S&P 500 외 종목(ADR, 중소형주, ETF)만 YFinance 조회
         try:
@@ -141,13 +155,21 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
             name = extract_short_brand_name(raw_name)
             sec = info.get("sector", "")
             ind = info.get("industry", "")
-            if not market_label or market_label == "기타":
-                qtype = info.get("quoteType", "")
-                if qtype == "ETF":
-                    market_label = "ETF(US)"
-                else:
-                    exch = (info.get("exchange") or "").upper()
-                    market_label = "NASDAQ" if "NAS" in exch else ("NYSE" if "NY" in exch else "기타")
+            
+            qtype = (info.get("quoteType") or "").upper()
+            exch = (info.get("exchange") or "").upper()
+            full_exch = (info.get("fullExchangeName") or "").upper()
+
+            if qtype == "ETF":
+                market_label = "ETF(US)"
+            elif exch in ["NMS", "NGM", "NCM"] or "NAS" in exch or "NASDAQ" in full_exch or raw_t in engine.nasdaq_symbols:
+                market_label = "NASDAQ"
+            elif exch in ["NYQ", "NYC"] or "NY" in exch or "NYSE" in full_exch or raw_t in engine.nyse_symbols:
+                market_label = "NYSE"
+            elif exch in ["ASE", "PCX", "BATS", "BTQ"] or "AMEX" in full_exch or "ARCA" in full_exch:
+                market_label = "AMEX"
+            elif raw_t.endswith(".T"):
+                market_label = "기타"
         except Exception as exc:
             logger.warning(f"⚠️ [{raw_t}] YFinance 조회 실패: {exc}")
             name = raw_t
@@ -156,7 +178,7 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
     if market_label != "기타":
         if raw_t in engine.nasdaq_100:
             target_m_t = "QQQ"
-        elif raw_t in engine.sp500_dict:
+        elif raw_t in engine.sp500_dict or market_label == "NYSE":
             target_m_t = "SPY"
         elif market_label == "NASDAQ":
             target_m_t = "ONEQ"
@@ -165,9 +187,9 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
         else:
             target_m_t = "VTI"
 
-        text_corpus = f"{raw_t} {name} {sec} {ind}".upper()
-        us_industry_bms = [bm for bm in config["benchmarks"] if bm["category"] == "산업" and bm["country"] == "US"]
-        target_ind_t = find_best_bm(text_corpus, us_industry_bms)
+    text_corpus = f"{raw_t} {name} {sec} {ind}".upper()
+    us_industry_bms = [bm for bm in config["benchmarks"] if bm["category"] == "산업" and bm["country"] == "US"]
+    target_ind_t = find_best_bm(text_corpus, us_industry_bms)
 
     update_props: Dict[str, Any] = {
         "종목명": make_rich_text(name),
