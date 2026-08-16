@@ -280,6 +280,7 @@ class StockMatchEngine:
             return inv_id, matched_ticker, clean_brand
 
         # 4. 미매칭 fallback (영문/숫자 티커 유지)
+        short_brand = extract_short_brand_name(n)
         fallback_t = t if (re.match(r'^[A-Z0-9.\-_]{1,10}$', t) and not t.isdigit()) else ""
         return None, fallback_t, short_brand
 
