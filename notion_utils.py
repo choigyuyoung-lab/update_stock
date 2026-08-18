@@ -68,7 +68,7 @@ def get_http_session(user_agent: Optional[str] = None) -> requests.Session:
 
 
 # ==============================================================================
-# 2. 환경 변수 및 시간 처리 유틸리티
+# 2. 환경 변수, DB ID 및 시간 처리 유틸리티
 # ==============================================================================
 def get_env_var(name: str, required: bool = True, default: Optional[str] = None) -> str:
     """환경 변수를 안전하게 가져옵니다. 필수 변수 누락 시 오류를 발생시킵니다."""
@@ -78,9 +78,55 @@ def get_env_var(name: str, required: bool = True, default: Optional[str] = None)
     return cast(str, value)
 
 
+def get_kst_now() -> datetime:
+    """한국 표준시(KST, Asia/Seoul) 기준 현재 datetime 객체를 반환합니다."""
+    return datetime.now(ZoneInfo("Asia/Seoul"))
+
+
+def get_kst_str(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """한국 표준시(KST) 기준 현재 일시를 지정된 포맷 문자열로 반환합니다."""
+    return get_kst_now().strftime(fmt)
+
+
 def kst_isoformat() -> str:
     """전 세계 어느 가상 서버에서 실행되든 한국 표준시(KST, Asia/Seoul)를 기준으로 ISO 일시를 반환합니다."""
-    return datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+    return get_kst_now().isoformat()
+
+
+def get_db_id(
+    primary_name: str,
+    fallback_names: Optional[List[str]] = None,
+    default: str = "",
+    required: bool = False
+) -> str:
+    """
+    지정된 주요 환경변수 및 폴백 목록에서 첫 번째로 유효한 노션 데이터베이스 ID(32자리)를 안전하게 로드합니다.
+    """
+    candidates = [primary_name] + (fallback_names or [])
+    for name in candidates:
+        val = os.environ.get(name)
+        if val and val.strip():
+            return val.strip()
+
+    if required:
+        raise EnvironmentError(f"필수 노션 데이터베이스 환경변수 '{primary_name}'이(가) 설정되지 않았습니다.")
+
+    return default
+
+
+def get_all_portfolio_db_ids() -> Dict[str, str]:
+    """
+    포트폴리오 분석 및 리포트 파이프라인에 필요한 7대 노션 DB ID를 안전하게 일괄 로드하여 딕셔너리로 반환합니다.
+    """
+    return {
+        "investment_db_id": get_db_id("DATABASE_ID", ["INVESTMENT_DB_ID", "INVESTMENT_DATABASE_ID"], required=False),
+        "account_status_db_id": get_db_id("ACCOUNT_STATUS_DB_ID", ["ACCOUNT_STATUS_DATABASE_ID"]),
+        "stock_holdings_db_id": get_db_id("STOCK_HOLDINGS_DB_ID", ["STOCK_HOLDINGS_DATABASE_ID"]),
+        "account_holdings_db_id": get_db_id("ACCOUNT_HOLDINGS_DB_ID", ["ACCOUNT_HOLDINGS_DATABASE_ID"]),
+        "trade_log_db_id": get_db_id("TRADE_LOG_DB_ID", ["TRADE_LOG_DATABASE_ID"]),
+        "cash_flow_db_id": get_db_id("CASH_FLOW_DB_ID", ["CASH_FLOW_DATABASE_ID"]),
+        "notion_report_db_id": get_db_id("NOTION_REPORT_DB_ID", ["REPORT_DATABASE_ID", "REPORT_DB_ID"]),
+    }
 
 
 # ==============================================================================

@@ -1,10 +1,17 @@
+# -*- coding: utf-8 -*-
 """
 ai_service.py
 =============
-Google Gemini API (google-genai SDK)를 활용하여
-포트폴리오 자산배분 데이터를 분석하고 전문적인 올웨더 진단 리포트를 생성하는 AI 서비스 모듈입니다.
+Google Gemini API (google-genai SDK)를 활용하여 포트폴리오 자산배분 데이터를 분석하고
+전문적인 한-미 듀얼 올웨더 진단 및 리밸런싱 리포트를 자동 생성하는 AI 서비스 모듈입니다.
+- 데이터 입력: 다차원 포트폴리오 집계 데이터 (6대 자산군 비중, 퀀트 지표, 계좌별 세제 특성 등)
+- 핵심 기능: Gemini 2.5 Flash 기반 진단 생성, 모델 폴백(Fallback), 사고 토큰 예산 제어
+- 안정성: 지수 백오프 기반 재시도(Retry), 완결성(STOP) 검증 및 안전한 에러 핸들링
 """
 
+# ==============================================================================
+# 0. 라이브러리 임포트 및 시스템 설정
+# ==============================================================================
 import os
 import sys
 import time
@@ -23,6 +30,7 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
+from notion_utils import get_env_var
 from config_portfolio import (
     GEMINI_MODEL_NAME,
     GEMINI_FALLBACK_MODEL,
@@ -33,6 +41,18 @@ from config_portfolio import (
 logger = logging.getLogger("AIService")
 
 
+# ==============================================================================
+# 1. AI 서비스 설정 및 기본 상수
+# ==============================================================================
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BASE_DELAY = 3.0
+DEFAULT_THINKING_BUDGET = 1024
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+
+
+# ==============================================================================
+# 2. Google GenAI 클라이언트 및 서비스 클래스
+# ==============================================================================
 class AIService:
     """Google GenAI SDK 기반 자산배분 진단 AI 서비스"""
 
@@ -70,13 +90,15 @@ class AIService:
     def generate_portfolio_diagnosis(
         self,
         portfolio_summary: Dict[str, Any],
-        max_retries: int = 3,
-        base_delay: float = 3.0
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        base_delay: float = DEFAULT_BASE_DELAY
     ) -> str:
         """
         포트폴리오 요약 데이터를 입력받아 Gemini 2.5 Flash를 통해 올웨더 진단 리포트를 생성합니다.
         
         :param portfolio_summary: 포트폴리오 집계 데이터 딕셔너리
+        :param max_retries: 최대 재시도 횟수
+        :param base_delay: 기본 대기 시간(초)
         :return: 마크다운 형식의 진단 리포트 문자열
         """
         if not self.is_available():
@@ -101,8 +123,6 @@ class AIService:
         }
         user_prompt = USER_PROMPT_TEMPLATE.format(**format_kwargs)
 
-
-
         from google.genai import types
 
         # 1차 시도: gemini-2.5-flash, 실패 시 gemini-2.0-flash 전환
@@ -116,10 +136,10 @@ class AIService:
                     config_kwargs: Dict[str, Any] = {
                         "system_instruction": SYSTEM_PROMPT,
                         "temperature": 0.2,
-                        "max_output_tokens": 8192,
+                        "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
                     }
                     if "2.5" in model_name:
-                        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=1024)
+                        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=DEFAULT_THINKING_BUDGET)
 
                     config = types.GenerateContentConfig(**config_kwargs)
                     

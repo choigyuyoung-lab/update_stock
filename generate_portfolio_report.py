@@ -34,6 +34,9 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 from notion_utils import (
     build_notion_client,
     get_env_var,
+    get_all_portfolio_db_ids,
+    get_kst_now,
+    get_kst_str,
     paginate_database,
     get_prop_value,
     kst_isoformat,
@@ -50,60 +53,19 @@ from ai_service import AIService
 
 
 # ==============================================================================
-# 1. 환경 변수 및 DB ID 설정 (보안 환경변수 관리)
+# 1. 환경 변수 및 다중 DB ID 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 
-# 1. 투자주 DB (기본 마스터)
-INVESTMENT_DB_ID = (
-    os.environ.get("DATABASE_ID")
-    or os.environ.get("INVESTMENT_DB_ID")
-    or get_env_var("DATABASE_ID")
-)
-
-# 2. 투자계좌현황 DB (계좌별 총자산/현금예수금/수익률)
-ACCOUNT_STATUS_DB_ID = (
-    os.environ.get("ACCOUNT_STATUS_DB_ID")
-    or os.environ.get("ACCOUNT_STATUS_DATABASE_ID")
-    or ""
-).strip()
-
-# 3. 종목별 보유현황 DB (포트폴리오 테마/선택/국가)
-STOCK_HOLDINGS_DB_ID = (
-    os.environ.get("STOCK_HOLDINGS_DB_ID")
-    or os.environ.get("STOCK_HOLDINGS_DATABASE_ID")
-    or ""
-).strip()
-
-# 4. 계좌별 보유종목 DB (계좌별 수량/평가액/가이드)
-ACCOUNT_HOLDINGS_DB_ID = (
-    os.environ.get("ACCOUNT_HOLDINGS_DB_ID")
-    or os.environ.get("ACCOUNT_HOLDINGS_DATABASE_ID")
-    or ""
-).strip()
-
-# 5. 매매일지 DB (원천 거래 내역)
-TRADE_LOG_DB_ID = (
-    os.environ.get("TRADE_LOG_DB_ID")
-    or os.environ.get("TRADE_LOG_DATABASE_ID")
-    or ""
-).strip()
-
-# 6. 입출금현황 DB (현금 입출금/배당/수수료)
-CASH_FLOW_DB_ID = (
-    os.environ.get("CASH_FLOW_DB_ID")
-    or os.environ.get("CASH_FLOW_DATABASE_ID")
-    or ""
-).strip()
-
-# 7. 포트폴리오 분석 리포트 DB (AI 리포트 적재용)
-NOTION_REPORT_DB_ID = (
-    os.environ.get("NOTION_REPORT_DB_ID")
-    or os.environ.get("REPORT_DATABASE_ID")
-    or os.environ.get("REPORT_DB_ID")
-    or ""
-).strip()
-
+# 7대 노션 데이터베이스 ID 일괄 로드 (notion_utils 헬퍼)
+PORTFOLIO_DB_IDS = get_all_portfolio_db_ids()
+INVESTMENT_DB_ID = PORTFOLIO_DB_IDS["investment_db_id"]
+ACCOUNT_STATUS_DB_ID = PORTFOLIO_DB_IDS["account_status_db_id"]
+STOCK_HOLDINGS_DB_ID = PORTFOLIO_DB_IDS["stock_holdings_db_id"]
+ACCOUNT_HOLDINGS_DB_ID = PORTFOLIO_DB_IDS["account_holdings_db_id"]
+TRADE_LOG_DB_ID = PORTFOLIO_DB_IDS["trade_log_db_id"]
+CASH_FLOW_DB_ID = PORTFOLIO_DB_IDS["cash_flow_db_id"]
+NOTION_REPORT_DB_ID = PORTFOLIO_DB_IDS["notion_report_db_id"]
 
 REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 
@@ -674,7 +636,7 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
 
     active_holdings_count = sum(1 for h in holdings if h["eval_asset"] > 0)
     return {
-        "analysis_date": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S (KST)"),
+        "analysis_date": get_kst_str("%Y-%m-%d %H:%M:%S (KST)"),
         "total_eval_krw": total_eval_krw,
         "stock_total_krw": stock_total_krw,
         "cash_total_krw": cash_total_krw,
@@ -697,7 +659,7 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
 def save_report_locally(report_markdown: str, date_str: str) -> str:
     """리포트를 로컬 reports/ 디렉토리에 백업 파일로 저장합니다."""
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    filename = f"portfolio_report_{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d_%H%M%S')}.md"
+    filename = f"portfolio_report_{get_kst_str('%Y%m%d_%H%M%S')}.md"
     file_path = os.path.join(REPORTS_DIR, filename)
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(report_markdown)
@@ -719,7 +681,7 @@ def upload_report_to_notion(
         print("ℹ️ NOTION_REPORT_DB_ID가 설정되지 않아 노션 적재를 건너뜁니다.")
         return False
 
-    title_str = f"{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%y%m%d')}/자산리포트"
+    title_str = f"{get_kst_str('%y%m%d')}/자산리포트"
     print(f"📤 [Notion DB] 리포트 페이지 생성 중: '{title_str}'...")
 
 
