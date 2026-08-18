@@ -732,42 +732,38 @@ def upload_report_to_notion(
         f"{fitness_grade} | 핵심: {actions_summary_str}"
     )
 
-    page_properties: Dict[str, Any] = {}
+    # 노션 '포트폴리오 분석' DB 7대 컬럼 1:1 명시적 정밀 매칭
+    title_col = next((k for k in db_props if db_props[k].get("type") == "title"), "이름")
+    date_col = next((k for k in db_props if "날짜" in k or "일자" in k or db_props[k].get("type") == "date"), "날짜")
+    summary_col = next((k for k in db_props if "요약" in k or db_props[k].get("type") == "rich_text"), "요약")
+    asset_col = next((k for k in db_props if "총 평가자산" in k or "총평가자산" in k or "자산" in k), "총 평가자산")
+    cash_col = next((k for k in db_props if "현금 비중" in k or "현금비중" in k or "현금" in k), "현금 비중")
+    fitness_col = next((k for k in db_props if "적합도" in k or "올웨더" in k or db_props[k].get("type") == "select"), "올웨더 적합도")
+    actions_col = next((k for k in db_props if "조치" in k or "액션" in k or db_props[k].get("type") == "multi_select"), "핵심 조치")
 
-    for prop_name, prop_val in db_props.items():
-        ptype = prop_val.get("type")
-        pname = prop_name.strip()
-
-        # 1) Title (이름)
-        if ptype == "title":
-            page_properties[prop_name] = {
-                "title": [{"type": "text", "text": {"content": title_str}}]
-            }
-
-        # 2) Date (날짜/일자)
-        elif ptype == "date":
-            page_properties[prop_name] = {"date": {"start": kst_isoformat()}}
-
-        # 3) Number - 현금 비중 (%) vs 총 평가자산
-        elif ptype == "number":
-            if any(k in pname for k in ["현금", "Cash", "%", "비중", "Ratio"]):
-                page_properties[prop_name] = {"number": round(cash_pct, 1)}
-            else:
-                page_properties[prop_name] = {"number": round(total_eval_krw)}
-
-        # 4) Select - 올웨더 적합도
-        elif ptype == "select":
-            page_properties[prop_name] = {"select": {"name": fitness_grade}}
-
-        # 5) Multi-Select - 핵심 조치
-        elif ptype == "multi_select":
-            page_properties[prop_name] = {"multi_select": [{"name": kw} for kw in action_keywords]}
-
-        # 6) Rich Text - 요약
-        elif ptype == "rich_text":
-            page_properties[prop_name] = {
-                "rich_text": [{"type": "text", "text": {"content": summary_text}}]
-            }
+    page_properties: Dict[str, Any] = {
+        title_col: {
+            "title": [{"type": "text", "text": {"content": title_str}}]
+        },
+        date_col: {
+            "date": {"start": kst_isoformat()}
+        },
+        summary_col: {
+            "rich_text": [{"type": "text", "text": {"content": summary_text}}]
+        },
+        asset_col: {
+            "number": round(total_eval_krw)
+        },
+        cash_col: {
+            "number": round(cash_pct, 1)
+        },
+        fitness_col: {
+            "select": {"name": fitness_grade}
+        },
+        actions_col: {
+            "multi_select": [{"name": kw} for kw in action_keywords]
+        },
+    }
 
     print(f"📋 [Notion DB] 주입될 페이지 속성 ({len(page_properties)}개 매핑됨): {list(page_properties.keys())}")
     for k, v in page_properties.items():
