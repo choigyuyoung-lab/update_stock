@@ -1,11 +1,14 @@
+# -*- coding: utf-8 -*-
 """
 generate_portfolio_report.py
 =============================
 노션(Notion)의 4대 포트폴리오 데이터베이스
 (투자계좌현황, 종목별 보유현황, 계좌별 보유종목, 투자주 DB)와 숨김/계산 퀀트 열
 (52주 위치, 안전마진, 투자가이드, 계좌별 예수금, 배당수익률, 평가비중 등)을 전방위로 수집 및 결합하고,
-Google Gemini 2.5 Flash API를 통해 전문 자산배분 진단 리포트를 생성하여
-노션 포트폴리오 분석 리포트 DB에 자동 적재 및 로컬 백업을 수행하는 파이프라인입니다.
+FinanceDataReader 기반 실시간 글로벌 매크로 지표(환율, 금리, 장단기금리차, 유가, 금) 및
+Google Gemini API (Google Search Grounding 팩트체크)를 연동하여
+전문적인 「K-올라운드 마스터」 자산배분 진단 리포트를 생성한 후
+노션 포트폴리오 분석 리포트 DB에 자동 적재 및 로컬 백업을 수행하는 오케스트레이터입니다.
 """
 
 # ==============================================================================
@@ -15,6 +18,7 @@ import os
 import sys
 import time
 import json
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple, Set
@@ -45,11 +49,17 @@ from notion_utils import (
     safe_float,
 )
 from config_portfolio import (
-    DUAL_ALL_WEATHER_CONFIG,
+    K_ALL_ROUND_MASTER_CONFIG,
+    TARGET_ALLOCATION,
     ASSET_ORDER,
+    REBALANCING_DRIFT_THRESHOLD_PCT,
+    FX_MACRO_RULES,
     classify_asset,
 )
+from macro_service import MacroService
 from ai_service import AIService
+
+logger = logging.getLogger("PortfolioReport")
 
 
 # ==============================================================================
@@ -240,10 +250,10 @@ def collect_account_holdings_detail(client: Any, db_id: str) -> Dict[str, List[D
 
     return account_holdings_map
 
+
 def fetch_latest_previous_report(client: Any, db_id: str) -> Optional[Dict[str, Any]]:
     """
     [포트폴리오 분석 DB]를 조회하여 가장 최근에 생성된 직전(전주) 리포트 스냅샷을 수집합니다.
-    (현재 실행 직전에 등록된 최신 1건 추출)
     """
     if not db_id:
         return None
@@ -265,7 +275,7 @@ def fetch_latest_previous_report(client: Any, db_id: str) -> Optional[Dict[str, 
         date_raw = get_prop_value(props, ["날짜", "Date"]) or ""
         total_eval = safe_float(get_prop_value(props, ["총 평가자산", "총자산", "평가액"])) or 0.0
         cash_pct = safe_float(get_prop_value(props, ["현금 비중", "현금비중"])) or 0.0
-        fitness = str(get_prop_value(props, ["올웨더 적합도", "적합도"]) or "")
+        fitness = str(get_prop_value(props, ["올웨더 적합도", "적합도", "올라운드 적합도"]) or "")
         actions = get_prop_value(props, ["핵심 조치", "핵심조치"]) or []
         if isinstance(actions, str):
             actions = [actions]
@@ -306,7 +316,6 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
     # 3. 계좌별 보유종목 상세 수집
     account_holdings = collect_account_holdings_detail(client, ACCOUNT_HOLDINGS_DB_ID)
 
-
     # 4. 투자주 DB(마스터) 전수 스캔 (숨김 퀀트 지표 포함)
     print("📋 [Notion] 4. 투자주 DB(마스터) 스캔 시작...")
     raw_holdings: List[Dict[str, Any]] = []
@@ -345,14 +354,11 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
         guides = list({d["guide"] for d in acc_details if d.get("guide")})
 
         # 실제 개인 보유 평가액 우선 적용
-        # (종목별 보유현황 DB 및 계좌별 보유종목 DB의 실제 평가금액을 최우선 적용)
         actual_user_eval = 0.0
         if meta_info and meta_info.get("eval_amt", 0) > 0:
             actual_user_eval = meta_info["eval_amt"]
         elif acc_details:
             actual_user_eval = sum(d.get("eval_amt", 0) for d in acc_details if d.get("eval_amt", 0) > 0)
-
-
 
         is_invested = (
             actual_user_eval > 0
@@ -432,14 +438,16 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
     }
 
 
-
-
 # ==============================================================================
-# 3. 올웨더 자산배분 통계 분석 및 프롬프트 데이터 빌더
+# 3. K-올라운드 마스터 7대 자산배분 통계 분석부
 # ==============================================================================
-def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str, Any]:
+def analyze_integrated_portfolio(
+    portfolio_dataset: Dict[str, Any],
+    macro_snapshot: Dict[str, Any]
+) -> Dict[str, Any]:
     """
-    통합 포트폴리오 데이터를 6대 올웨더 자산군, 테마별, 퀀트 지표별로 분석하고 지표를 산출합니다.
+    통합 포트폴리오 데이터를 「K-올라운드 마스터」 7대 자산군, 테마별, 퀀트 지표별로 분석하고
+    실시간 매크로 스냅샷을 결합하여 분석 지표를 산출합니다.
     """
     holdings = portfolio_dataset["holdings"]
     account_status = portfolio_dataset["account_status"]
@@ -450,32 +458,33 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
     total_eval_krw = stock_total_krw + cash_total_krw
     cash_pct = (cash_total_krw / total_eval_krw * 100.0) if total_eval_krw > 0 else 0.0
 
-    # 2. 자산군별 구조 초기화
+    # 2. 7대 자산군 구조 초기화
     asset_groups: Dict[str, Dict[str, Any]] = {
         code: {
             "code": code,
             "name": cfg["name"],
             "target_pct": cfg["target_pct"],
             "currency_exposure": cfg["currency_exposure"],
+            "role": cfg["role"],
             "eval_krw": 0.0,
             "actual_pct": 0.0,
             "drift_pct": 0.0,
             "rebalance_krw": 0.0,
             "holdings": [],
         }
-        for code, cfg in DUAL_ALL_WEATHER_CONFIG.items()
+        for code, cfg in K_ALL_ROUND_MASTER_CONFIG.items()
     }
 
-    # 3. 현금 예수금을 '국내중기채/단기/현금'에 자동 편입
+    # 3. 현금 예수금을 '국내 채권 & 단기자금'에 안전자산/단기자금으로 자동 편입
     if cash_total_krw > 0:
-        asset_groups["KR_MED_SHORT_BOND_CASH"]["eval_krw"] += cash_total_krw
-        asset_groups["KR_MED_SHORT_BOND_CASH"]["holdings"].append({
+        asset_groups["KR_BOND_SHORT"]["eval_krw"] += cash_total_krw
+        asset_groups["KR_BOND_SHORT"]["holdings"].append({
             "ticker": "CASH_KRW",
             "name": "원화 현금 / 계좌 예수금",
             "eval_asset": cash_total_krw,
             "current_price": 1.0,
-            "asset_code": "KR_MED_SHORT_BOND_CASH",
-            "asset_name": "국내중기채/단기/현금",
+            "asset_code": "KR_BOND_SHORT",
+            "asset_name": "국내 채권 & 단기자금",
             "theme": "Safe/Cash",
             "pos_52w": None,
             "margin_of_safety": "",
@@ -495,7 +504,7 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
             custom_selection=h["selection"],
         )
         if code not in asset_groups:
-            code = "US_EQUITY"
+            code = "US_CORE_INDEX"
 
         h_info = {
             "ticker": h["ticker"],
@@ -519,7 +528,7 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
         t_key = h_info["theme"]
         theme_distribution[t_key] = theme_distribution.get(t_key, 0.0) + h["eval_asset"]
 
-    # 5. 비중 및 괴리율(Drift) 계산
+    # 5. 7대 자산군 비중 및 괴리율(Drift, 임계치 ±3.0%p) 계산
     for code in ASSET_ORDER:
         grp = asset_groups[code]
         if total_eval_krw > 0:
@@ -534,22 +543,22 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
 
     # 6. 마크다운 요약표 생성
     summary_lines = [
-        "| 자산군 | 목표비중(%) | 현재평가액(원) | 현재비중(%) | 괴리율(%p) | 상태 | 리밸런싱 필요액(원) |",
-        "|---|---|---|---|---|---|---|",
+        "| 자산군 | 역할 & 통화 | 목표비중(%) | 현재평가액(원) | 현재비중(%) | 괴리율(%p) | 상태 (임계치 ±3.0%p) | 리밸런싱 필요액(원) |",
+        "|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|",
     ]
     for code in ASSET_ORDER:
         grp = asset_groups[code]
         drift = grp["drift_pct"]
-        if abs(drift) <= 2.0:
-            status = "적정"
-        elif drift > 2.0:
-            status = f"초과 (+{drift:.1f}%p)"
+        if abs(drift) <= REBALANCING_DRIFT_THRESHOLD_PCT:
+            status = "🟢 적정"
+        elif drift > REBALANCING_DRIFT_THRESHOLD_PCT:
+            status = f"🔴 과다 (+{drift:.1f}%p)"
         else:
-            status = f"부족 ({drift:.1f}%p)"
+            status = f"🔵 부족 ({drift:.1f}%p)"
             
         rebal_str = f"{grp['rebalance_krw']:+,.0f} 원" if total_eval_krw > 0 else "0 원"
         summary_lines.append(
-            f"| {grp['name']} ({grp['currency_exposure']}) | {grp['target_pct']:.1f}% | {grp['eval_krw']:,.0f} 원 | "
+            f"| **{grp['name']}** | {grp['currency_exposure']} | {grp['target_pct']:.1f}% | {grp['eval_krw']:,.0f} 원 | "
             f"{grp['actual_pct']:.1f}% | {drift:+.1f}%p | {status} | {rebal_str} |"
         )
     asset_summary_table = "\n".join(summary_lines)
@@ -583,7 +592,7 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
         detail_lines.append(f"#### [{grp['name']}] 목표 {grp['target_pct']:.1f}% / 현재 {grp['actual_pct']:.1f}% (총 {grp['eval_krw']:,.0f}원)")
         
         if not active_items:
-            detail_lines.append("  - (실제 보유 자산 없음: 신규 편입 필요)")
+            detail_lines.append("  - (실제 보유 자산 없음: 목표 비중 도달을 위한 신규 편입 필요)")
         else:
             for item in active_items:
                 weight_in_portfolio = (item["eval_asset"] / total_eval_krw * 100.0) if total_eval_krw > 0 else 0.0
@@ -627,7 +636,7 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
             f"- **총 평가자산**: {prev_total:,.0f} 원 ➡️ {total_eval_krw:,.0f} 원 "
             f"(**주간 증감: {sign_total}{diff_total_krw:,.0f} 원, {sign_total}{diff_total_pct:.2f}%**)\n"
             f"- **현금 비중**: {prev_cash:.1f}% ➡️ {cash_pct:.1f}% (**주간 변화: {sign_cash}{diff_cash_pct:.1f}%p**)\n"
-            f"- **올웨더 적합도**: {prev_fitness}\n"
+            f"- **올라운드 적합도**: {prev_fitness}\n"
             f"- **직전 권고 핵심 조치**: {prev_actions}\n"
             f"- **직전 요약**: {prev_report.get('summary', '')}"
         )
@@ -635,8 +644,13 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
         prev_report_summary_text = "- **비교 기준**: 직전 리포트 없음 (금주 리포트를 기준점(Baseline)으로 최초 생성)"
 
     active_holdings_count = sum(1 for h in holdings if h["eval_asset"] > 0)
+    
     return {
         "analysis_date": get_kst_str("%Y-%m-%d %H:%M:%S (KST)"),
+        "macro_as_of_date": macro_snapshot.get("as_of_date", get_kst_str("%Y-%m-%d")),
+        "macro_table_markdown": macro_snapshot.get("macro_table_markdown", ""),
+        "fx_rule_status": macro_snapshot.get("fx_rule_status", ""),
+        "fx_rate": macro_snapshot.get("fx_rate", 1400.0),
         "total_eval_krw": total_eval_krw,
         "stock_total_krw": stock_total_krw,
         "cash_total_krw": cash_total_krw,
@@ -650,7 +664,6 @@ def analyze_integrated_portfolio(portfolio_dataset: Dict[str, Any]) -> Dict[str,
         "holdings_detail_text": holdings_detail_text,
         "prev_report_summary_text": prev_report_summary_text,
     }
-
 
 
 # ==============================================================================
@@ -684,8 +697,6 @@ def upload_report_to_notion(
     title_str = f"{get_kst_str('%y%m%d')}/자산리포트"
     print(f"📤 [Notion DB] 리포트 페이지 생성 중: '{title_str}'...")
 
-
-
     try:
         db_info = client.databases.retrieve(database_id=database_id)
         db_props = db_info.get("properties", {})
@@ -697,31 +708,36 @@ def upload_report_to_notion(
     total_eval_krw = summary.get("total_eval_krw", 0.0)
     cash_total_krw = summary.get("cash_total_krw", 0.0)
     cash_pct = (cash_total_krw / total_eval_krw * 100.0) if total_eval_krw > 0 else 0.0
+    fx_rate = summary.get("fx_rate", 1400.0)
 
-    # 1. 올웨더 적합도 등급 산출 (총 절대 괴리율 기반)
+    # 1. K-올라운드 적합도 등급 산출 (총 절대 괴리율 기반)
     asset_groups = summary.get("asset_groups", {})
     total_abs_drift = sum(abs(grp.get("drift_pct", 0.0)) for grp in asset_groups.values())
-    if total_abs_drift <= 25.0:
+    if total_abs_drift <= 15.0:
         fitness_grade = "🟢 최적 (85점 이상)"
-    elif total_abs_drift <= 60.0:
+    elif total_abs_drift <= 35.0:
         fitness_grade = "🟡 주의 (70~84점)"
     else:
         fitness_grade = "🔴 리밸런싱 시급 (70점 미만)"
 
-    # 2. 핵심 조치 키워드 다중선택 목록 산출
+    # 2. 핵심 조치 키워드 다중선택 목록 산출 (임계치 ±3.0%p 기준)
     action_keywords = []
-    if asset_groups.get("US_LONG_BOND", {}).get("drift_pct", 0.0) <= -10.0:
+    if asset_groups.get("US_CORE_INDEX", {}).get("drift_pct", 0.0) <= -3.0:
+        action_keywords.append("미국대표지수 매수")
+    if asset_groups.get("DIVIDEND_GROWTH", {}).get("drift_pct", 0.0) <= -3.0:
+        action_keywords.append("배당성장 편입")
+    if asset_groups.get("KR_EQUITY", {}).get("drift_pct", 0.0) >= 3.0:
+        action_keywords.append("국내주식 비중축소")
+    elif asset_groups.get("KR_EQUITY", {}).get("drift_pct", 0.0) <= -3.0:
+        action_keywords.append("국내밸류업 매수")
+    if asset_groups.get("US_LONG_BOND", {}).get("drift_pct", 0.0) <= -3.0:
         action_keywords.append("미국장기채 매수")
-    if asset_groups.get("KR_EQUITY", {}).get("drift_pct", 0.0) >= 15.0:
-        action_keywords.append("한국주식 비중축소")
-    if asset_groups.get("US_EQUITY", {}).get("drift_pct", 0.0) <= -5.0:
-        action_keywords.append("미국주식 매수")
-    if asset_groups.get("GOLD", {}).get("drift_pct", 0.0) <= -5.0:
+    if asset_groups.get("GOLD", {}).get("drift_pct", 0.0) <= -3.0:
         action_keywords.append("금 편입")
-    if asset_groups.get("COMMODITY_USD", {}).get("drift_pct", 0.0) <= -5.0:
-        action_keywords.append("원자재/달러 편입")
-    if asset_groups.get("KR_MED_SHORT_BOND_CASH", {}).get("drift_pct", 0.0) <= -5.0:
-        action_keywords.append("현금/단기채 확보")
+    if asset_groups.get("COMMODITY_CASH", {}).get("drift_pct", 0.0) <= -3.0:
+        action_keywords.append("원자재/달러 확보")
+    if asset_groups.get("KR_BOND_SHORT", {}).get("drift_pct", 0.0) <= -3.0:
+        action_keywords.append("단기채/현금 확보")
     if not action_keywords:
         action_keywords.append("비중 유지 (적정)")
 
@@ -729,16 +745,16 @@ def upload_report_to_notion(
     actions_summary_str = ", ".join(action_keywords[:2])
     summary_text = (
         f"총자산 {total_eval_krw:,.0f}원 (현금 {cash_total_krw:,.0f}원, {cash_pct:.1f}%) | "
-        f"{fitness_grade} | 핵심: {actions_summary_str}"
+        f"{fitness_grade} | 환율 {fx_rate:,.1f}원 | 핵심: {actions_summary_str}"
     )
 
-    # 노션 '포트폴리오 분석' DB 7대 컬럼 1:1 명시적 정밀 매칭
+    # 노션 '포트폴리오 분석' DB 컬럼 1:1 동적 매칭
     title_col = next((k for k in db_props if db_props[k].get("type") == "title"), "이름")
     date_col = next((k for k in db_props if "날짜" in k or "일자" in k or db_props[k].get("type") == "date"), "날짜")
     summary_col = next((k for k in db_props if "요약" in k or db_props[k].get("type") == "rich_text"), "요약")
     asset_col = next((k for k in db_props if "총 평가자산" in k or "총평가자산" in k or "자산" in k), "총 평가자산")
     cash_col = next((k for k in db_props if "현금 비중" in k or "현금비중" in k or "현금" in k), "현금 비중")
-    fitness_col = next((k for k in db_props if "적합도" in k or "올웨더" in k or db_props[k].get("type") == "select"), "올웨더 적합도")
+    fitness_col = next((k for k in db_props if "적합도" in k or "올웨더" in k or "올라운드" in k or db_props[k].get("type") == "select"), "올웨더 적합도")
     actions_col = next((k for k in db_props if "조치" in k or "액션" in k or db_props[k].get("type") == "multi_select"), "핵심 조치")
 
     page_properties: Dict[str, Any] = {
@@ -794,56 +810,63 @@ def upload_report_to_notion(
 # 5. 메인 실행 함수
 # ==============================================================================
 def main() -> None:
-    """한-미 듀얼 올웨더 포트폴리오 진단 및 리포트 자동 생성 파이프라인 메인"""
-    print("=" * 75)
-    print("🚀 [올웨더 리포트 파이프라인] 4대 노션 DB 통합 포트폴리오 진단 시작")
-    print("=" * 75)
+    """K-올라운드 마스터 포트폴리오 진단 및 리포트 자동 생성 파이프라인 메인"""
+    print("=" * 80)
+    print("🚀 [K-올라운드 마스터] 실시간 매크로 분석 & 4대 DB 통합 자산배분 진단 시작")
+    print("=" * 80)
 
     notion = build_notion_client(NOTION_TOKEN)
+    macro_service = MacroService()
     ai_service = AIService()
 
-    # 1. 4대 DB 통합 데이터 수집 (숨김/계산 퀀트 열 포함)
+    # 1. 실시간 매크로 정량 지표 수집
+    macro_snapshot = macro_service.get_macro_snapshot()
+
+    # 2. 4대 노션 DB 통합 데이터 수집 (숨김/계산 퀀트 열 포함)
     portfolio_dataset = collect_all_portfolio_data(notion)
     holdings = portfolio_dataset["holdings"]
     if not holdings and portfolio_dataset["account_status"]["total_asset_val"] <= 0:
         print("⚠️ 분석할 유효 보유 종목 또는 계좌 데이터가 없습니다.")
         return
 
-    # 2. 올웨더 자산배분 통계 분석
-    summary = analyze_integrated_portfolio(portfolio_dataset)
-    print("\n" + "=" * 75)
+    # 3. K-올라운드 마스터 7대 자산배분 통계 분석
+    summary = analyze_integrated_portfolio(portfolio_dataset, macro_snapshot)
+    print("\n" + "=" * 80)
     print(f"📊 [통합 포트폴리오 요약] 총 자산: {summary['total_eval_krw']:,.0f} 원 (주식 {summary['stock_total_krw']:,.0f}원 + 현금 {summary['cash_total_krw']:,.0f}원)")
-    print("=" * 75)
+    print(f"🌐 [실시간 환율 지표] USD/KRW: {summary['fx_rate']:,.1f}원 | {summary['fx_rule_status']}")
+    print("=" * 80)
     for code in ASSET_ORDER:
         g = summary["asset_groups"][code]
-        print(f"  • {g['name']:<14} | 목표: {g['target_pct']:>4.1f}% | 현재: {g['actual_pct']:>4.1f}% ({g['eval_krw']:>13,.0f}원) | 괴리율: {g['drift_pct']:>+5.1f}%p")
-    print("=" * 75 + "\n")
+        print(f"  • {g['name']:<16} | 목표: {g['target_pct']:>4.1f}% | 현재: {g['actual_pct']:>4.1f}% ({g['eval_krw']:>13,.0f}원) | 괴리율: {g['drift_pct']:>+5.1f}%p")
+    print("=" * 80 + "\n")
 
-    # 3. Gemini 2.5 Flash 진단 리포트 생성
+    # 4. Google Gemini API (Google Search Grounding) 진단 리포트 생성
     if not ai_service.is_available():
         print("⚠️ GEMINI_API_KEY가 설정되지 않아 AI 리포트 생성을 건너뛰고 기본 통계 리포트만 생성합니다.")
-        report_markdown = f"# [통합 분석 리포트] 한-미 듀얼 올웨더 자산배분 및 다차원 퀀트 진단\n\n"
+        report_markdown = f"# [통합 분석 리포트] K-올라운드 마스터 자산배분 및 다차원 퀀트 진단\n\n"
         report_markdown += f"- **분석 일시**: {summary['analysis_date']}\n"
         report_markdown += f"- **총 평가 자산**: {summary['total_eval_krw']:,.0f} 원 (주식 {summary['stock_total_krw']:,.0f}원 + 현금 {summary['cash_total_krw']:,.0f}원)\n\n"
-        report_markdown += f"## 🏦 1. 투자 계좌별 자산 및 현금 현황\n{summary['account_summary_text']}\n\n"
-        report_markdown += f"## 🏷️ 2. 포트폴리오 테마별 비중\n{summary['theme_summary_text']}\n\n"
-        report_markdown += f"## 📊 3. 올웨더 자산군별 비중 vs 목표\n{summary['asset_summary_table']}\n\n"
-        report_markdown += f"## 🔍 4. 상세 보유 종목 및 퀀트 지표\n{summary['holdings_detail_text']}"
+        report_markdown += f"## 🌐 1. 실시간 글로벌 매크로 지표\n{summary['macro_table_markdown']}\n\n"
+        report_markdown += f"## 🏦 2. 투자 계좌별 자산 및 현금 현황\n{summary['account_summary_text']}\n\n"
+        report_markdown += f"## 🏷️ 3. 포트폴리오 테마별 비중\n{summary['theme_summary_text']}\n\n"
+        report_markdown += f"## 📊 4. K-올라운드 7대 자산군 비중 vs 목표\n{summary['asset_summary_table']}\n\n"
+        report_markdown += f"## 🔍 5. 상세 보유 종목 및 퀀트 지표\n{summary['holdings_detail_text']}"
     else:
         try:
             report_markdown = ai_service.generate_portfolio_diagnosis(summary)
         except Exception as e:
             print(f"❌ [AI Service] Gemini 리포트 생성 중 예외 발생: {e}")
-            report_markdown = f"# [자산배분 진단] 한-미 듀얼 올웨더 요약 리포트 (AI 생성 오류)\n\n"
+            report_markdown = f"# [자산배분 진단] K-올라운드 마스터 요약 리포트 (AI 생성 오류)\n\n"
             report_markdown += f"- **분석 일시**: {summary['analysis_date']}\n"
             report_markdown += f"- **총 평가액**: {summary['total_eval_krw']:,.0f} 원\n\n"
-            report_markdown += f"## 📊 자산군별 비중 현황\n{summary['asset_summary_table']}\n\n"
-            report_markdown += f"## 🔍 상세 보유 종목\n{summary['holdings_detail_text']}"
+            report_markdown += f"## 🌐 1. 실시간 매크로 지표\n{summary['macro_table_markdown']}\n\n"
+            report_markdown += f"## 📊 2. 자산군별 비중 현황\n{summary['asset_summary_table']}\n\n"
+            report_markdown += f"## 🔍 3. 상세 보유 종목\n{summary['holdings_detail_text']}"
 
-    # 4. 로컬 백업 저장
+    # 5. 로컬 백업 저장
     save_report_locally(report_markdown, summary["analysis_date"])
 
-    # 5. 노션 Report DB 적재
+    # 6. 노션 Report DB 적재
     if NOTION_REPORT_DB_ID:
         upload_report_to_notion(
             client=notion,
@@ -852,8 +875,7 @@ def main() -> None:
             summary=summary
         )
 
-
-    print("\n✨ [올웨더 리포트 파이프라인] 모든 작업이 성공적으로 완료되었습니다.\n")
+    print("\n✨ [K-올라운드 마스터] 모든 작업이 성공적으로 완료되었습니다.\n")
 
 
 if __name__ == "__main__":

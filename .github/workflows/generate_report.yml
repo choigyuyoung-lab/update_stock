@@ -1,4 +1,4 @@
-name: Generate Portfolio All-Weather Report
+name: Generate Portfolio K-All-Round Master Report
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거
@@ -27,7 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run All-Weather Portfolio Report Generation
+      - name: Run K-All-Round Master Portfolio Report Generation
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
