@@ -199,10 +199,22 @@ def classify_asset(
 
 
 # ==============================================================================
-# 3. Gemini 2.5 Flash 자산배분 진단 프롬프트 시스템
+# 3. Google Gemini 4단계 지능형 모델 풀 (Model Pool) 및 프롬프트 시스템
 # ==============================================================================
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
-GEMINI_FALLBACK_MODEL = "gemini-2.0-flash"
+# 1순위: 3세대 최신 고품질 & 고속 플래그십 (gemini-3.6-flash)
+# 2순위: 2.5세대 최상위 심층 추론 Pro 백업 (gemini-2.5-pro)
+# 3순위: 2.5세대 안정적 표준 Flash (gemini-2.5-flash)
+# 4순위: 3세대 초경량 최종 방어선 (gemini-3.5-flash-lite)
+GEMINI_MODEL_POOL: List[str] = [
+    "gemini-3.6-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+]
+
+# 이전 코드 호환용 별칭
+GEMINI_MODEL_NAME = GEMINI_MODEL_POOL[0]
+GEMINI_FALLBACK_MODEL = GEMINI_MODEL_POOL[1]
 
 SYSTEM_PROMPT = """당신은 세계적인 헤지펀드(Bridgewater Associates 스타일)의 수석 포트폴리오 매니저이자 자산배분 전문가입니다.
 한국 거주자 개인 투자자를 위한 [한-미 듀얼 올웨더(Dual All-Weather) 포트폴리오] 자산배분 진단 및 리밸런싱 리포트를 작성하는 것이 당신의 임무입니다.

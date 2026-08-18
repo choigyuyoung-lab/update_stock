@@ -32,6 +32,7 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 from notion_utils import get_env_var
 from config_portfolio import (
+    GEMINI_MODEL_POOL,
     GEMINI_MODEL_NAME,
     GEMINI_FALLBACK_MODEL,
     SYSTEM_PROMPT,
@@ -44,8 +45,8 @@ logger = logging.getLogger("AIService")
 # ==============================================================================
 # 1. AI 서비스 설정 및 기본 상수
 # ==============================================================================
-DEFAULT_MAX_RETRIES = 3
-DEFAULT_BASE_DELAY = 3.0
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_BASE_DELAY = 2.0
 DEFAULT_THINKING_BUDGET = 1024
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
@@ -94,10 +95,10 @@ class AIService:
         base_delay: float = DEFAULT_BASE_DELAY
     ) -> str:
         """
-        포트폴리오 요약 데이터를 입력받아 Gemini 2.5 Flash를 통해 올웨더 진단 리포트를 생성합니다.
+        포트폴리오 요약 데이터를 입력받아 4단계 모델 풀을 순차적으로 호출하여 올웨더 진단 리포트를 생성합니다.
         
         :param portfolio_summary: 포트폴리오 집계 데이터 딕셔너리
-        :param max_retries: 최대 재시도 횟수
+        :param max_retries: 모델별 최대 재시도 횟수
         :param base_delay: 기본 대기 시간(초)
         :return: 마크다운 형식의 진단 리포트 문자열
         """
@@ -125,11 +126,12 @@ class AIService:
 
         from google.genai import types
 
-        # 1차 시도: gemini-2.5-flash, 실패 시 gemini-2.0-flash 전환
-        models_to_try = [GEMINI_MODEL_NAME, GEMINI_FALLBACK_MODEL]
+        # 4단계 지능형 폴백 모델 풀 순차 실행
+        # 1) gemini-3.6-flash -> 2) gemini-2.5-pro -> 3) gemini-2.5-flash -> 4) gemini-3.5-flash-lite
+        models_to_try = GEMINI_MODEL_POOL
 
-        for model_name in models_to_try:
-            print(f"🤖 [Gemini AI] 모델 '{model_name}' 호출 중...")
+        for rank, model_name in enumerate(models_to_try, start=1):
+            print(f"🤖 [Gemini AI] [{rank}/{len(models_to_try)}순위] 모델 '{model_name}' 호출 중...")
             
             for attempt in range(1, max_retries + 1):
                 try:
@@ -154,21 +156,31 @@ class AIService:
                     
                     report_text = response.text if hasattr(response, "text") else str(response)
                     if report_text and len(report_text.strip()) > 100:
-                        print(f"✅ [Gemini AI] 리포트 생성 완료 (총 {len(report_text):,}자 수신, Finish reason: {finish_reason})")
+                        print(f"✅ [Gemini AI] 리포트 생성 완료 (모델: {model_name}, 총 {len(report_text):,}자, Finish: {finish_reason})")
                         return report_text.strip()
                     else:
                         print(f"   ⚠️ [Gemini AI] 응답 텍스트가 너무 짧습니다. 재시도 {attempt}/{max_retries}")
 
                 except Exception as exc:
                     err_str = str(exc)
+                    # 429 쿼터 초과 발생 시 헛된 재시도를 피하고 독립 쿼터를 가진 다음 모델로 즉시 전환
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                        print(f"   ⚠️ [Gemini AI] '{model_name}' 모델 쿼터(429) 초과 감지 -> 다음 순위 모델로 즉시 전환합니다.")
+                        break
+                    
+                    # 404 모델 미지원 시 즉시 다음 모델로 전환
+                    if "404" in err_str or "NOT_FOUND" in err_str:
+                        print(f"   ⚠️ [Gemini AI] '{model_name}' 모델 미지원(404) 감지 -> 다음 순위 모델로 전환합니다.")
+                        break
+
                     print(f"   ⚠️ [Gemini AI] API 호출 오류 (시도 {attempt}/{max_retries} - {model_name}): {err_str}")
                     
-                    # 429 또는 일시적 통신 오류 시 지수 백오프
+                    # 일시적 통신 오류 시 지수 백오프
                     if attempt < max_retries:
                         delay = base_delay * (2 ** (attempt - 1))
                         time.sleep(delay)
                         continue
 
-            print(f"⚠️ [Gemini AI] '{model_name}' 모델 실패, 다음 모델로 전환합니다...")
+            print(f"⚠️ [Gemini AI] '{model_name}' 모델 실패, 다음 순위 모델로 전환합니다...")
 
-        raise RuntimeError("Google Gemini API를 통한 포트폴리오 진단 리포트 생성에 최종 실패하였습니다.")
+        raise RuntimeError("Google Gemini 4단계 모델 풀(Pool)을 통한 포트폴리오 진단 리포트 생성에 최종 실패하였습니다.")
