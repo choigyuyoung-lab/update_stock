@@ -10,8 +10,9 @@ FinanceDataReader를 활용하여 실시간 글로벌 거시경제(Macro) 핵심
 import sys
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+import numpy as np
 
 # Windows 콘솔 UTF-8 출력 안전화
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -21,6 +22,18 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
         pass
 
 logger = logging.getLogger("MacroService")
+
+
+# K-올라운드 마스터 7대 자산군 대표 프록시 ETF 매핑
+ASSET_CLASS_PROXIES: Dict[str, Dict[str, Any]] = {
+    "US_CORE_INDEX": {"name": "미국 대표지수", "ticker": "SPY", "target_pct": 25.0, "unit": "$"},
+    "DIVIDEND_GROWTH": {"name": "한·미 배당성장", "ticker": "SCHD", "target_pct": 15.0, "unit": "$"},
+    "KR_EQUITY": {"name": "국내 주식 & 밸류업", "ticker": "069500", "target_pct": 10.0, "unit": "원"},
+    "US_LONG_BOND": {"name": "미국 장기채", "ticker": "TLT", "target_pct": 20.0, "unit": "$"},
+    "KR_BOND_SHORT": {"name": "국내 채권 & 단기자금", "ticker": "153130", "target_pct": 10.0, "unit": "원"},
+    "GOLD": {"name": "금 (Gold)", "ticker": "GLD", "target_pct": 10.0, "unit": "$"},
+    "COMMODITY_CASH": {"name": "원자재 & 달러/현금", "ticker": "DBC", "target_pct": 10.0, "unit": "$"},
+}
 
 
 class MacroService:
@@ -152,162 +165,231 @@ class MacroService:
             logger.warning(f"⚠️ [MacroService] 동적 밴드 계산 중 오류: {exc}")
             return {}
 
+    def get_7_asset_quant_metrics(self) -> List[Dict[str, Any]]:
+        """
+        K-올라운드 마스터 7대 자산군 대표 ETF의 1년 시계열 데이터를 분석하여
+        200일선, 추세(상승/하락), 12개월 모멘텀, 52주 낙폭, 60일 변동성을 산출하고
+        12개월 모멘텀 기준 순위를 매겨 반환합니다.
+        """
+        import FinanceDataReader as fdr
+        start_date = (self._get_kst_now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        results: List[Dict[str, Any]] = []
+
+        for code, meta in ASSET_CLASS_PROXIES.items():
+            ticker = meta["ticker"]
+            name = meta["name"]
+            unit = meta.get("unit", "")
+            target_pct = meta["target_pct"]
+            try:
+                df = fdr.DataReader(ticker, start_date)
+                if df is not None and not df.empty:
+                    c = df["Close"].dropna() if "Close" in df.columns else df.iloc[:, 0].dropna()
+                    curr_price = float(c.iloc[-1])
+                    ma200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+                    trend = "🟢 상승추세" if curr_price >= ma200 else "🔴 하락추세"
+                    is_bull = curr_price >= ma200
+
+                    # 12개월 모멘텀
+                    mom_12m = ((curr_price - float(c.iloc[0])) / float(c.iloc[0])) * 100.0 if len(c) > 0 else 0.0
+                    
+                    # 52주 최고가 대비 낙폭 (Drawdown %)
+                    peak_52w = float(c.tail(252).max()) if len(c) > 0 else curr_price
+                    dd_52w = ((curr_price - peak_52w) / peak_52w) * 100.0 if peak_52w > 0 else 0.0
+
+                    # 60영업일 연환산 변동성 (1년 252일 기준)
+                    returns_60 = c.pct_change().tail(60).dropna()
+                    vol_60d = float(returns_60.std() * np.sqrt(252) * 100.0) if len(returns_60) > 5 else 0.0
+
+                    # 주간 변동률(WoW)
+                    prev_week_val = float(c.iloc[-6]) if len(c) >= 6 else (float(c.iloc[0]) if len(c) >= 2 else curr_price)
+                    wow_pct = ((curr_price - prev_week_val) / prev_week_val) * 100.0 if prev_week_val > 0 else 0.0
+
+                    results.append({
+                        "code": code,
+                        "name": name,
+                        "ticker": ticker,
+                        "unit": unit,
+                        "target_pct": target_pct,
+                        "current_price": curr_price,
+                        "ma200": ma200,
+                        "trend": trend,
+                        "is_bull": is_bull,
+                        "momentum_12m": mom_12m,
+                        "drawdown_52w": dd_52w,
+                        "volatility_60d": vol_60d,
+                        "wow_pct": wow_pct,
+                    })
+                else:
+                    results.append({
+                        "code": code,
+                        "name": name,
+                        "ticker": ticker,
+                        "unit": unit,
+                        "target_pct": target_pct,
+                        "current_price": None,
+                        "ma200": None,
+                        "trend": "판정대기",
+                        "is_bull": False,
+                        "momentum_12m": 0.0,
+                        "drawdown_52w": 0.0,
+                        "volatility_60d": 0.0,
+                        "wow_pct": 0.0,
+                    })
+            except Exception as e:
+                logger.warning(f"⚠️ [MacroService] 자산군 '{name}({ticker})' 퀀트 지표 산출 실패: {e}")
+
+        # 12개월 모멘텀 내림차순 정렬
+        results.sort(key=lambda x: x.get("momentum_12m", -999.0), reverse=True)
+        for idx, item in enumerate(results, 1):
+            item["rank"] = idx
+
+        return results
+
     def get_macro_snapshot(self) -> Dict[str, Any]:
         """
-        글로벌 & 국내 핵심 매크로 지표를 실시간 수집하고
-        최근 3개월(60영업일) 롤링 백분위수 기반 '동적 통계 밴드'를 자동 계산하여 반환합니다.
+        글로벌 & 국내 거시경제 핵심 지표, 3개월 롤링 동적 밴드 및
+        K-올라운드 7대 자산군 퀀트 모멘텀 지표를 종합 수집합니다.
         """
+        # 기존 글로벌/국내 지표 수집
+        snapshot = self._get_macro_snapshot_indicators()
+        
+        # 7대 자산군 퀀트 팩터(200일선, 모멘텀, 낙폭, 변동성) 수집
+        asset_quant_list = self.get_7_asset_quant_metrics()
+        snapshot["asset_quant_metrics"] = asset_quant_list
+
+        # 정량 지표 마크다운 표 재빌드 (7대 자산 퀀트 표 포함)
+        macro_table = self._build_macro_table(
+            snapshot["indicators"],
+            snapshot.get("fx_band"),
+            snapshot.get("us10y_band"),
+            asset_quant_list
+        )
+        snapshot["macro_table_markdown"] = macro_table
+
+        return snapshot
+
+    def _get_macro_snapshot_indicators(self) -> Dict[str, Any]:
         now_kst = self._get_kst_now()
-        start_date = (now_kst - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+        start_date_str = (now_kst - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+
         print(f"🌐 [MacroService] 실시간 글로벌 & 국내 매크로 지표 및 동적 밴드 수집 시작 (기준일: {now_kst.strftime('%Y-%m-%d')})...")
 
         # 1. USD/KRW 환율
-        usdkrw_df = self._fetch_series("USD/KRW", start_date)
-        usdkrw_now, usdkrw_prev, usdkrw_wow = self._extract_latest_and_prev_week(usdkrw_df)
-        fx_band = self._calculate_dynamic_band(usdkrw_df, window=60)
-        if usdkrw_now is None and fx_band:
-            usdkrw_now = fx_band["current"]
+        df_usdkrw = self._fetch_series("USD/KRW", start_date_str)
+        usdkrw_now, usdkrw_prev, usdkrw_wow = self._extract_latest_and_prev_week(df_usdkrw)
+        fx_band = self._calculate_dynamic_band(df_usdkrw)
 
-        # 2. 미국 10년물 국채 금리 (FRED:DGS10)
-        us10y_df = self._fetch_series("FRED:DGS10", start_date)
-        us10y_now, us10y_prev, us10y_wow = self._extract_latest_and_prev_week(us10y_df, "DGS10")
-        us10y_band = self._calculate_dynamic_band(us10y_df, val_col="DGS10", window=60)
-        if us10y_now is None:
-            us10y_df = self._fetch_series("US10YT", start_date)
-            us10y_now, us10y_prev, us10y_wow = self._extract_latest_and_prev_week(us10y_df)
-            us10y_band = self._calculate_dynamic_band(us10y_df, window=60)
+        # 2. 미국 10년물 국채금리 (FRED: DGS10)
+        df_us10y = self._fetch_series("FRED:DGS10", start_date_str)
+        us10y_now, us10y_prev, us10y_wow = self._extract_latest_and_prev_week(df_us10y)
+        us10y_band = self._calculate_dynamic_band(df_us10y)
 
-        # 3. 미국 2년물 국채 금리 (FRED:DGS2)
-        us2y_df = self._fetch_series("FRED:DGS2", start_date)
-        us2y_now, us2y_prev, us2y_wow = self._extract_latest_and_prev_week(us2y_df, "DGS2")
-        us2y_band = self._calculate_dynamic_band(us2y_df, val_col="DGS2", window=60)
+        # 3. 미국 2년물 국채금리 (FRED: DGS2)
+        df_us2y = self._fetch_series("FRED:DGS2", start_date_str)
+        us2y_now, us2y_prev, us2y_wow = self._extract_latest_and_prev_week(df_us2y)
+        us2y_band = self._calculate_dynamic_band(df_us2y)
 
-        # 4. 장단기 금리차 (10Y - 2Y)
-        term_spread_now = None
-        term_spread_prev = None
-        term_spread_delta_bp = None
+        # 4. 미국 장단기 금리차
+        term_spread_now, term_spread_prev, term_spread_delta_bp = None, None, None
         if us10y_now is not None and us2y_now is not None:
             term_spread_now = us10y_now - us2y_now
             if us10y_prev is not None and us2y_prev is not None:
                 term_spread_prev = us10y_prev - us2y_prev
-                term_spread_delta_bp = (term_spread_now - term_spread_prev) * 100.0  # bp
-            else:
-                term_spread_delta_bp = 0.0
+                term_spread_delta_bp = (term_spread_now - term_spread_prev) * 100.0
 
         # 5. S&P 500
-        sp500_df = self._fetch_series("US500", start_date)
-        if sp500_df is None or sp500_df.empty:
-            sp500_df = self._fetch_series("SPY", start_date)
-        sp500_now, sp500_prev, sp500_wow = self._extract_latest_and_prev_week(sp500_df)
+        df_sp500 = self._fetch_series("US500", start_date_str)
+        if df_sp500 is None:
+            df_sp500 = self._fetch_series("SPY", start_date_str)
+        sp500_now, sp500_prev, sp500_wow = self._extract_latest_and_prev_week(df_sp500)
 
-        # 6. KOSPI
-        kospi_df = self._fetch_series("KS11", start_date)
-        kospi_now, kospi_prev, kospi_wow = self._extract_latest_and_prev_week(kospi_df)
-        kospi_band = self._calculate_dynamic_band(kospi_df, window=60)
+        # 6. WTI 원유 선물
+        df_wti = self._fetch_series("CL", start_date_str)
+        wti_now, wti_prev, wti_wow = self._extract_latest_and_prev_week(df_wti)
 
-        # 7. WTI 원유 (CL=F / FRED:DCOILWTICO)
-        wti_df = self._fetch_series("CL=F", start_date)
-        if wti_df is None or wti_df.empty:
-            wti_df = self._fetch_series("FRED:DCOILWTICO", start_date)
-        wti_now, wti_prev, wti_wow = self._extract_latest_and_prev_week(wti_df)
+        # 7. 금 선물 (GC 또는 GLD)
+        df_gold = self._fetch_series("GC", start_date_str)
+        if df_gold is None or df_gold.empty:
+            df_gold = self._fetch_series("GLD", start_date_str)
+        gold_now, gold_prev, gold_wow = self._extract_latest_and_prev_week(df_gold)
 
-        # 8. 금 선물 (GC=F)
-        gold_df = self._fetch_series("GC=F", start_date)
-        gold_now, gold_prev, gold_wow = self._extract_latest_and_prev_week(gold_df)
+        # 8. KOSPI 지수
+        df_kospi = self._fetch_series("KS11", start_date_str)
+        kospi_now, kospi_prev, kospi_wow = self._extract_latest_and_prev_week(df_kospi)
+        kospi_band = self._calculate_dynamic_band(df_kospi)
 
-        # 9. KOSDAQ 지수 (KQ11)
-        kosdaq_df = self._fetch_series("KQ11", start_date)
-        kosdaq_now, kosdaq_prev, kosdaq_wow = self._extract_latest_and_prev_week(kosdaq_df)
+        # 9. KOSDAQ 지수
+        df_kosdaq = self._fetch_series("KQ11", start_date_str)
+        kosdaq_now, kosdaq_prev, kosdaq_wow = self._extract_latest_and_prev_week(df_kosdaq)
 
-        # 10. 한국 국고채 10년물 금리 (FRED:IRLTLT01KRM156N 또는 KODEX 국고채10년 ETF 114820)
-        kr10y_df = self._fetch_series("FRED:IRLTLT01KRM156N", start_date)
-        kr10y_now, kr10y_prev, kr10y_wow = self._extract_latest_and_prev_week(kr10y_df, "IRLTLT01KRM156N")
-        kr10y_band = self._calculate_dynamic_band(kr10y_df, val_col="IRLTLT01KRM156N", window=60)
-        if kr10y_now is None:
-            kr10y_df = self._fetch_series("114820", start_date)
-            _, _, kr10y_wow = self._extract_latest_and_prev_week(kr10y_df)
-            kr10y_band = self._calculate_dynamic_band(kr10y_df, window=60)
-            kr10y_now = 4.18  # 표준 기준치
+        # 10. 한국 국고채 10년물
+        df_kr10y = self._fetch_series("FRED:IRLTLT01KRM156N", start_date_str)
+        if df_kr10y is None or df_kr10y.empty:
+            df_kr10y = self._fetch_series("114820", start_date_str)
+        kr10y_now, kr10y_prev, kr10y_wow = self._extract_latest_and_prev_week(df_kr10y)
+        kr10y_band = self._calculate_dynamic_band(df_kr10y)
 
-        # 11. 한-미 10년물 금리차 (미국 10Y - 한국 10Y)
-        kr_us_spread_now = None
-        kr_us_spread_prev = None
-        kr_us_spread_delta_bp = None
+        # 11. 한-미 10년물 금리차
+        kr_us_spread_now, kr_us_spread_prev, kr_us_spread_delta_bp = None, None, None
         if us10y_now is not None and kr10y_now is not None:
             kr_us_spread_now = us10y_now - kr10y_now
             if us10y_prev is not None and kr10y_prev is not None:
                 kr_us_spread_prev = us10y_prev - kr10y_prev
                 kr_us_spread_delta_bp = (kr_us_spread_now - kr_us_spread_prev) * 100.0
-            else:
-                kr_us_spread_delta_bp = 0.0
 
-        # 12. 국내 단기자금/채권 지표 (KODEX 단기채권PLUS 153130)
-        kr_short_df = self._fetch_series("153130", start_date)
-        kr_short_now, kr_short_prev, kr_short_wow = self._extract_latest_and_prev_week(kr_short_df)
+        # 12. 국내 단기채 ETF
+        df_kr_short = self._fetch_series("153130", start_date_str)
+        kr_short_now, kr_short_prev, kr_short_wow = self._extract_latest_and_prev_week(df_kr_short)
 
-        # ----------------------------------------------------------------------
-        # 💡 [동적 통계 밴드 기반 전술 가이드 자동 산출]
-        # ----------------------------------------------------------------------
-        # 1) 환율 3개월 롤링 퀀타일 전술 가이드
-        if fx_band:
-            q25_f = fx_band["q25"]
-            q75_f = fx_band["q75"]
-            pct_f = fx_band["pct_rank"]
-            if fx_band["regime"] == "LOW":
-                fx_status = f"저환율 기회 구간 (3개월 하위 {pct_f:.0f}%, {q25_f:,.1f}원 이하) -> 미국 환노출(S&P500/나스닥/미국장기채) 분할 매수 적극 확대"
-                fx_badge = f"🟢 저환율 (하위 {pct_f:.0f}%)"
-            elif fx_band["regime"] == "HIGH":
-                fx_status = f"고환율 경계 구간 (3개월 상위 {100-pct_f:.0f}%, {q75_f:,.1f}원 이상) -> 미국 환노출 매수 자제, 국내 주식/원화채권/금(KRX) 우선 매수"
-                fx_badge = f"🔴 고환율 (상위 {100-pct_f:.0f}%)"
-            else:
-                fx_status = f"중립 적정 구간 ({q25_f:,.1f}~{q75_f:,.1f}원, 3개월 {pct_f:.0f}% 위치) -> 7대 자산군 목표 괴리율에 따른 정석 분할 매수"
-                fx_badge = f"🟡 중립 ({pct_f:.0f}% 위치)"
+        # 환율 상태 평가
+        if fx_band and fx_band.get("regime") == "LOW":
+            fx_badge = f"🟢 저환율 (하위 {fx_band['pct_rank']:.0f}%)"
+            fx_status = "LOW_FX"
+        elif fx_band and fx_band.get("regime") == "HIGH":
+            fx_badge = f"🔴 고환율 (상위 {100 - fx_band['pct_rank']:.0f}%)"
+            fx_status = "HIGH_FX"
         else:
-            # 안전 폴백
-            fx_status = "환율 중립 구간 -> 목표 비중 괴리율에 따른 정석 분할 매수"
-            fx_badge = "🟡 중립 구간"
+            pct_str = f" ({fx_band['pct_rank']:.0f}% 위치)" if fx_band else ""
+            fx_badge = f"⚖️ 적정 중립 환율{pct_str}"
+            fx_status = "NEUTRAL_FX"
 
-        # 2) 미국 10년물 금리 3개월 롤링 퀀타일 상태 분석
-        if us10y_band:
-            q25_u = us10y_band["q25"]
-            q75_u = us10y_band["q75"]
-            pct_u = us10y_band["pct_rank"]
-            if us10y_band["regime"] == "HIGH":
-                us10y_status_str = f"고금리 매수기회 (상위 {100-pct_u:.0f}%, {q75_u:.2f}% 이상) -> 미국 장기채 분할 매수 최적기 (채권 가격 저평가 + 자본차익 기대)"
-            elif us10y_band["regime"] == "LOW":
-                us10y_status_str = f"저금리 구간 (하위 {pct_u:.0f}%, {q25_u:.2f}% 이하) -> 채권 신규매수 감속 및 주식 비중 확대"
-            else:
-                us10y_status_str = f"중립 금리 밴드 ({q25_u:.2f}~{q75_u:.2f}%, 3개월 {pct_u:.0f}% 위치)"
+        # 미국 10년물 금리 상태
+        if us10y_band and us10y_band.get("regime") == "HIGH":
+            us10y_status_str = f"고금리 매수기회 (상위 {100 - us10y_band['pct_rank']:.0f}%, {us10y_band['q75']:.2f}% 이상) -> 미국 장기채 분할 매수 최적기 (채권 가격 저평가 + 자본차익 기대)"
+        elif us10y_band and us10y_band.get("regime") == "LOW":
+            us10y_status_str = f"저금리 구간 (하위 {us10y_band['pct_rank']:.0f}%) -> 장기채 신규 매수 신중, 단기채/배당성장 중심 운용"
+        elif us10y_now is not None:
+            us10y_status_str = f"중립 금리 레인지 ({us10y_now:.2f}%) -> 7대 자산군 목표 비중(20%) 유지"
         else:
-            us10y_status_str = "글로벌 무위험 기준금리"
+            us10y_status_str = "글로벌 벤치마크 금리"
 
-        # 3) 미국 장단기 금리차 상태 분석
+        # 수익률 곡선 상태
         if term_spread_now is not None:
             if term_spread_now < 0:
-                yield_curve_status = "장단기 금리 역전 (경기 침체 선행 경계)"
-            elif term_spread_now < 0.2:
-                yield_curve_status = "수익률 곡선 평탄화 (Flattener)"
+                yield_curve_status = f"역전 상태 ({term_spread_now:+.2f}%p) -> 경기 둔화 경계"
             else:
                 yield_curve_status = "정상 우상향 수익률 곡선 (Steepener)"
         else:
             yield_curve_status = "산출 대기"
 
-        # 4) 한-미 금리차 상태 분석
+        # 한-미 금리차 상태
         if kr_us_spread_now is not None:
-            if kr_us_spread_now > 1.0:
-                spread_status = f"한-미 금리 역전 심화 (+{kr_us_spread_now:.2f}%p) -> 원화 약세/외인 수급 변동성 주의"
+            if kr_us_spread_now > 1.5:
+                spread_status = f"미국 우위 대폭 확대 ({kr_us_spread_now:+.2f}%p) -> 원화 약세/달러 선호 지속"
+            elif kr_us_spread_now < 0:
+                spread_status = f"한국 금리 우위 ({kr_us_spread_now:+.2f}%p) -> 원화 자산 매력도 상승"
             else:
                 spread_status = f"한-미 금리차 ({kr_us_spread_now:+.2f}%p) -> 안정적 자금 흐름 유지"
         else:
             spread_status = "산출 대기"
 
-        # 5) 코스피 3개월 퀀타일 위치 분석
+        # 코스피 상태
         if kospi_band:
             pct_k = kospi_band["pct_rank"]
             if kospi_band["regime"] == "LOW":
                 kospi_status_str = f"3개월 저평가 (하위 {pct_k:.0f}%) -> 국내 밸류업 ETF 저가 분할매수 적기"
             elif kospi_band["regime"] == "HIGH":
-                kospi_status_str = f"3개월 단기 과열 (상위 {100-pct_k:.0f}%) -> 차익실현 및 비중 유지"
+                kospi_status_str = f"3개월 단기 과열 (상위 {100 - pct_k:.0f}%) -> 차익실현 및 비중 유지"
             else:
                 kospi_status_str = f"3개월 적정 밸런스 ({pct_k:.0f}% 위치)"
         else:
@@ -429,11 +511,6 @@ class MacroService:
             },
         }
 
-        # 정량 지표 마크다운 표 빌드
-        macro_table = self._build_macro_table(indicators, fx_band, us10y_band)
-
-        print(f"   ✅ [MacroService] 글로벌 & 국내 핵심 매크로 지표 수집 완료 (환율: {indicators['usdkrw']['formatted']}, 미10Y: {indicators['us10y']['formatted']}, 코스피: {indicators['kospi']['formatted']})")
-
         return {
             "as_of_date": now_kst.strftime("%Y-%m-%d"),
             "indicators": indicators,
@@ -441,16 +518,16 @@ class MacroService:
             "fx_rate": usdkrw_now or 1400.0,
             "fx_band": fx_band,
             "us10y_band": us10y_band,
-            "macro_table_markdown": macro_table,
         }
 
     def _build_macro_table(
         self,
         indicators: Dict[str, Any],
         fx_band: Optional[Dict[str, Any]] = None,
-        us10y_band: Optional[Dict[str, Any]] = None
+        us10y_band: Optional[Dict[str, Any]] = None,
+        asset_quant_list: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """글로벌 및 국내 지표와 3개월 롤링 동적 밴드를 Markdown 대시보드로 포맷팅합니다."""
+        """글로벌 및 국내 지표와 3개월 롤링 동적 밴드, 7대 자산 퀀트 순위표를 Markdown 대시보드로 포맷팅합니다."""
         lines = [
             "### 🌐 [글로벌 거시경제 & 원자재 지표]",
             "| 글로벌 지표 | 현재값 | 1주 전 대비 (WoW) | 상태 및 시장 시사점 |",
@@ -538,6 +615,27 @@ class MacroService:
                     f"저금리(Q25) `{us10y_band['q25']:.2f}%` / 중앙값(Q50) `{us10y_band['q50']:.2f}%` / 고금리(Q75) `{us10y_band['q75']:.2f}%`"
                 )
 
+        # 7대 자산군 듀얼 모멘텀 & 200일선 추세 순위표
+        if asset_quant_list:
+            lines.append("")
+            lines.append("### 💎 [K-올라운드 7대 자산군 듀얼 모멘텀 & 200일선 추세 순위표]")
+            lines.append("| 순위 | 7대 자산군 | 대표 ETF | 현재가 | 200일선 | 200MA 추세 | 12M 모멘텀 | 52주 낙폭 | 60일 변동성 |")
+            lines.append("|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
+            for item in asset_quant_list:
+                rank_str = f"**{item['rank']}위**" if item['rank'] <= 3 else f"{item['rank']}위"
+                unit = item.get("unit", "")
+                if unit == "원":
+                    p_str = f"{item['current_price']:,.0f}원" if item['current_price'] else "N/A"
+                    ma_str = f"{item['ma200']:,.0f}원" if item['ma200'] else "N/A"
+                else:
+                    p_str = f"${item['current_price']:,.2f}" if item['current_price'] else "N/A"
+                    ma_str = f"${item['ma200']:,.2f}" if item['ma200'] else "N/A"
+                
+                mom_str = f"{item['momentum_12m']:+.1f}%"
+                dd_str = f"{item['drawdown_52w']:+.1f}%"
+                vol_str = f"{item['volatility_60d']:.1f}%"
+                lines.append(f"| {rank_str} | **{item['name']}** | `{item['ticker']}` | `{p_str}` | `{ma_str}` | {item['trend']} | `{mom_str}` | `{dd_str}` | `{vol_str}` |")
+
         return "\n".join(lines)
 
 
@@ -545,5 +643,6 @@ if __name__ == "__main__":
     service = MacroService()
     res = service.get_macro_snapshot()
     print("\n" + res["macro_table_markdown"])
+
 
 

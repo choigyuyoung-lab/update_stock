@@ -331,17 +331,35 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
         if isinstance(invest_tags, str):
             invest_tags = [invest_tags]
 
-        # 숨김/계산 퀀트 열 추출
-        pos_52w = get_prop_value(props, ["52주 위치"])
+        # 숨김/계산 퀀트 열 추출 (노션 수식 열이 없어도 Python 자체 산출로 100% 보장)
         high_52w = safe_float(get_prop_value(props, ["52주 최고가"])) or 0.0
         low_52w = safe_float(get_prop_value(props, ["52주 최저가"])) or 0.0
-        margin_of_safety = str(get_prop_value(props, ["안전마진"]) or "").strip()
+        pos_52w = get_prop_value(props, ["52주 위치", "52주위치"])
+        if pos_52w is None and high_52w > low_52w and current_price > 0:
+            pos_52w = (current_price - low_52w) / (high_52w - low_52w)
+
         target_price = safe_float(get_prop_value(props, ["목표주가"])) or 0.0
+        margin_of_safety = str(get_prop_value(props, ["안전마진"]) or "").strip()
+        if not margin_of_safety and target_price > 0 and current_price > 0:
+            upside = current_price / target_price
+            pct_txt = f"{upside * 100:.1f}%"
+            if upside <= 0.6:
+                margin_of_safety = f"🚀 {pct_txt}"
+            elif upside <= 0.8:
+                margin_of_safety = f"✅ {pct_txt}"
+            elif upside < 1.0:
+                margin_of_safety = f"⚠️ {pct_txt}"
+            else:
+                margin_of_safety = f"🚨 {pct_txt}"
+
         target_range = str(get_prop_value(props, ["목표가 범위"]) or "").strip()
         div_yield = get_prop_value(props, ["배당수익률"])
         per = safe_float(get_prop_value(props, ["PER", "추정PER"]))
         pbr = safe_float(get_prop_value(props, ["PBR"]))
+        prev_close = safe_float(get_prop_value(props, ["전일 종가", "전일종가"])) or 0.0
         day_change = get_prop_value(props, ["전일대비"])
+        if day_change is None and prev_close > 0 and current_price > 0:
+            day_change = (current_price - prev_close) / prev_close
 
         # 종목 메타 결합
         meta_info = stock_meta.get(name.upper()) or stock_meta.get(ticker.upper()) or {}
@@ -643,6 +661,63 @@ def analyze_integrated_portfolio(
     else:
         prev_report_summary_text = "- **비교 기준**: 직전 리포트 없음 (금주 리포트를 기준점(Baseline)으로 최초 생성)"
 
+    # 11. 스마트 밸류 에버리징(Value Averaging) 적립금 분배 계산 (주간 100만원 기준)
+    asset_quant_map = {item["code"]: item for item in macro_snapshot.get("asset_quant_metrics", [])}
+    weekly_budget = 1_000_000.0  # 기본 100만원 기준
+    
+    alloc_scores: Dict[str, float] = {}
+    for code in ASSET_ORDER:
+        grp = asset_groups[code]
+        q_meta = asset_quant_map.get(code, {})
+        
+        target_pct = grp["target_pct"]
+        drift_pct = grp["drift_pct"]
+        is_bull = q_meta.get("is_bull", True)
+        drawdown = q_meta.get("drawdown_52w", 0.0)
+        
+        # 부족분 가중치: 목표 비중보다 부족할수록 점수 가산
+        deficit_factor = max(0.0, -drift_pct) * 2.0
+        base_score = max(0.5, target_pct + deficit_factor)
+        
+        # 추세 보정: 200일선 위 상승추세 자산에 가중(1.2), 하락추세(0.85)
+        trend_mult = 1.2 if is_bull else 0.85
+        
+        # 낙폭 보정: 52주 고점 대비 -10% 이상 하락 시 저가 분할매수 매력도 가산
+        dd_mult = 1.15 if drawdown <= -10.0 else 1.0
+        
+        alloc_scores[code] = base_score * trend_mult * dd_mult
+
+    total_score = sum(alloc_scores.values()) or 1.0
+    va_lines = [
+        "| 자산군 | 목표비중 | 현재괴리율 | 200MA 추세 | 52주 낙폭 | 스마트 배분 비중 | 주간 추천 매수금액 (100만원 기준) |",
+        "|:---|:---:|:---:|:---:|:---:|:---:|:---:|",
+    ]
+    for code in ASSET_ORDER:
+        grp = asset_groups[code]
+        q_meta = asset_quant_map.get(code, {})
+        alloc_pct = (alloc_scores[code] / total_score) * 100.0
+        alloc_amt = weekly_budget * (alloc_pct / 100.0)
+        
+        trend_str = q_meta.get("trend", "판정대기")
+        dd_str = f"{q_meta.get('drawdown_52w', 0.0):+.1f}%" if q_meta else "-"
+        va_lines.append(
+            f"| **{grp['name']}** | {grp['target_pct']:.1f}% | {grp['drift_pct']:+.1f}%p | {trend_str} | `{dd_str}` | **{alloc_pct:.1f}%** | `{alloc_amt:,.0f} 원` |"
+        )
+    value_averaging_table = "\n".join(va_lines)
+
+    # 12. 포트폴리오 95% 1주일 최대 예상 변동성 (VaR) 추정
+    port_weighted_vol = 0.0
+    for code in ASSET_ORDER:
+        grp = asset_groups[code]
+        q_meta = asset_quant_map.get(code, {})
+        w = grp["actual_pct"] / 100.0
+        vol = q_meta.get("volatility_60d", 12.0)
+        port_weighted_vol += w * vol
+
+    # 95% 신뢰수준(Z=1.65), 1주일(1/sqrt(52))
+    portfolio_var_pct = 1.65 * (port_weighted_vol / (52 ** 0.5))
+    portfolio_var_krw = total_eval_krw * (portfolio_var_pct / 100.0)
+
     active_holdings_count = sum(1 for h in holdings if h["eval_asset"] > 0)
     
     return {
@@ -655,10 +730,14 @@ def analyze_integrated_portfolio(
         "stock_total_krw": stock_total_krw,
         "cash_total_krw": cash_total_krw,
         "cash_pct": cash_pct,
+        "portfolio_weighted_vol": port_weighted_vol,
+        "portfolio_var_pct": portfolio_var_pct,
+        "portfolio_var_krw": portfolio_var_krw,
         "total_positions_count": active_holdings_count,
         "monitoring_count": len(holdings) - active_holdings_count,
         "asset_groups": asset_groups,
         "asset_summary_table": asset_summary_table,
+        "value_averaging_table": value_averaging_table,
         "account_summary_text": account_summary_text,
         "theme_summary_text": theme_summary_text,
         "holdings_detail_text": holdings_detail_text,

@@ -115,12 +115,16 @@ class AIService:
             "total_eval_krw": portfolio_summary.get("total_eval_krw", 0.0),
             "stock_total_krw": portfolio_summary.get("stock_total_krw", 0.0),
             "cash_total_krw": portfolio_summary.get("cash_total_krw", 0.0),
+            "portfolio_weighted_vol": portfolio_summary.get("portfolio_weighted_vol", 12.0),
+            "portfolio_var_pct": portfolio_summary.get("portfolio_var_pct", 2.5),
+            "portfolio_var_krw": portfolio_summary.get("portfolio_var_krw", 0.0),
             "total_positions_count": portfolio_summary.get("total_positions_count", 0),
             "monitoring_count": portfolio_summary.get("monitoring_count", 0),
             "prev_report_summary_text": portfolio_summary.get("prev_report_summary_text", "- **비교 기준**: 직전 리포트 없음"),
             "account_summary_text": portfolio_summary.get("account_summary_text", ""),
             "theme_summary_text": portfolio_summary.get("theme_summary_text", ""),
             "asset_summary_table": portfolio_summary.get("asset_summary_table", ""),
+            "value_averaging_table": portfolio_summary.get("value_averaging_table", ""),
             "holdings_detail_text": portfolio_summary.get("holdings_detail_text", ""),
         }
         user_prompt = USER_PROMPT_TEMPLATE.format(**format_kwargs)

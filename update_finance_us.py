@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import yfinance as yf
+import numpy as np
+import pandas as pd
 
 # Windows 콘솔 인코딩 안전화
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -39,8 +41,8 @@ from notion_utils import (
     safe_page_update,
     get_http_session,
     is_kr_ticker,
-    is_valid_num,
     safe_float,
+    is_valid_num,
 )
 
 
@@ -62,22 +64,23 @@ logger = logging.getLogger("FinanceSyncUS")
 
 
 # ==============================================================================
-# 2. 해외 주식 재무/기술 지표 수집부 (Yahoo Finance)
+# 2. 해외 주식 재무 데이터 수집부 (Yahoo Finance)
 # ==============================================================================
-def get_us_fin_optimized(
+def get_stock_financials(
     ticker: str,
     max_retries: int = 3,
     base_delay: float = 2.0
 ) -> Dict[str, Any]:
     """
-    Yahoo Finance에서 해외 주식 재무 데이터를 조회합니다.
+    Yahoo Finance에서 해외 주식 재무 데이터 및 5대 퀀트 지표를 조회합니다.
     네트워크 에러나 타임아웃이 발생하면 지수 백오프 후 최대 3번까지 재시도합니다.
     """
     res: Dict[str, Any] = {
         "PER": None, "추정PER": None, "EPS": None, "추정EPS": None, 
         "PBR": None, "BPS": None, "배당수익률": None,
-        "52주 최고가": None, "52주 최저가": None, "목표주가": None, "의견": None,
-        "직전고점": None, "직전저점": None
+        "52주 최고가": None, "52주 최저가": None,
+        "직전고점": None, "직전저점": None,
+        "200일선": None, "추세": None, "12M 모멘텀": None, "52주 낙폭": None, "60일 변동성": None,
     }
     
     attempt = 1
@@ -100,24 +103,37 @@ def get_us_fin_optimized(
                     "추정EPS": safe_float(info.get("forwardEps")),
                     "PBR": safe_float(info.get("priceToBook")),
                     "BPS": safe_float(info.get("bookValue")),
-                    "목표주가": safe_float(info.get('targetMeanPrice')),
                     "52주 최고가": safe_float(info.get("fiftyTwoWeekHigh")) or res["52주 최고가"],
                     "52주 최저가": safe_float(info.get("fiftyTwoWeekLow")) or res["52주 최저가"],
                 })
                 div_yield = safe_float(info.get("dividendYield"))
                 if div_yield is not None:
                     res["배당수익률"] = div_yield * 100
-                    
-                rec_key = str(info.get('recommendationKey', '')).lower()
-                opinion_map = {"strong_buy": "적극매수", "buy": "매수", "hold": "중립", "underperform": "매도", "sell": "적극매도"}
-                res['의견'] = opinion_map.get(rec_key)
 
-            # 3. 20영업일 내 직전고점, 직전저점 계산
-            hist = stock.history(period="40d")
+            # 3. 1년치 일봉 시계열로 직전고저점 및 5대 퀀트 지표 계산
+            hist = stock.history(period="1y")
             if not hist.empty:
                 recent_20 = hist.tail(20)
                 res["직전고점"] = safe_float(recent_20["High"].max())
                 res["직전저점"] = safe_float(recent_20["Low"].min())
+                
+                c = hist["Close"].dropna()
+                if not c.empty:
+                    curr_p = float(c.iloc[-1])
+                    ma200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+                    res["200일선"] = safe_float(round(ma200, 2))
+                    res["추세"] = "🟢 상승추세" if curr_p >= ma200 else "🔴 하락추세"
+                    
+                    mom_12m = ((curr_p - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
+                    res["12M 모멘텀"] = safe_float(round(mom_12m, 4))
+                    
+                    peak_52w = float(hist["High"].tail(252).max()) if "High" in hist.columns else float(c.tail(252).max())
+                    if peak_52w > 0:
+                        res["52주 낙폭"] = safe_float(round((curr_p - peak_52w) / peak_52w, 4))
+                        
+                    returns_60 = c.pct_change().tail(60).dropna()
+                    if len(returns_60) >= 5:
+                        res["60일 변동성"] = safe_float(round(float(returns_60.std() * np.sqrt(252)), 4))
 
             return res
             
@@ -157,21 +173,20 @@ def build_finance_update_for_page(
         return None
 
     number_keys = [
-        "PER", "추정PER", "EPS", "추정EPS", "PBR", "BPS", 
-        "배당수익률", "52주 최고가", "52주 최저가", "목표주가", 
-        "직전고점", "직전저점"
+        "PER", "추정PER", "EPS", "추정EPS", "PBR", "BPS", "배당수익률",
+        "직전고점", "직전저점", "200일선", "12M 모멘텀", "52주 낙폭", "60일 변동성"
     ]
     
     try:
-        fin_data = get_us_fin_optimized(ticker)
+        fin_data = get_stock_financials(ticker)
         update_props = {
             key: {"number": fin_data[key]}
             for key in number_keys
             if is_valid_num(fin_data.get(key)) and key in props
         }
 
-        if fin_data.get("의견") and "목표가 범위" in props:
-            update_props["목표가 범위"] = {"select": {"name": fin_data["의견"]}}
+        if fin_data.get("추세") and "추세" in props:
+            update_props["추세"] = {"select": {"name": fin_data["추세"]}}
         
         set_page_date_property(update_props, props)
 

@@ -22,6 +22,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+import numpy as np
+import pandas as pd
+import FinanceDataReader as fdr
 
 # Windows 콘솔 인코딩 안전화
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -117,80 +120,99 @@ def get_finance_data(
 
     time.sleep(0.1)
 
-    # 2단계: 투자의견 조회 (비필수)
-    opinion = {}
-    try:
-        response = SESSION.get(
-            url=f"{url_base}/uapi/domestic-stock/v1/quotations/invest-opinion",
-            headers={**headers, "tr_id": "HHDFS76700100"},
-            params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": clean_ticker},
-            timeout=10,
-        )
-        response.raise_for_status()
-        output2 = response.json().get("output", [])
-        opinion = output2[0] if isinstance(output2, list) and output2 else {}
-    except Exception:
-        pass
-
-    time.sleep(0.1)
-
-    # 3단계: 일봉 차트 조회 및 최근 20영업일 직전 고점/저점 계산
+    # 2단계: 1년치 일봉 데이터(FDR)로 직전고저점 및 5대 퀀트 지표(200일선, 추세, 12M모멘텀, 52주낙폭, 60일변동성) 계산
     swing_high = None
     swing_low = None
+    vol_60d = None
+    drawdown_52w = None
+    ma200 = None
+    trend = None
+    mom_12m = None
+
     try:
-        end_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        start_date = (datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=40)).strftime("%Y%m%d")
-        response = SESSION.get(
-            url=f"{url_base}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-            headers={**headers, "tr_id": "FHKST03010100"},
-            params={
-                "FID_COND_MRKT_DIV_CODE": "J",
-                "FID_INPUT_ISCD": clean_ticker,
-                "FID_INPUT_DATE_1": start_date,
-                "FID_INPUT_DATE_2": end_date,
-                "FID_PERIOD_DIV_CODE": "D",
-                "FID_ORG_ADJ_PRC": "0"
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        output3 = response.json().get("output2", [])
-        
-        if isinstance(output3, list) and output3:
-            candles = list(reversed(output3))
-            formatted_candles = []
-            for day in candles:
-                try:
-                    formatted_candles.append({
-                        "high": int(day["stck_hgpr"]),
-                        "low": int(day["stck_lwpr"])
-                    })
-                except (KeyError, ValueError, TypeError):
-                    continue
-            
-            recent_candles = formatted_candles[-20:]
-            if recent_candles:
-                swing_high = max(day["high"] for day in recent_candles)
-                swing_low = min(day["low"] for day in recent_candles)
+        fdr_start = (datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=400)).strftime("%Y-%m-%d")
+        df_chart = fdr.DataReader(clean_ticker, fdr_start)
+        if df_chart is not None and not df_chart.empty:
+            c = df_chart["Close"].dropna() if "Close" in df_chart.columns else df_chart.iloc[:, 0].dropna()
+            if not c.empty:
+                curr_p_chart = float(c.iloc[-1])
+                ma200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+                trend = "🟢 상승추세" if curr_p_chart >= ma200 else "🔴 하락추세"
+                mom_12m = ((curr_p_chart - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
+
+                returns_60 = c.pct_change().tail(60).dropna()
+                if len(returns_60) >= 5:
+                    vol_60d = float(returns_60.std() * np.sqrt(252))
+
+                if "High" in df_chart.columns and "Low" in df_chart.columns:
+                    recent_20 = df_chart.tail(20)
+                    swing_high = float(recent_20["High"].max())
+                    swing_low = float(recent_20["Low"].min())
     except Exception:
-        pass
+        # FDR 예외 시 KIS 일봉 API로 스윙고저점 및 60일 변동성 폴백
+        try:
+            end_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+            start_date = (datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=120)).strftime("%Y%m%d")
+            response = SESSION.get(
+                url=f"{url_base}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                headers={**headers, "tr_id": "FHKST03010100"},
+                params={
+                    "FID_COND_MRKT_DIV_CODE": "J",
+                    "FID_INPUT_ISCD": clean_ticker,
+                    "FID_INPUT_DATE_1": start_date,
+                    "FID_INPUT_DATE_2": end_date,
+                    "FID_PERIOD_DIV_CODE": "D",
+                    "FID_ORG_ADJ_PRC": "0"
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            output3 = response.json().get("output2", [])
+            if isinstance(output3, list) and output3:
+                candles = list(reversed(output3))
+                formatted_candles = []
+                for day in candles:
+                    try:
+                        formatted_candles.append({
+                            "high": int(day["stck_hgpr"]),
+                            "low": int(day["stck_lwpr"]),
+                            "close": int(day["stck_clpr"])
+                        })
+                    except (KeyError, ValueError, TypeError):
+                        continue
+                recent_candles = formatted_candles[-20:]
+                if recent_candles:
+                    swing_high = max(day["high"] for day in recent_candles)
+                    swing_low = min(day["low"] for day in recent_candles)
+                closes = [c["close"] for c in formatted_candles]
+                if len(closes) >= 10:
+                    returns = pd.Series(closes[-60:]).pct_change().dropna()
+                    vol_60d = float(returns.std() * np.sqrt(252))
+        except Exception:
+            pass
+
+    curr_p = safe_float(output.get("stck_prpr"))
+    w52_h = safe_float(output.get("w52_hgpr"))
+    if curr_p is not None and w52_h is not None and w52_h > 0:
+        drawdown_52w = (curr_p - w52_h) / w52_h  # 노션 백분율 형식 (-0.15 = -15%)
 
     return {
-        "현재가": safe_float(output.get("stck_prpr")),
+        "현재가": curr_p,
         "PER": safe_float(output.get("per")),
         "PBR": safe_float(output.get("pbr")),
         "EPS": safe_float(output.get("eps")),
         "BPS": safe_float(output.get("bps")),
         "배당수익률": safe_float(output.get("dydt")),
-        "52주 최고가": safe_float(output.get("w52_hgpr")),
+        "52주 최고가": w52_h,
         "52주 최저가": safe_float(output.get("w52_lwpr")),
         "업종PER": safe_float(output.get("bts_per")),
-        "추정PER": safe_float(opinion.get("est_per")),
-        "추정EPS": safe_float(opinion.get("est_eps")),
-        "목표주가": safe_float(opinion.get("dstn_prce")) or safe_float(output.get("dstn_prce")),
-        "의견": opinion.get("invt_opnn_nm"),
         "직전고점": safe_float(swing_high),
         "직전저점": safe_float(swing_low),
+        "200일선": safe_float(round(ma200, 2)) if ma200 else None,
+        "추세": trend,
+        "12M 모멘텀": safe_float(round(mom_12m, 4)) if mom_12m is not None else None,
+        "52주 낙폭": safe_float(drawdown_52w),
+        "60일 변동성": safe_float(vol_60d),
     }
 
 
@@ -213,9 +235,8 @@ def build_finance_update_for_page(
         return None
 
     num_fields = [
-        "현재가", "PER", "PBR", "EPS", "BPS", "배당수익률",
-        "52주 최고가", "52주 최저가", "업종PER", "추정PER", "추정EPS", "목표주가",
-        "직전고점", "직전저점",
+        "현재가", "PER", "PBR", "EPS", "BPS", "배당수익률", "업종PER",
+        "직전고점", "직전저점", "60일 변동성", "52주 낙폭", "200일선", "12M 모멘텀"
     ]
 
     update_props = {
@@ -224,8 +245,8 @@ def build_finance_update_for_page(
         if data.get(field) is not None and field in props
     }
     
-    if data.get("의견") and "목표가 범위" in props:
-        update_props["목표가 범위"] = {"select": {"name": data["의견"]}}
+    if data.get("추세") and "추세" in props:
+        update_props["추세"] = {"select": {"name": data["추세"]}}
     
     set_page_date_property(update_props, props)
 
@@ -238,7 +259,8 @@ def build_finance_update_for_page(
     curr_price_str = f"{int(data['현재가']):,}" if data.get('현재가') else 'None'
     swing_high_str = f"{int(data['직전고점']):,}" if data.get('직전고점') else 'None'
     swing_low_str = f"{int(data['직전저점']):,}" if data.get('직전저점') else 'None'
-    print(f"   ✅ [Collect] {ticker} 완료 (현재가: {curr_price_str}원, 직전고점: {swing_high_str}, 직전저점: {swing_low_str})")
+    vol_str = f"{data['60일 변동성']*100:.1f}%" if data.get('60일 변동성') is not None else 'None'
+    print(f"   ✅ [Collect] {ticker} 완료 (현재가: {curr_price_str}원, 직전고점: {swing_high_str}, 직전저점: {swing_low_str}, 60일변동성: {vol_str})")
 
     return (page["id"], ticker, update_props, preview)
 
