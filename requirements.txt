@@ -13,3 +13,6 @@ requests
 beautifulsoup4
 lxml
 httpx
+
+# 4. Google GenAI (Gemini) SDK
+google-genai>=1.0.0

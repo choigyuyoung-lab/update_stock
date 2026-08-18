@@ -30,3 +30,18 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
         run: python update_price_us.py
+
+      # 🌟 시세 업데이트 완료 후 한-미 듀얼 올웨더 자산배분 진단 리포트 생성 및 노션 DB 적재
+      - name: Generate Portfolio All-Weather Report
+        if: always()
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+          ACCOUNT_STATUS_DB_ID: ${{ secrets.ACCOUNT_STATUS_DB_ID }}
+          STOCK_HOLDINGS_DB_ID: ${{ secrets.STOCK_HOLDINGS_DB_ID }}
+          ACCOUNT_HOLDINGS_DB_ID: ${{ secrets.ACCOUNT_HOLDINGS_DB_ID }}
+          TRADE_LOG_DB_ID: ${{ secrets.TRADE_LOG_DB_ID }}
+          CASH_FLOW_DB_ID: ${{ secrets.CASH_FLOW_DB_ID }}
+          NOTION_REPORT_DB_ID: ${{ secrets.NOTION_REPORT_DB_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python generate_portfolio_report.py

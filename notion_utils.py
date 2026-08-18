@@ -626,4 +626,499 @@ def find_best_bm(text: str, candidates: List[Dict[str, Any]]) -> Optional[str]:
                     best_len = len(kw)
                     best_bm = bm["ticker"]
     return best_bm
+
+
+# ==============================================================================
+# 8. 노션 Formula 2.0 속성 추출 및 마크다운 블록/페이지 생성 유틸리티
+# ==============================================================================
+def get_prop_value(props: Dict[str, Any], names: List[str]) -> Any:
+    """
+    노션 페이지 속성에서 Formula 2.0, number, title, rich_text, select, multi_select 등
+    다양한 타입의 실제 값을 안전하게 추출합니다.
+    """
+    for name in names:
+        if name not in props:
+            continue
+        prop = props[name]
+        ptype = prop.get("type")
+        
+        # 1. Formula 2.0 파싱
+        if ptype == "formula":
+            formula_obj = prop.get("formula", {})
+            f_type = formula_obj.get("type")
+            if f_type in ("number", "string", "boolean"):
+                return formula_obj.get(f_type)
+            elif f_type == "date":
+                date_val = formula_obj.get("date")
+                return date_val.get("start") if isinstance(date_val, dict) else date_val
+            return None
+        
+        # 2. 기본 숫자 및 날짜
+        elif ptype == "number":
+            return prop.get("number")
+        elif ptype == "date":
+            d = prop.get("date")
+            return d.get("start") if isinstance(d, dict) else None
+        
+        # 3. 텍스트 및 타이틀
+        elif ptype in ("title", "rich_text"):
+            arr = prop.get(ptype, [])
+            if arr and isinstance(arr, list):
+                return "".join([item.get("plain_text", "") for item in arr if isinstance(item, dict)]).strip()
+            return ""
+        
+        # 4. Select 및 Multi-select
+        elif ptype == "select":
+            sel = prop.get("select")
+            return sel.get("name") if isinstance(sel, dict) else None
+        elif ptype == "multi_select":
+            m_sels = prop.get("multi_select", [])
+            return [m.get("name") for m in m_sels if isinstance(m, dict) and m.get("name")]
+        
+        # 5. Checkbox
+        elif ptype == "checkbox":
+            return prop.get("checkbox", False)
+            
+        # 6. Relation
+        elif ptype == "relation":
+            return [r.get("id") for r in prop.get("relation", []) if isinstance(r, dict) and r.get("id")]
+            
+    return None
+
+
+def split_text_chunks(text: str, max_length: int = 1800) -> List[str]:
+    """노션의 단일 rich_text 블록 제한(2,000자)을 방어하기 위해 텍스트를 안전한 크기로 분할합니다."""
+    if not text:
+        return [""]
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    current = 0
+    while current < len(text):
+        chunks.append(text[current : current + max_length])
+        current += max_length
+    return chunks
+
+
+def _build_rich_text_array(text: str, max_length: int = 1800) -> List[Dict[str, Any]]:
+    """
+    마크다운 인라인 서식(**볼드**, *이탤릭*, `코드`, [링크](url))을 완벽히 파싱하여
+    Notion Rich Text 객체 배열(annotations)로 변환합니다.
+    HTML 줄바꿈 태그(<br>, <br/>)를 개행(\\n)으로 자동 치환합니다.
+    """
+    if not text:
+        return []
+
+    # HTML 태그 및 개행 태그 정제
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = text.replace('&nbsp;', ' ')
+    text = re.sub(r'</?(?:span|div|p|b|i|strong|em|font)[^>]*>', '', text, flags=re.IGNORECASE)
+
+    pattern = re.compile(
+        r'(\*\*(?:[^\*]+)\*\*|'        # **bold**
+        r'`(?:[^`]+)`|'                # `code`
+        r'\[(?:[^\]]+)\]\((?:[^)]+)\)|'# [link](url)
+        r'\*(?:[^\*]+)\*)'             # *italic*
+    )
+
+    tokens = pattern.split(text)
+    rich_text_elements: List[Dict[str, Any]] = []
+
+    for t in tokens:
+        if not t:
+            continue
+
+        # 1. Bold (**text**)
+        if t.startswith("**") and t.endswith("**") and len(t) >= 4:
+            content = t[2:-2][:max_length]
+            if content:
+                rich_text_elements.append({
+                    "type": "text",
+                    "text": {"content": content},
+                    "annotations": {"bold": True}
+                })
+        # 2. Inline Code (`code`)
+        elif t.startswith("`") and t.endswith("`") and len(t) >= 2:
+            content = t[1:-1][:max_length]
+            if content:
+                rich_text_elements.append({
+                    "type": "text",
+                    "text": {"content": content},
+                    "annotations": {"code": True}
+                })
+        # 3. Link ([text](url))
+        elif t.startswith("[") and "](" in t and t.endswith(")"):
+            m = re.match(r"^\[([^\]]+)\]\(([^)]+)\)$", t)
+            if m:
+                link_text, link_url = m.group(1)[:max_length], m.group(2)
+                rich_text_elements.append({
+                    "type": "text",
+                    "text": {"content": link_text, "link": {"url": link_url}}
+                })
+            else:
+                rich_text_elements.append({"type": "text", "text": {"content": t[:max_length]}})
+        # 4. Italic (*text*)
+        elif t.startswith("*") and t.endswith("*") and len(t) >= 2:
+            content = t[1:-1][:max_length]
+            if content:
+                rich_text_elements.append({
+                    "type": "text",
+                    "text": {"content": content},
+                    "annotations": {"italic": True}
+                })
+        # 5. Plain Text
+        else:
+            for chunk in split_text_chunks(t, max_length=max_length):
+                if chunk:
+                    rich_text_elements.append({
+                        "type": "text",
+                        "text": {"content": chunk}
+                    })
+
+    return rich_text_elements or [{"type": "text", "text": {"content": ""}}]
+
+
+
+def markdown_to_notion_blocks(markdown_text: str) -> List[Dict[str, Any]]:
+    """
+    마크다운 텍스트를 Notion API가 수용 가능한 블록 객체 리스트로 변환합니다.
+    제목(H1~H3), 계층형 들여쓰기 불릿/번호 리스트(Nested Children), 인용구(Quote),
+    구분선(Divider), 네이티브 표(Table), 코드블록, 일반 문단을 지원합니다.
+    """
+    blocks: List[Dict[str, Any]] = []
+    lines = markdown_text.splitlines()
+    i = 0
+    in_code_block = False
+    code_lang = "plain text"
+    code_lines: List[str] = []
+
+    # 계층형 목록 구조(들여쓰기) 추적 스택: [(indent_level, children_list)]
+    list_stack: List[Tuple[int, List[Dict[str, Any]]]] = [(-1, blocks)]
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # 1. 코드 블록 처리
+        if stripped.startswith("```"):
+            list_stack = [(-1, blocks)]
+            if not in_code_block:
+                in_code_block = True
+                lang_tag = stripped[3:].strip().lower()
+                code_lang = lang_tag if lang_tag else "plain text"
+                code_lines = []
+            else:
+                in_code_block = False
+                code_content = "\n".join(code_lines)
+                for chunk in split_text_chunks(code_content, max_length=1800):
+                    blocks.append({
+                        "object": "block",
+                        "type": "code",
+                        "code": {
+                            "rich_text": [{"type": "text", "text": {"content": chunk}}],
+                            "language": code_lang if code_lang in [
+                                "python", "javascript", "json", "markdown", "html", "css", "sql", "shell", "bash", "plain text"
+                            ] else "plain text"
+                        }
+                    })
+                code_lines = []
+            i += 1
+            continue
+
+        if in_code_block:
+            code_lines.append(line)
+            i += 1
+            continue
+
+        # 2. 빈 줄 건너뛰기
+        if not stripped:
+            i += 1
+            continue
+
+        # 3. 구분선 (Divider)
+        if stripped in ("---", "***", "___", "- - -", "* * *"):
+            list_stack = [(-1, blocks)]
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
+            i += 1
+            continue
+
+        # 4. 마크다운 표 감지 (| ... |) -> Notion 네이티브 Table 블록으로 완벽 변환
+        if stripped.startswith("|") and stripped.endswith("|"):
+            list_stack = [(-1, blocks)]
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            # 표 파싱 및 네이티브 블록 생성
+            rows_data: List[List[str]] = []
+            for t_line in table_lines:
+                s_t = t_line.strip()
+                if not s_t.startswith("|") or not s_t.endswith("|"):
+                    continue
+                # 구분선 (|---|---|) 건너뛰기
+                cleaned_cells = [c.strip() for c in s_t.split("|")[1:-1]]
+                if all(re.match(r"^:?-+:?$", c) for c in cleaned_cells if c):
+                    continue
+                rows_data.append(cleaned_cells)
+
+            if rows_data:
+                max_width = max(len(r) for r in rows_data)
+                if max_width >= 1:
+                    table_rows = []
+                    for r in rows_data:
+                        padded = r + [""] * (max_width - len(r))
+                        cells_rich = []
+                        for cell_text in padded:
+                            cell_rt = _build_rich_text_array(cell_text)
+                            cells_rich.append(cell_rt if cell_rt else [{"type": "text", "text": {"content": ""}}])
+                        table_rows.append({
+                            "type": "table_row",
+                            "table_row": {"cells": cells_rich}
+                        })
+
+                    blocks.append({
+                        "object": "block",
+                        "type": "table",
+                        "table": {
+                            "table_width": max_width,
+                            "has_column_header": True,
+                            "has_row_header": False,
+                            "children": table_rows
+                        }
+                    })
+                    continue
+
+            # 파싱 실패 시 fallback (code/markdown 블록)
+            table_content = "\n".join(table_lines)
+            for chunk in split_text_chunks(table_content, max_length=1800):
+                blocks.append({
+                    "object": "block",
+                    "type": "code",
+                    "code": {
+                        "rich_text": [{"type": "text", "text": {"content": chunk}}],
+                        "language": "markdown"
+                    }
+                })
+            continue
+
+        # 5. 제목 (H1 ~ H3)
+        if stripped.startswith("# "):
+            list_stack = [(-1, blocks)]
+            blocks.append({
+                "object": "block",
+                "type": "heading_1",
+                "heading_1": {"rich_text": _build_rich_text_array(stripped[2:].strip())}
+            })
+            i += 1
+            continue
+        elif stripped.startswith("## "):
+            list_stack = [(-1, blocks)]
+            blocks.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": _build_rich_text_array(stripped[3:].strip())}
+            })
+            i += 1
+            continue
+        elif stripped.startswith("### "):
+            list_stack = [(-1, blocks)]
+            blocks.append({
+                "object": "block",
+                "type": "heading_3",
+                "heading_3": {"rich_text": _build_rich_text_array(stripped[4:].strip())}
+            })
+            i += 1
+            continue
+        elif stripped.startswith("#### "):
+            list_stack = [(-1, blocks)]
+            blocks.append({
+                "object": "block",
+                "type": "heading_3",
+                "heading_3": {"rich_text": _build_rich_text_array(stripped[5:].strip())}
+            })
+            i += 1
+            continue
+
+        # 들여쓰기 크기 계산 (공백)
+        indent = len(line) - len(line.lstrip(" "))
+
+        # 6. 불릿 리스트 (- or *)
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            content = stripped[2:].strip()
+            block = {
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": _build_rich_text_array(content),
+                    "children": []
+                }
+            }
+            while len(list_stack) > 1 and list_stack[-1][0] >= indent:
+                list_stack.pop()
+            list_stack[-1][1].append(block)
+            list_stack.append((indent, block["bulleted_list_item"]["children"]))
+            i += 1
+            continue
+
+        # 7. 번호 리스트 (1. , 2. ...)
+        elif re.match(r"^\d+\.\s+", stripped):
+            match = re.match(r"^\d+\.\s+", stripped)
+            content = stripped[match.end():].strip() if match else stripped
+            block = {
+                "object": "block",
+                "type": "numbered_list_item",
+                "numbered_list_item": {
+                    "rich_text": _build_rich_text_array(content),
+                    "children": []
+                }
+            }
+            while len(list_stack) > 1 and list_stack[-1][0] >= indent:
+                list_stack.pop()
+            list_stack[-1][1].append(block)
+            list_stack.append((indent, block["numbered_list_item"]["children"]))
+            i += 1
+            continue
+
+        # 8. 인용구 (Quote > )
+        elif stripped.startswith("> "):
+            list_stack = [(-1, blocks)]
+            content = stripped[2:].strip()
+            blocks.append({
+                "object": "block",
+                "type": "quote",
+                "quote": {"rich_text": _build_rich_text_array(content)}
+            })
+            i += 1
+            continue
+
+        # 9. 일반 문단 (Paragraph)
+        else:
+            list_stack = [(-1, blocks)]
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": _build_rich_text_array(stripped)}
+            })
+            i += 1
+
+    # 후처리: 빈 children 배열 제거 및 재귀 정리
+    def _clean_empty_children(block_list: List[Dict[str, Any]]) -> None:
+        for b in block_list:
+            btype = b.get("type")
+            if btype in ("bulleted_list_item", "numbered_list_item"):
+                ch = b.get(btype, {}).get("children", [])
+                if not ch:
+                    b[btype].pop("children", None)
+                else:
+                    _clean_empty_children(ch)
+
+    _clean_empty_children(blocks)
+    return blocks
+
+
+
+def safe_append_blocks(
+    client: Any,
+    block_id: str,
+    children: List[Dict[str, Any]],
+    batch_size: int = 80,
+    max_retries: int = 3,
+    retry_delay: float = 2.0
+) -> bool:
+    """노션 페이지/블록에 자식 블록들을 80~100개 단위로 안전하게 나누어 추가합니다."""
+    if not children:
+        return True
+    
+    total = len(children)
+    for i in range(0, total, batch_size):
+        chunk = children[i : i + batch_size]
+        attempt = 1
+        success = False
+        while attempt <= max_retries:
+            try:
+                client.blocks.children.append(block_id=block_id, children=chunk)
+                success = True
+                break
+            except HTTPResponseError as error:
+                status = getattr(error, "status", None)
+                if status in RETRY_STATUS_CODES and attempt < max_retries:
+                    print(f"   ⚠️ Blocks append retry {attempt}/{max_retries} - status={status}: {error}")
+                    time.sleep(retry_delay * attempt)
+                    attempt += 1
+                    continue
+                print(f"   ❌ Blocks append failed: {_format_notion_error(error)}")
+                break
+            except Exception as error:
+                if attempt < max_retries:
+                    print(f"   ⚠️ Blocks append retry {attempt}/{max_retries}: {error}")
+                    time.sleep(retry_delay * attempt)
+                    attempt += 1
+                    continue
+                print(f"   ❌ Blocks append failed: {error}")
+                break
+        if not success:
+            return False
+        time.sleep(0.3)
+    return True
+
+
+def safe_create_page(
+    client: Any,
+    database_id: str,
+    properties: Dict[str, Any],
+    children: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> Optional[Dict[str, Any]]:
+    """
+    재시도 로직과 100개 초과 블록 청크 분할을 지원하는 안전한 노션 페이지 생성 함수.
+    생성된 페이지 객체를 반환합니다.
+    """
+    children_to_send = children or []
+    initial_children = children_to_send[:80]
+    remaining_children = children_to_send[80:]
+
+    attempt = 1
+    page: Optional[Dict[str, Any]] = None
+    
+    while attempt <= max_retries:
+        try:
+            payload: Dict[str, Any] = {
+                "parent": {"database_id": database_id},
+                "properties": properties,
+            }
+            if initial_children:
+                payload["children"] = initial_children
+                
+            page = cast(Dict[str, Any], client.pages.create(**payload))
+            break
+        except HTTPResponseError as error:
+            status = getattr(error, "status", None)
+            if status in RETRY_STATUS_CODES and attempt < max_retries:
+                print(f"   ⚠️ Notion page create retry {attempt}/{max_retries} - status={status}: {error}")
+                time.sleep(retry_delay * attempt)
+                attempt += 1
+                continue
+            print(f"   ❌ Notion page create failed: {_format_notion_error(error)}")
+            return None
+        except Exception as error:
+            if attempt < max_retries:
+                print(f"   ⚠️ Notion page create retry {attempt}/{max_retries}: {error}")
+                time.sleep(retry_delay * attempt)
+                attempt += 1
+                continue
+            print(f"   ❌ Notion page create failed: {error}")
+            return None
+
+    if page and remaining_children:
+        page_id = page.get("id")
+        if page_id:
+            ok = safe_append_blocks(client, page_id, remaining_children)
+            if not ok:
+                print("   ⚠️ 나머지 블록 추가 중 일부 오류가 발생했습니다.")
+
+    return page
+
 
