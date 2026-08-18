@@ -736,6 +736,7 @@ def upload_report_to_notion(
 
     for prop_name, prop_val in db_props.items():
         ptype = prop_val.get("type")
+        pname = prop_name.strip()
 
         # 1) Title (이름)
         if ptype == "title":
@@ -744,30 +745,33 @@ def upload_report_to_notion(
             }
 
         # 2) Date (날짜/일자)
-        elif ptype == "date" and any(k in prop_name for k in ["일자", "날짜", "Date", "생성일", "업데이트"]):
+        elif ptype == "date":
             page_properties[prop_name] = {"date": {"start": kst_isoformat()}}
 
-        # 3) Number - 총 평가자산
-        elif ptype == "number" and any(k in prop_name for k in ["총 평가자산", "총평가자산", "총자산", "평가자산", "자산", "Total Asset"]):
-            page_properties[prop_name] = {"number": round(total_eval_krw)}
+        # 3) Number - 현금 비중 (%) vs 총 평가자산
+        elif ptype == "number":
+            if any(k in pname for k in ["현금", "Cash", "%", "비중", "Ratio"]):
+                page_properties[prop_name] = {"number": round(cash_pct, 1)}
+            else:
+                page_properties[prop_name] = {"number": round(total_eval_krw)}
 
-        # 4) Number - 현금 비중 (%)
-        elif ptype == "number" and any(k in prop_name for k in ["현금 비중", "현금비중", "현금", "Cash Ratio"]):
-            page_properties[prop_name] = {"number": round(cash_pct, 1)}
-
-        # 5) Select - 올웨더 적합도
-        elif ptype == "select" and any(k in prop_name for k in ["적합도", "올웨더", "상태", "Fitness", "Grade"]):
+        # 4) Select - 올웨더 적합도
+        elif ptype == "select":
             page_properties[prop_name] = {"select": {"name": fitness_grade}}
 
-        # 6) Multi-Select - 핵심 조치
-        elif ptype == "multi_select" and any(k in prop_name for k in ["조치", "액션", "Actions", "Action Plan", "가이드"]):
+        # 5) Multi-Select - 핵심 조치
+        elif ptype == "multi_select":
             page_properties[prop_name] = {"multi_select": [{"name": kw} for kw in action_keywords]}
 
-        # 7) Rich Text - 요약
-        elif ptype == "rich_text" and any(k in prop_name for k in ["요약", "텍스트", "Summary", "Description"]):
+        # 6) Rich Text - 요약
+        elif ptype == "rich_text":
             page_properties[prop_name] = {
                 "rich_text": [{"type": "text", "text": {"content": summary_text}}]
             }
+
+    print(f"📋 [Notion DB] 주입될 페이지 속성 ({len(page_properties)}개 매핑됨): {list(page_properties.keys())}")
+    for k, v in page_properties.items():
+        print(f"   • {k}: {v}")
 
     blocks = markdown_to_notion_blocks(report_markdown)
     print(f"🧩 [Notion DB] 변환된 노션 블록 수: {len(blocks)}개")
