@@ -1,8 +1,11 @@
 name: US Finance Update
 
 on:
+  # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [us_finance]
+    types: [us_finance_update, us_finance]
+
+  # 2. GitHub 웹 UI 수동 실행 트리거 ("Run workflow" 버튼)
   workflow_dispatch:
 
 jobs:

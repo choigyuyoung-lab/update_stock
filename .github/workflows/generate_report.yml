@@ -1,12 +1,12 @@
 name: Generate Portfolio All-Weather Report
 
 on:
+  # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
     types: [generate_report, portfolio_report]
+
+  # 2. GitHub 웹 UI 수동 실행 트리거 ("Run workflow" 버튼)
   workflow_dispatch:
-  # 매일 한국시간 오전 09:00 (UTC 00:00) 정기 자산배분 진단 리포트 실행
-  schedule:
-    - cron: '0 0 * * *'
 
 jobs:
   portfolio-report:

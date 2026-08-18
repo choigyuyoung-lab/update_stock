@@ -42,8 +42,6 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 # ==============================================================================
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_PAGE_SIZE = 100
-
-KIS_VTS_URL = "https://openapivts.koreainvestment.com:29443"
 KIS_PROD_URL = "https://openapi.koreainvestment.com:9443"
 
 
@@ -576,68 +574,44 @@ def _request_kis_token(
 
 def get_kis_auth_context(max_retries: int = 2, base_delay: float = 1.5) -> Optional[Dict[str, Any]]:
     """
-    한국투자증권 인증 컨텍스트를 반환합니다.
-    기본적으로 실전투자 서버(PROD)를 1순위로 연결하며, 실전 인증 실패 시 모의투자 서버(VTS)로 자동 전환(Fallback)합니다.
+    한국투자증권(KIS) 실전투자(PROD) API 인증 컨텍스트를 반환합니다.
     """
-    # 1. 키 설정 수집 (실전투자 키 우선 매핑)
-    prod_app_key = (
-        os.environ.get("KIS_PROD_APP_KEY")
+    app_key = (
+        os.environ.get("KIS_APP_KEY")
+        or os.environ.get("KIS_PROD_APP_KEY")
         or os.environ.get("KIS_REAL_APP_KEY")
-        or os.environ.get("KIS_APP_KEY")
         or ""
-    )
-    prod_app_secret = (
-        os.environ.get("KIS_PROD_APP_SECRET")
+    ).strip()
+    app_secret = (
+        os.environ.get("KIS_APP_SECRET")
+        or os.environ.get("KIS_PROD_APP_SECRET")
         or os.environ.get("KIS_REAL_APP_SECRET")
-        or os.environ.get("KIS_APP_SECRET")
         or ""
+    ).strip()
+
+    if not app_key or not app_secret:
+        print("⚠️ [KIS API] KIS_APP_KEY 또는 KIS_APP_SECRET이 설정되지 않았습니다.")
+        return None
+
+    token = _request_kis_token(
+        url_base=KIS_PROD_URL,
+        app_key=app_key,
+        app_secret=app_secret,
+        max_retries=max_retries,
+        base_delay=base_delay,
+        env_name="실전투자(PROD)"
     )
+    if token:
+        print("✅ [KIS API] 실전투자(PROD) 서버 인증 완료")
+        return {
+            "token": token,
+            "url_base": KIS_PROD_URL,
+            "app_key": app_key,
+            "app_secret": app_secret,
+            "env_type": "PROD"
+        }
 
-    vts_app_key = os.environ.get("KIS_VTS_APP_KEY") or ""
-    vts_app_secret = os.environ.get("KIS_VTS_APP_SECRET") or ""
-
-    # 2. 실전투자(PROD) 우선 시도
-    if prod_app_key and prod_app_secret:
-        token = _request_kis_token(
-            url_base=KIS_PROD_URL,
-            app_key=prod_app_key,
-            app_secret=prod_app_secret,
-            max_retries=max_retries,
-            base_delay=base_delay,
-            env_name="실전투자(PROD)"
-        )
-        if token:
-            print("✅ [KIS API] 실전투자(PROD) 서버 인증 완료")
-            return {
-                "token": token,
-                "url_base": KIS_PROD_URL,
-                "app_key": prod_app_key,
-                "app_secret": prod_app_secret,
-                "env_type": "PROD"
-            }
-        print("⚠️ [KIS API] 실전투자 서버 응답 실패. 모의투자(VTS) 서버로 전환(Fallback) 시도...")
-
-    # 3. 모의투자(VTS) Fallback 시도
-    if vts_app_key and vts_app_secret:
-        token = _request_kis_token(
-            url_base=KIS_VTS_URL,
-            app_key=vts_app_key,
-            app_secret=vts_app_secret,
-            max_retries=max_retries,
-            base_delay=base_delay,
-            env_name="모의투자(VTS)"
-        )
-        if token:
-            print("✅ [KIS API] 모의투자(VTS) 서버 인증 완료")
-            return {
-                "token": token,
-                "url_base": KIS_VTS_URL,
-                "app_key": vts_app_key,
-                "app_secret": vts_app_secret,
-                "env_type": "VTS"
-            }
-
-    print("❌ [KIS API] 실전투자 및 모의투자 서버 모두 토큰 발급에 실패하였습니다.")
+    print("❌ [KIS API] 실전투자(PROD) 서버 토큰 발급에 실패하였습니다.")
     return None
 
 

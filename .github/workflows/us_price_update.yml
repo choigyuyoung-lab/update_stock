@@ -1,8 +1,11 @@
 name: US Stock Price Update
 
 on:
+  # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [us_update]
+    types: [us_update, us_price_update]
+
+  # 2. GitHub 웹 UI 수동 실행 트리거 ("Run workflow" 버튼)
   workflow_dispatch:
 
 jobs:
