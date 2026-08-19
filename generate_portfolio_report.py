@@ -53,6 +53,7 @@ from config_portfolio import (
     TARGET_ALLOCATION,
     ASSET_ORDER,
     REBALANCING_DRIFT_THRESHOLD_PCT,
+    ACCOUNT_POLICIES,
     FX_MACRO_RULES,
     classify_asset,
 )
@@ -83,17 +84,18 @@ REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports"
 # ==============================================================================
 # 2. 다중 노션 DB 통합 데이터 수집부 (숨김/계산 퀀트 열 전수 수집)
 # ==============================================================================
-def collect_account_status(client: Any, db_id: str) -> Dict[str, Any]:
+def collect_account_status(client: Any, db_id: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """
     [투자계좌현황 DB]를 조회하여 계좌별(ISA, 연금, IRP 등) 총자산, 현금 예수금, 투자원금,
-    수익률, 현금비중, 확정손익, 누적 배당금을 수집합니다.
+    수익률, 현금비중, 확정손익을 수집하고 페이지 ID -> 계좌명 매핑 딕셔너리를 반환합니다.
     """
     if not db_id:
         print("ℹ️ [Notion] 1. ACCOUNT_STATUS_DB_ID가 설정되지 않아 계좌현황 조회를 건너뜁니다.")
-        return {"accounts": [], "total_asset_val": 0.0, "total_cash_val": 0.0, "total_invest_val": 0.0}
+        return {"accounts": [], "total_asset_val": 0.0, "total_cash_val": 0.0, "total_invest_val": 0.0}, {}
 
     print("🏦 [Notion] 1. 투자계좌현황 DB 스캔 시작...")
     accounts: List[Dict[str, Any]] = []
+    account_id_to_name: Dict[str, str] = {}
     total_asset_val = 0.0
     total_cash_val = 0.0
     total_invest_val = 0.0
@@ -104,6 +106,11 @@ def collect_account_status(client: Any, db_id: str) -> Dict[str, Any]:
         for page in paginate_database(client, db_id, page_size=100, retry_delay=0.2):
             props = page.get("properties", {})
             name = str(get_prop_value(props, ["이름", "Name", "계좌명"]) or "").strip()
+            page_id = page.get("id", "")
+            if page_id and name:
+                account_id_to_name[page_id] = name
+                account_id_to_name[page_id.replace("-", "")] = name
+
             checked = get_prop_value(props, ["체크박스"])
             asset_eval = safe_float(get_prop_value(props, ["자산평가", "평가자산", "총자산"])) or 0.0
             cash = safe_float(get_prop_value(props, ["현금", "예수금"])) or 0.0
@@ -123,6 +130,7 @@ def collect_account_status(client: Any, db_id: str) -> Dict[str, Any]:
             if name:
                 accounts.append({
                     "name": name,
+                    "page_id": page_id,
                     "checked": checked,
                     "asset_eval": asset_eval,
                     "cash": cash,
@@ -155,7 +163,47 @@ def collect_account_status(client: Any, db_id: str) -> Dict[str, Any]:
         "total_invest_val": total_invest_val,
         "total_realized_profit": total_realized_profit,
         "total_dividend": total_dividend,
-    }
+    }, account_id_to_name
+
+
+def collect_cash_flow_deposits(
+    client: Any,
+    db_id: str,
+    account_id_to_name: Dict[str, str],
+    target_year: str = ""
+) -> Dict[str, float]:
+    """
+    [입출금현황 DB]를 조회하여 당해연도(target_year) 기준 구분열이 '입금'인 내역의
+    계좌별 합산 입금액(연도별 입금액)을 정밀 집계합니다.
+    """
+    if not db_id:
+        return {}
+
+    if not target_year:
+        target_year = get_kst_str("%Y")
+
+    print(f"💳 [Notion] {target_year}년도 입출금 현황 DB(입금액) 스캔 시작...")
+    yearly_deposits: Dict[str, float] = {}
+
+    try:
+        for page in paginate_database(client, db_id, page_size=100, retry_delay=0.2):
+            props = page.get("properties", {})
+            date_val = str(get_prop_value(props, ["날짜", "Date", "일자"]) or "").strip()
+            type_val = str(get_prop_value(props, ["구분", "Type", "분류", "입출금구분"]) or "").strip()
+            amt_val = safe_float(get_prop_value(props, ["금액", "입금액", "Amount"])) or 0.0
+            acc_rels = props.get("투자계좌현황", {}).get("relation", [])
+
+            if type_val == "입금" and date_val.startswith(target_year) and amt_val > 0:
+                for rel in acc_rels:
+                    r_id = rel.get("id", "")
+                    a_name = account_id_to_name.get(r_id) or account_id_to_name.get(r_id.replace("-", "")) or "미지정"
+                    yearly_deposits[a_name] = yearly_deposits.get(a_name, 0.0) + amt_val
+
+        print(f"   ✅ {target_year}년 당해연도 계좌별 입금액 집계 완료: {yearly_deposits}")
+    except Exception as e:
+        print(f"   ⚠️ 입출금현황 DB 조회 실패: {e}")
+
+    return yearly_deposits
 
 
 def collect_stock_holdings_meta(client: Any, db_id: str) -> Dict[str, Dict[str, Any]]:
@@ -199,10 +247,14 @@ def collect_stock_holdings_meta(client: Any, db_id: str) -> Dict[str, Dict[str, 
     return stock_meta
 
 
-def collect_account_holdings_detail(client: Any, db_id: str) -> Dict[str, List[Dict[str, Any]]]:
+def collect_account_holdings_detail(
+    client: Any,
+    db_id: str,
+    account_id_to_name: Dict[str, str]
+) -> Dict[str, List[Dict[str, Any]]]:
     """
-    [계좌별 보유종목 DB]를 조회하여 계좌별 보유 종목, 실시간 투자가이드(50%익절/물타기/추세추종),
-    매수단가, 익절가, 평가비중, 누적수익률 등을 수집합니다.
+    [계좌별 보유종목 DB]를 조회하여 계좌별 보유 종목, 실시간 투자가이드,
+    투자계좌현황 relation 기반 정확한 소속 계좌명을 매핑합니다.
     """
     if not db_id:
         print("ℹ️ [Notion] 3. ACCOUNT_HOLDINGS_DB_ID가 설정되지 않아 계좌별 종목 상세 조회를 건너뜁니다.")
@@ -226,12 +278,18 @@ def collect_account_holdings_detail(client: Any, db_id: str) -> Dict[str, List[D
             pos_52w = get_prop_value(props, ["52주위치"])
             div_amt = safe_float(get_prop_value(props, ["배당"])) or 0.0
 
+            # 투자계좌현황 Relation 기반 정확한 소속 계좌명 판별
+            acc_rels = props.get("투자계좌현황", {}).get("relation", [])
+            resolved_acc_names = [account_id_to_name.get(r["id"].replace("-", "")) or account_id_to_name.get(r["id"]) for r in acc_rels]
+            target_acc_name = resolved_acc_names[0] if (resolved_acc_names and resolved_acc_names[0]) else port
+
             if name:
                 base_name = name.split("#")[0].strip()
                 if base_name not in account_holdings_map:
                     account_holdings_map[base_name] = []
                 account_holdings_map[base_name].append({
                     "full_name": name,
+                    "account_name": target_acc_name,
                     "guide": guide,
                     "portfolio": port,
                     "qty": qty,
@@ -302,19 +360,24 @@ def fetch_latest_previous_report(client: Any, db_id: str) -> Optional[Dict[str, 
 
 def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
     """
-    4대 데이터베이스 및 직전 리포트 DB를 통합 조회하여 퀀트 지표(안전마진, 52주 위치, 배당수익률, 투자가이드, 전주 대비 변화)를 결합합니다.
+    4대 데이터베이스, 입출금현황 DB 및 직전 리포트 DB를 통합 조회하여
+    퀀트 지표(안전마진, 52주 위치, 배당수익률, 투자가이드, 연도별 입금 실적)를 결합합니다.
     """
     # 0. 직전(전주) 리포트 스냅샷 수집
     prev_report = fetch_latest_previous_report(client, NOTION_REPORT_DB_ID)
 
-    # 1. 계좌 현황 수집
-    account_status = collect_account_status(client, ACCOUNT_STATUS_DB_ID)
+    # 1. 계좌 현황 수집 및 계좌 ID 매퍼 생성
+    account_status, account_id_to_name = collect_account_status(client, ACCOUNT_STATUS_DB_ID)
     
-    # 2. 종목별 보유현황 메타 수집
+    # 2. 입출금 현황 DB에서 당해연도(2026년) 계좌별 입금액 집계
+    current_year = get_kst_str("%Y")
+    yearly_deposits = collect_cash_flow_deposits(client, CASH_FLOW_DB_ID, account_id_to_name, current_year)
+
+    # 3. 종목별 보유현황 메타 수집
     stock_meta = collect_stock_holdings_meta(client, STOCK_HOLDINGS_DB_ID)
 
-    # 3. 계좌별 보유종목 상세 수집
-    account_holdings = collect_account_holdings_detail(client, ACCOUNT_HOLDINGS_DB_ID)
+    # 4. 계좌별 보유종목 상세 수집 (정확한 계좌 Relation 매핑)
+    account_holdings = collect_account_holdings_detail(client, ACCOUNT_HOLDINGS_DB_ID, account_id_to_name)
 
     # 4. 투자주 DB(마스터) 전수 스캔 (숨김 퀀트 지표 포함)
     print("📋 [Notion] 4. 투자주 DB(마스터) 스캔 시작...")
@@ -453,86 +516,91 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
         "stock_meta": stock_meta,
         "account_holdings": account_holdings,
         "holdings": raw_holdings,
+        "yearly_deposits": yearly_deposits,
+        "current_year": current_year,
     }
 
 
-# ==============================================================================
-# 3. K-올라운드 마스터 7대 자산배분 통계 분석부
-# ==============================================================================
 def analyze_integrated_portfolio(
     portfolio_dataset: Dict[str, Any],
     macro_snapshot: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    통합 포트폴리오 데이터를 「K-올라운드 마스터」 7대 자산군, 테마별, 퀀트 지표별로 분석하고
-    실시간 매크로 스냅샷을 결합하여 분석 지표를 산출합니다.
+    통합 수집된 포트폴리오 데이터를 기반으로 7대 자산군 비중, 리밸런싱 필요액, 
+    연간 세액공제 실시간 트래커, 6대 계좌별 독립 진단 마크다운을 산출합니다.
     """
-    holdings = portfolio_dataset["holdings"]
     account_status = portfolio_dataset["account_status"]
-    
-    # 1. 총 평가금액 계산 (종목 평가액 + 현금 예수금)
-    stock_total_krw = sum(h["eval_asset"] for h in holdings)
-    cash_total_krw = account_status.get("total_cash_val", 0.0)
-    total_eval_krw = stock_total_krw + cash_total_krw
-    cash_pct = (cash_total_krw / total_eval_krw * 100.0) if total_eval_krw > 0 else 0.0
+    stock_meta = portfolio_dataset["stock_meta"]
+    holdings = portfolio_dataset["holdings"]
+    prev_report = portfolio_dataset.get("prev_report")
+    yearly_deposits = portfolio_dataset.get("yearly_deposits", {})
+    current_year = portfolio_dataset.get("current_year", get_kst_str("%Y"))
 
-    # 2. 7대 자산군 구조 초기화
-    asset_groups: Dict[str, Dict[str, Any]] = {
-        code: {
-            "code": code,
+    # 1. 7대 자산군 컨테이너 초기화
+    asset_groups: Dict[str, Dict[str, Any]] = {}
+    for code, cfg in K_ALL_ROUND_MASTER_CONFIG.items():
+        asset_groups[code] = {
             "name": cfg["name"],
             "target_pct": cfg["target_pct"],
-            "currency_exposure": cfg["currency_exposure"],
             "role": cfg["role"],
+            "currency_exposure": cfg["currency_exposure"],
             "eval_krw": 0.0,
             "actual_pct": 0.0,
             "drift_pct": 0.0,
             "rebalance_krw": 0.0,
             "holdings": [],
         }
-        for code, cfg in K_ALL_ROUND_MASTER_CONFIG.items()
-    }
 
-    # 3. 현금 예수금을 '국내 채권 & 단기자금'에 안전자산/단기자금으로 자동 편입
-    if cash_total_krw > 0:
-        asset_groups["KR_BOND_SHORT"]["eval_krw"] += cash_total_krw
-        asset_groups["KR_BOND_SHORT"]["holdings"].append({
-            "ticker": "CASH_KRW",
-            "name": "원화 현금 / 계좌 예수금",
-            "eval_asset": cash_total_krw,
-            "current_price": 1.0,
-            "asset_code": "KR_BOND_SHORT",
-            "asset_name": "국내 채권 & 단기자금",
-            "theme": "Safe/Cash",
-            "pos_52w": None,
-            "margin_of_safety": "",
-            "guides": ["유동성 보유"],
-        })
+    # 2. 총 평가자산 및 현금 합산
+    total_eval_krw = account_status.get("total_asset_val", 0.0)
+    cash_total_krw = account_status.get("total_cash_val", 0.0)
+    stock_total_krw = total_eval_krw - cash_total_krw if total_eval_krw >= cash_total_krw else total_eval_krw
 
-    # 4. 종목별 자산군 분류 및 금액 합산
+    # 만약 계좌현황 DB 총자산이 0이면 실보유 종목 합산으로 대체
+    if total_eval_krw <= 0:
+        stock_total_krw = sum(h.get("eval_asset", 0.0) for h in holdings)
+        total_eval_krw = stock_total_krw + cash_total_krw
+
+    cash_pct = (cash_total_krw / total_eval_krw * 100.0) if total_eval_krw > 0 else 0.0
+
+    # 3. 현금 예수금을 7대 자산군에 자동 배분
+    krw_cash = cash_total_krw
+    usd_cash = 0.0
+    for h in holdings:
+        if h.get("name") in ["달러예수금", "USD 현금", "달러 현금"]:
+            usd_cash += h.get("eval_asset", 0.0)
+            krw_cash = max(0.0, krw_cash - h.get("eval_asset", 0.0))
+
+    if krw_cash > 0:
+        asset_groups["KR_BOND_SHORT"]["eval_krw"] += krw_cash
+    if usd_cash > 0:
+        asset_groups["COMMODITY_CASH"]["eval_krw"] += usd_cash
+
+    # 4. 종목별 자산군 분류 및 테마별 비중 집계
     theme_distribution: Dict[str, float] = {}
 
     for h in holdings:
-        code, cname = classify_asset(
+        code, name = classify_asset(
             name=h["name"],
-            ticker=h["ticker"],
-            market=h["market"],
-            country=h["country"],
-            custom_portfolio=h["portfolio_theme"],
-            custom_selection=h["selection"],
+            ticker=h.get("ticker", ""),
+            market=h.get("market", ""),
+            country=h.get("country", ""),
+            custom_portfolio=h.get("portfolio_theme", ""),
+            custom_selection=h.get("selection", ""),
         )
-        if code not in asset_groups:
-            code = "US_CORE_INDEX"
 
         h_info = {
-            "ticker": h["ticker"],
             "name": h["name"],
+            "ticker": h.get("ticker", ""),
             "eval_asset": h["eval_asset"],
             "current_price": h["current_price"],
-            "asset_code": code,
-            "asset_name": cname,
-            "theme": h["portfolio_theme"] or h["selection"] or "General",
+            "portfolio_theme": h.get("portfolio_theme", ""),
+            "selection": h.get("selection", ""),
+            "country": h.get("country", ""),
+            "theme": h.get("portfolio_theme") or "기타",
             "pos_52w": h.get("pos_52w"),
+            "high_52w": h.get("high_52w"),
+            "low_52w": h.get("low_52w"),
             "margin_of_safety": h.get("margin_of_safety"),
             "target_price": h.get("target_price"),
             "div_yield": h.get("div_yield"),
@@ -581,25 +649,175 @@ def analyze_integrated_portfolio(
         )
     asset_summary_table = "\n".join(summary_lines)
 
-    # 7. 계좌별 요약 텍스트 (숨김 퀀트 열 포함: 자산수익률, 현금/자산 비중 등)
-    account_lines = []
-    for acc in account_status.get("accounts", []):
-        checked_mark = "✅" if acc["checked"] else "⬜"
-        acc_yield_str = f", 자산수익률 {acc['asset_yield']*100:+.1f}%" if isinstance(acc.get("asset_yield"), (int, float)) else ""
-        cash_ratio_str = f", 현금비중 {acc['cash_asset_ratio']*100:.1f}%" if isinstance(acc.get("cash_asset_ratio"), (int, float)) else ""
-        account_lines.append(
-            f"- {checked_mark} **{acc['name']}**: 총자산 {acc['asset_eval']:,.0f}원 (현금 {acc['cash']:,.0f}원, 투자액 {acc['invest_eval']:,.0f}원{acc_yield_str}{cash_ratio_str})"
-        )
-    account_summary_text = "\n".join(account_lines) if account_lines else "계좌 정보 수신 대기 중"
+    # 7. 6대 계좌별 매핑 및 데이터 분류
+    account_map_data: Dict[str, Dict[str, Any]] = {
+        "삼성연금": {"info": None, "holdings": [], "policy": ACCOUNT_POLICIES["삼성연금"]},
+        "미래연금": {"info": None, "holdings": [], "policy": ACCOUNT_POLICIES["미래연금"]},
+        "삼성IRP": {"info": None, "holdings": [], "policy": ACCOUNT_POLICIES["삼성IRP"]},
+        "삼성이전": {"info": None, "holdings": [], "policy": ACCOUNT_POLICIES["삼성이전"]},
+        "삼성ISA": {"info": None, "holdings": [], "policy": ACCOUNT_POLICIES["삼성ISA"]},
+        "삼성종합": {"info": None, "holdings": [], "policy": ACCOUNT_POLICIES["삼성종합"]},
+    }
 
-    # 8. 테마별 요약 텍스트
+    def match_account_key(raw_name: str) -> str:
+        raw = str(raw_name or "").strip()
+        if any(k in raw for k in ["삼성이전", "연금이전", "이전연금", "이전"]):
+            return "삼성이전"
+        if any(k in raw for k in ["미래연금", "미래에셋", "미래"]):
+            return "미래연금"
+        if any(k in raw for k in ["삼성IRP", "IRP", "개인형IRP"]):
+            return "삼성IRP"
+        if any(k in raw for k in ["삼성ISA", "ISA", "중개형ISA"]):
+            return "삼성ISA"
+        if any(k in raw for k in ["삼성연금", "연금저축", "삼성연금저축"]):
+            return "삼성연금"
+        if any(k in raw for k in ["삼성종합", "종합위탁", "해외주식", "일반위탁", "일반"]):
+            return "삼성종합"
+        return "삼성종합"
+
+    # 계좌별 현황 매핑
+    for acc in account_status.get("accounts", []):
+        acc_key = match_account_key(acc["name"])
+        if acc_key in account_map_data:
+            account_map_data[acc_key]["info"] = acc
+
+    # 계좌별 보유종목 매핑 (투자계좌현황 Relation 기반 정확한 소속 계좌 배속)
+    account_holdings_map = portfolio_dataset.get("account_holdings", {})
+    for stock_name, details in account_holdings_map.items():
+        for d in details:
+            acc_name = d.get("account_name") or d.get("portfolio") or d.get("full_name", "")
+            acc_key = match_account_key(acc_name)
+            if acc_key in account_map_data:
+                account_map_data[acc_key]["holdings"].append({
+                    "stock_name": stock_name,
+                    "full_name": d.get("full_name", stock_name),
+                    "eval_amt": d.get("eval_amt", 0.0),
+                    "qty": d.get("qty", 0.0),
+                    "price": d.get("price", 0.0),
+                    "buy_price": d.get("buy_price", 0.0),
+                    "cum_ret": d.get("cum_ret"),
+                    "guide": d.get("guide", ""),
+                })
+
+    # 8. [신규] 연간 900만원 세액공제(입출금 현황 DB의 당해연도 입금 합산 기준) 실시간 트래커 산출
+    pension_target = 6_000_000.0
+    irp_target = 3_000_000.0
+    total_tax_target = pension_target + irp_target  # 9,000,000원
+
+    # 2026년 당해연도 입금액
+    pension_dep = yearly_deposits.get("삼성연금", 0.0)
+    irp_dep = yearly_deposits.get("삼성IRP", 0.0)
+    
+    pension_pct = min(100.0, (pension_dep / pension_target * 100.0)) if pension_target > 0 else 0.0
+    irp_pct = min(100.0, (irp_dep / irp_target * 100.0)) if irp_target > 0 else 0.0
+    
+    pension_rem = max(0.0, pension_target - pension_dep)
+    irp_rem = max(0.0, irp_target - irp_dep)
+    
+    total_tax_dep = pension_dep + irp_dep
+    total_tax_pct = min(100.0, (total_tax_dep / total_tax_target * 100.0)) if total_tax_target > 0 else 0.0
+    total_tax_rem = max(0.0, total_tax_target - total_tax_dep)
+    
+    # 예상 세액공제 환급액 (13.2% ~ 16.5%)
+    refund_min = min(total_tax_dep, total_tax_target) * 0.132
+    refund_max = min(total_tax_dep, total_tax_target) * 0.165
+
+    tax_deduction_tracker_text = (
+        f"* **🏛️ 삼성연금 (연금저축 - 연 600만원 세액공제 목표)**: {current_year}년 누적 입금 **{pension_dep:,.0f} 원** "
+        f"(달성률: **{pension_pct:.1f}%**, 연말 잔여 납입 필요액: **{pension_rem:,.0f} 원**)\n"
+        f"* **🛡️ 삼성IRP (개인형 IRP - 연 300만원 세액공제 목표)**: {current_year}년 누적 입금 **{irp_dep:,.0f} 원** "
+        f"(달성률: **{irp_pct:.1f}%**, 연말 잔여 납입 필요액: **{irp_rem:,.0f} 원**)\n"
+        f"* **💰 [합계] {current_year}년 900만원 세액공제 달성 현황**: 총 **{total_tax_dep:,.0f} 원** 입금 완료 "
+        f"(전체 달성률: **{total_tax_pct:.1f}%**, 잔여 납입 필요액: **{total_tax_rem:,.0f} 원**)\n"
+        f"  ➡️ *현재까지 확보된 예상 절세 환급액: 약 **{refund_min:,.0f} 원 ~ {refund_max:,.0f} 원** (한도 900만원 완납 시 최대 148.5만원 환급)*"
+    )
+
+    # 9. [개조식 & 탭 들여쓰기] 6대 계좌별 독립 상세 진단 마크다운 생성
+    acc_cat_lines = []
+    
+    # 1) 코어 적립식 (삼성연금 & 미래연금)
+    p_info = account_map_data["삼성연금"]["info"] or {}
+    p_eval = p_info.get("asset_eval", 0.0) or sum(h["eval_amt"] for h in account_map_data["삼성연금"]["holdings"])
+    m_info = account_map_data["미래연금"]["info"] or {}
+    m_eval = m_info.get("asset_eval", 0.0) or sum(h["eval_amt"] for h in account_map_data["미래연금"]["holdings"])
+    m_dep = yearly_deposits.get("미래연금", 0.0)
+
+    acc_cat_lines.append("* **① [삼성연금 & 미래연금] 코어 적립식 계좌 (영구 복리 & 매도 절대 금지)**")
+    acc_cat_lines.append(f"  - **삼성연금 (연금저축)**: {current_year}년 누적입금 {pension_dep:,.0f}원 (달성률 {pension_pct:.1f}%, 잔여 {pension_rem:,.0f}원) | 총평가 {p_eval:,.0f}원 | 주 10만원 적립 (`KODEX 미국S&P500`)")
+    for h in account_map_data["삼성연금"]["holdings"]:
+        ret_str = f", 수익률 {h['cum_ret']*100:+.1f}%" if isinstance(h.get("cum_ret"), (int, float)) else ""
+        acc_cat_lines.append(f"    * `{h['stock_name']}`: 평가액 {h['eval_amt']:,.0f}원 ({h['qty']:,.1f}주{ret_str}) [적립유지/매도금지]")
+    if not account_map_data["삼성연금"]["holdings"]:
+        acc_cat_lines.append("    * (현재 적립 종목: KODEX 미국S&P500 매주 10만원 매수 지속 요망)")
+    
+    acc_cat_lines.append(f"  - **미래연금 (미래에셋)**: {current_year}년 누적입금 {m_dep:,.0f}원 (총평가 {m_eval:,.0f}원) | 주 20만원 적립 (`TIGER 미국S&P500` 10만 + `KODEX 미국나스닥100` 10만)")
+    for h in account_map_data["미래연금"]["holdings"]:
+        ret_str = f", 수익률 {h['cum_ret']*100:+.1f}%" if isinstance(h.get("cum_ret"), (int, float)) else ""
+        acc_cat_lines.append(f"    * `{h['stock_name']}`: 평가액 {h['eval_amt']:,.0f}원 ({h['qty']:,.1f}주{ret_str}) [적립유지/매도금지]")
+    if not account_map_data["미래연금"]["holdings"]:
+        acc_cat_lines.append("  • (현재 적립 종목: TIGER 미국S&P500 10만 + KODEX 미국나스닥100 10만 매주 지속 매수 요망)")
+    acc_cat_lines.append("")
+
+
+
+    # 2) 삼성IRP (세액공제 300만 & 7:3 패키지)
+    irp_info = account_map_data["삼성IRP"]["info"] or {}
+    irp_eval = irp_info.get("asset_eval", 0.0) or sum(h["eval_amt"] for h in account_map_data["삼성IRP"]["holdings"])
+    acc_cat_lines.append("* **② [삼성IRP] 세액공제(연 300만) & 고수익 7:3 패키지 매수 가이드**")
+    acc_cat_lines.append(f"  - **계좌 현황**: {current_year}년 누적입금 {irp_dep:,.0f}원 (달성률 {irp_pct:.1f}%, 잔여 {irp_rem:,.0f}원) | 총평가 {irp_eval:,.0f}원")
+    acc_cat_lines.append(f"  - **법정 의무 규정**: 안전자산 $\\ge 30\\%$, 위험자산 $\\le 70\\%$ 준수 필수")
+    acc_cat_lines.append(f"  - **추천 패키지**: 위험 70% (`TIGER 미국테크TOP10`) + 안전 30% (`SOL 미국배당미국채혼합50` 또는 `ACE 미국30년국채액티브(H)`)")
+    for h in account_map_data["삼성IRP"]["holdings"]:
+        ret_str = f", 수익률 {h['cum_ret']*100:+.1f}%" if isinstance(h.get("cum_ret"), (int, float)) else ""
+        acc_cat_lines.append(f"    * `{h['stock_name']}`: 평가액 {h['eval_amt']:,.0f}원 ({h['qty']:,.1f}주{ret_str})")
+    acc_cat_lines.append("")
+
+    # 3) 연금이전 (삼성이전 - 100% ETF 월배당 인컴 & 재투자 가이드)
+    prev_p_info = account_map_data["삼성이전"]["info"] or {}
+    prev_p_eval = prev_p_info.get("asset_eval", 0.0) or sum(h["eval_amt"] for h in account_map_data["삼성이전"]["holdings"])
+    acc_cat_lines.append("* **③ [연금이전 (삼성이전)] 100% ETF 월배당 인컴 복리 & 재투자 가이드**")
+    acc_cat_lines.append(f"  - **계좌 현황**: 총 평가자산 {prev_p_eval:,.0f} 원 (기소득공제 연금 - 과세이연 복리 계좌)")
+    acc_cat_lines.append(f"  - **운용 제약**: **개별주식 매수 불가 (100% ETF 전용 계좌)**")
+    acc_cat_lines.append(f"  - **인컴 엔진**: 월배당 배당성장(40%) + 월배당 안전국채(30%) + 국내 테마 알파(30%)")
+    for h in account_map_data["삼성이전"]["holdings"]:
+        ret_str = f", 수익률 {h['cum_ret']*100:+.1f}%" if isinstance(h.get("cum_ret"), (int, float)) else ""
+        guide_str = f" [{h['guide']}]" if h.get("guide") else ""
+        acc_cat_lines.append(f"    * `{h['stock_name']}`: 평가액 {h['eval_amt']:,.0f}원 ({h['qty']:,.1f}주{ret_str}){guide_str}")
+    acc_cat_lines.append(f"  - **재투자 추천**: 월 발생 분배금으로 저평가된 테마 ETF (`AI반도체`, `전력설비` 등) 수동 추가매수 추천 (자동매수 ❌)")
+    acc_cat_lines.append("")
+
+    # 4) 삼성ISA (국내 주식 & 테마 ETF 퀀트 스윙 알파)
+    isa_info = account_map_data["삼성ISA"]["info"] or {}
+    isa_eval = isa_info.get("asset_eval", 0.0) or sum(h["eval_amt"] for h in account_map_data["삼성ISA"]["holdings"])
+    acc_cat_lines.append("* **④ [삼성ISA] 국내 주식 & 테마 ETF 퀀트 스윙 알파 (3년 비과세 극대화)**")
+    acc_cat_lines.append(f"  - **계좌 현황**: 총 평가자산 {isa_eval:,.0f} 원 | 운용 대상: 삼성전자 + 국내 상장 테마/섹터 ETF")
+    for h in account_map_data["삼성ISA"]["holdings"]:
+        ret_str = f", 수익률 {h['cum_ret']*100:+.1f}%" if isinstance(h.get("cum_ret"), (int, float)) else ""
+        guide_str = f" [{h['guide']}]" if h.get("guide") else ""
+        acc_cat_lines.append(f"    * `{h['stock_name']}`: 평가액 {h['eval_amt']:,.0f}원 ({h['qty']:,.1f}주{ret_str}){guide_str}")
+    acc_cat_lines.append(f"  - **리포트 조언**: 퀀트 신호(`▲ 추세탑승`, `▲ 분할매수`, `▼ 비중조절`) 기반 적극적 교체매매/수익실현 조언")
+    acc_cat_lines.append("")
+
+    # 5) 삼성종합 (해외 직투)
+    glob_info = account_map_data["삼성종합"]["info"] or {}
+    glob_eval = glob_info.get("asset_eval", 0.0) or sum(h["eval_amt"] for h in account_map_data["삼성종합"]["holdings"])
+    acc_cat_lines.append("* **⑤ [삼성종합] 미국 빅테크 직투 대기 & 달러 환전 타이밍**")
+    acc_cat_lines.append(f"  - **계좌 현황**: 총 평가자산 {glob_eval:,.0f} 원 | 운용 대상: 미국 빅테크 개별주 (`NVDA`, `AAPL`, `MSFT` 등)")
+    acc_cat_lines.append(f"  - **운용 일정**: 2027년 본격 투입 대기. 환율 3M 동적 밴드 하단($Q_{25}$) 진입 시 달러 사전 환전 권고")
+    for h in account_map_data["삼성종합"]["holdings"]:
+        ret_str = f", 수익률 {h['cum_ret']*100:+.1f}%" if isinstance(h.get("cum_ret"), (int, float)) else ""
+        acc_cat_lines.append(f"    * `{h['stock_name']}`: 평가액 {h['eval_amt']:,.0f}원 ({h['qty']:,.1f}주{ret_str})")
+    
+    account_categorized_text = "\n".join(acc_cat_lines)
+
+    # 10. 테마별 요약 텍스트
     theme_lines = []
     for t_name, t_val in sorted(theme_distribution.items(), key=lambda x: x[1], reverse=True):
         t_pct = (t_val / total_eval_krw * 100.0) if total_eval_krw > 0 else 0.0
         theme_lines.append(f"- **{t_name}**: {t_val:,.0f}원 ({t_pct:.1f}%)")
     theme_summary_text = "\n".join(theme_lines)
 
-    # 9. 자산군별 상세 보유 종목 텍스트 (52주위치, 안전마진, 투자가이드 결합)
+    # 11. 자산군별 상세 보유 종목 텍스트 (52주위치, 안전마진, 투자가이드 결합)
     detail_lines = []
     for code in ASSET_ORDER:
         grp = asset_groups[code]
@@ -615,7 +833,6 @@ def analyze_integrated_portfolio(
             for item in active_items:
                 weight_in_portfolio = (item["eval_asset"] / total_eval_krw * 100.0) if total_eval_krw > 0 else 0.0
                 
-                # 퀀트 지표 포맷팅
                 pos_str = f", 52주위치:{item['pos_52w']*100:.1f}%" if isinstance(item.get("pos_52w"), (int, float)) else ""
                 margin_str = f", {item['margin_of_safety']}" if item.get("margin_of_safety") else ""
                 guide_str = f", 가이드:{'/'.join(item['guides'])}" if item.get("guides") else ""
@@ -633,7 +850,7 @@ def analyze_integrated_portfolio(
         detail_lines.append("")
     holdings_detail_text = "\n".join(detail_lines)
 
-    # 10. 전주 대비(WoW) 주간 자산 추적 및 델타 지표 산출
+    # 12. 전주 대비(WoW) 주간 자산 추적 및 델타 지표 산출
     prev_report = portfolio_dataset.get("prev_report")
     if prev_report and prev_report.get("total_eval_krw", 0) > 0:
         prev_date = prev_report["date"]
@@ -661,7 +878,7 @@ def analyze_integrated_portfolio(
     else:
         prev_report_summary_text = "- **비교 기준**: 직전 리포트 없음 (금주 리포트를 기준점(Baseline)으로 최초 생성)"
 
-    # 11. 스마트 밸류 에버리징(Value Averaging) 적립금 분배 계산 (주간 100만원 기준)
+    # 13. 스마트 밸류 에버리징(Value Averaging) 적립금 분배 계산 (주간 100만원 기준)
     asset_quant_map = {item["code"]: item for item in macro_snapshot.get("asset_quant_metrics", [])}
     weekly_budget = 1_000_000.0  # 기본 100만원 기준
     
@@ -675,23 +892,29 @@ def analyze_integrated_portfolio(
         is_bull = q_meta.get("is_bull", True)
         drawdown = q_meta.get("drawdown_52w", 0.0)
         
-        # 부족분 가중치: 목표 비중보다 부족할수록 점수 가산
         deficit_factor = max(0.0, -drift_pct) * 2.0
         base_score = max(0.5, target_pct + deficit_factor)
         
-        # 추세 보정: 200일선 위 상승추세 자산에 가중(1.2), 하락추세(0.85)
         trend_mult = 1.2 if is_bull else 0.85
-        
-        # 낙폭 보정: 52주 고점 대비 -10% 이상 하락 시 저가 분할매수 매력도 가산
         dd_mult = 1.15 if drawdown <= -10.0 else 1.0
         
         alloc_scores[code] = base_score * trend_mult * dd_mult
 
     total_score = sum(alloc_scores.values()) or 1.0
     va_lines = [
-        "| 자산군 | 목표비중 | 현재괴리율 | 200MA 추세 | 52주 낙폭 | 스마트 배분 비중 | 주간 추천 매수금액 (100만원 기준) |",
-        "|:---|:---:|:---:|:---:|:---:|:---:|:---:|",
+        "| 추천 계좌 | 목표 자산군 | 200MA 추세 | 52주 낙폭 | 스마트 배분 비중 | 주간 추천 매수금액 (100만원 기준) | 매수 집행 방식 |",
+        "|:---|:---|:---:|:---:|:---:|:---:|:---|",
     ]
+    # 계좌별 추천 매핑 헬퍼
+    account_proxy_map = {
+        "US_CORE_INDEX": "삼성연금/미래연금 (KODEX미국S&P500, 나스닥100)",
+        "DIVIDEND_GROWTH": "연금이전 (TIGER 미국배당다우존스)",
+        "KR_EQUITY": "삼성ISA/연금이전 (삼성전자, AI반도체, 밸류업 ETF)",
+        "US_LONG_BOND": "연금이전/삼성IRP (ACE 미국30년국채액티브(H))",
+        "KR_BOND_SHORT": "삼성IRP (SOL 미국배당미국채혼합50 / 단기채)",
+        "GOLD": "삼성ISA/삼성IRP (ACE KRX금현물)",
+        "COMMODITY_CASH": "삼성종합/일반 (달러 예수금 / 원자재)",
+    }
     for code in ASSET_ORDER:
         grp = asset_groups[code]
         q_meta = asset_quant_map.get(code, {})
@@ -700,12 +923,13 @@ def analyze_integrated_portfolio(
         
         trend_str = q_meta.get("trend", "판정대기")
         dd_str = f"{q_meta.get('drawdown_52w', 0.0):+.1f}%" if q_meta else "-"
+        target_acc = account_proxy_map.get(code, grp["name"])
         va_lines.append(
-            f"| **{grp['name']}** | {grp['target_pct']:.1f}% | {grp['drift_pct']:+.1f}%p | {trend_str} | `{dd_str}` | **{alloc_pct:.1f}%** | `{alloc_amt:,.0f} 원` |"
+            f"| **{target_acc}** | {grp['name']} | {trend_str} | `{dd_str}` | **{alloc_pct:.1f}%** | `{alloc_amt:,.0f} 원` | 수동 매수 권고 |"
         )
     value_averaging_table = "\n".join(va_lines)
 
-    # 12. 포트폴리오 95% 1주일 최대 예상 변동성 (VaR) 추정
+    # 14. 포트폴리오 95% 1주일 최대 예상 변동성 (VaR) 추정
     port_weighted_vol = 0.0
     for code in ASSET_ORDER:
         grp = asset_groups[code]
@@ -714,7 +938,6 @@ def analyze_integrated_portfolio(
         vol = q_meta.get("volatility_60d", 12.0)
         port_weighted_vol += w * vol
 
-    # 95% 신뢰수준(Z=1.65), 1주일(1/sqrt(52))
     portfolio_var_pct = 1.65 * (port_weighted_vol / (52 ** 0.5))
     portfolio_var_krw = total_eval_krw * (portfolio_var_pct / 100.0)
 
@@ -730,6 +953,8 @@ def analyze_integrated_portfolio(
         "stock_total_krw": stock_total_krw,
         "cash_total_krw": cash_total_krw,
         "cash_pct": cash_pct,
+        "tax_deduction_tracker_text": tax_deduction_tracker_text,
+        "account_categorized_text": account_categorized_text,
         "portfolio_weighted_vol": port_weighted_vol,
         "portfolio_var_pct": portfolio_var_pct,
         "portfolio_var_krw": portfolio_var_krw,
@@ -738,7 +963,6 @@ def analyze_integrated_portfolio(
         "asset_groups": asset_groups,
         "asset_summary_table": asset_summary_table,
         "value_averaging_table": value_averaging_table,
-        "account_summary_text": account_summary_text,
         "theme_summary_text": theme_summary_text,
         "holdings_detail_text": holdings_detail_text,
         "prev_report_summary_text": prev_report_summary_text,
@@ -922,14 +1146,15 @@ def main() -> None:
     # 4. Google Gemini API (Google Search Grounding) 진단 리포트 생성
     if not ai_service.is_available():
         print("⚠️ GEMINI_API_KEY가 설정되지 않아 AI 리포트 생성을 건너뛰고 기본 통계 리포트만 생성합니다.")
-        report_markdown = f"# [통합 분석 리포트] K-올라운드 마스터 자산배분 및 다차원 퀀트 진단\n\n"
+        report_markdown = f"# [통합 분석 리포트] K-올라운드 마스터 계좌 분리형 자산배분 진단\n\n"
         report_markdown += f"- **분석 일시**: {summary['analysis_date']}\n"
         report_markdown += f"- **총 평가 자산**: {summary['total_eval_krw']:,.0f} 원 (주식 {summary['stock_total_krw']:,.0f}원 + 현금 {summary['cash_total_krw']:,.0f}원)\n\n"
-        report_markdown += f"## 🌐 1. 실시간 글로벌 매크로 지표\n{summary['macro_table_markdown']}\n\n"
-        report_markdown += f"## 🏦 2. 투자 계좌별 자산 및 현금 현황\n{summary['account_summary_text']}\n\n"
-        report_markdown += f"## 🏷️ 3. 포트폴리오 테마별 비중\n{summary['theme_summary_text']}\n\n"
+        report_markdown += f"## 💰 1. 연간 세액공제 900만원 실시간 진척도\n{summary['tax_deduction_tracker_text']}\n\n"
+        report_markdown += f"## 🌐 2. 실시간 글로벌 매크로 지표\n{summary['macro_table_markdown']}\n\n"
+        report_markdown += f"## 🏛️ 3. 6대 계좌별 세부 운용 현황\n{summary['account_categorized_text']}\n\n"
         report_markdown += f"## 📊 4. K-올라운드 7대 자산군 비중 vs 목표\n{summary['asset_summary_table']}\n\n"
-        report_markdown += f"## 🔍 5. 상세 보유 종목 및 퀀트 지표\n{summary['holdings_detail_text']}"
+        report_markdown += f"## 🎯 5. 스마트 밸류 에버리징 매수 추천표\n{summary['value_averaging_table']}\n\n"
+        report_markdown += f"## 🔍 6. 상세 보유 종목 및 퀀트 지표\n{summary['holdings_detail_text']}"
     else:
         try:
             report_markdown = ai_service.generate_portfolio_diagnosis(summary)
@@ -938,9 +1163,11 @@ def main() -> None:
             report_markdown = f"# [자산배분 진단] K-올라운드 마스터 요약 리포트 (AI 생성 오류)\n\n"
             report_markdown += f"- **분석 일시**: {summary['analysis_date']}\n"
             report_markdown += f"- **총 평가액**: {summary['total_eval_krw']:,.0f} 원\n\n"
-            report_markdown += f"## 🌐 1. 실시간 매크로 지표\n{summary['macro_table_markdown']}\n\n"
-            report_markdown += f"## 📊 2. 자산군별 비중 현황\n{summary['asset_summary_table']}\n\n"
-            report_markdown += f"## 🔍 3. 상세 보유 종목\n{summary['holdings_detail_text']}"
+            report_markdown += f"## 💰 1. 연간 세액공제 900만원 진척도\n{summary['tax_deduction_tracker_text']}\n\n"
+            report_markdown += f"## 🌐 2. 실시간 매크로 지표\n{summary['macro_table_markdown']}\n\n"
+            report_markdown += f"## 🏛️ 3. 6대 계좌별 세부 운용 현황\n{summary['account_categorized_text']}\n\n"
+            report_markdown += f"## 📊 4. 자산군별 비중 현황\n{summary['asset_summary_table']}\n\n"
+            report_markdown += f"## 🔍 5. 상세 보유 종목\n{summary['holdings_detail_text']}"
 
     # 5. 로컬 백업 저장
     save_report_locally(report_markdown, summary["analysis_date"])

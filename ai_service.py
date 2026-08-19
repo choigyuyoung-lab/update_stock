@@ -120,7 +120,9 @@ class AIService:
             "portfolio_var_krw": portfolio_summary.get("portfolio_var_krw", 0.0),
             "total_positions_count": portfolio_summary.get("total_positions_count", 0),
             "monitoring_count": portfolio_summary.get("monitoring_count", 0),
+            "tax_deduction_tracker_text": portfolio_summary.get("tax_deduction_tracker_text", "세액공제 데이터 산출 완료"),
             "prev_report_summary_text": portfolio_summary.get("prev_report_summary_text", "- **비교 기준**: 직전 리포트 없음"),
+            "account_categorized_text": portfolio_summary.get("account_categorized_text", ""),
             "account_summary_text": portfolio_summary.get("account_summary_text", ""),
             "theme_summary_text": portfolio_summary.get("theme_summary_text", ""),
             "asset_summary_table": portfolio_summary.get("asset_summary_table", ""),
@@ -166,12 +168,21 @@ class AIService:
                     candidate = response.candidates[0] if (response and response.candidates) else None
                     finish_reason = getattr(candidate, "finish_reason", None)
                     
-                    report_text = response.text if hasattr(response, "text") and response.text else str(response)
-                    if report_text and len(report_text.strip()) > 150:
+                    report_text = ""
+                    if hasattr(response, "text") and response.text:
+                        report_text = response.text.strip()
+                    elif candidate and candidate.content and candidate.content.parts:
+                        text_parts = [
+                            p.text.strip() for p in candidate.content.parts
+                            if getattr(p, "text", None) and not getattr(p, "thought", False)
+                        ]
+                        report_text = "\n\n".join(text_parts).strip()
+
+                    if report_text and len(report_text) > 150:
                         print(f"✅ [Gemini AI] 리포트 생성 완료 (모델: {model_name}, 총 {len(report_text):,}자, Finish: {finish_reason})")
-                        return report_text.strip()
+                        return report_text
                     else:
-                        print(f"   ⚠️ [Gemini AI] 응답 텍스트가 너무 짧습니다 ({len(report_text)}자). 재시도 {attempt}/{max_retries}")
+                        print(f"   ⚠️ [Gemini AI] 유효 응답 텍스트 추출 실패 또는 너무 짧음 ({len(report_text)}자, Finish: {finish_reason}). 재시도 {attempt}/{max_retries}")
 
                 except Exception as exc:
                     err_str = str(exc)
