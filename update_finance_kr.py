@@ -126,8 +126,12 @@ def get_finance_data(
     vol_60d = None
     drawdown_52w = None
     ma200 = None
+    ma60 = None
     trend = None
     mom_12m = None
+    mom_diag = None
+    risk_grade = None
+    smart_guide = None
 
     try:
         fdr_start = (datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=400)).strftime("%Y-%m-%d")
@@ -136,9 +140,30 @@ def get_finance_data(
             c = df_chart["Close"].dropna() if "Close" in df_chart.columns else df_chart.iloc[:, 0].dropna()
             if not c.empty:
                 curr_p_chart = float(c.iloc[-1])
+                ma60 = float(c.rolling(60).mean().iloc[-1]) if len(c) >= 60 else float(c.mean())
                 ma200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
-                trend = "🟢 상승추세" if curr_p_chart >= ma200 else "🔴 하락추세"
+                
+                # 🇰🇷 한국 특화 추세 판정 (60일 수급선 + 200일 대세선)
+                if curr_p_chart >= ma60 and curr_p_chart >= ma200:
+                    trend = "🟢 수급유입"
+                elif curr_p_chart >= ma200:
+                    trend = "🟡 박스권"
+                else:
+                    trend = "🔴 하락추세"
+
                 mom_12m = ((curr_p_chart - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
+                
+                # 모멘텀 직관적 진단 (5단계 정밀 분류)
+                if mom_12m >= 0.50:
+                    mom_diag = "🚀 초강력 (주도주)"
+                elif mom_12m >= 0.20:
+                    mom_diag = "🔥 강세 (성장지속)"
+                elif mom_12m >= 0.05:
+                    mom_diag = "🟢 순항 (시장동행)"
+                elif mom_12m >= -0.10:
+                    mom_diag = "🟡 보합 (방향탐색)"
+                else:
+                    mom_diag = "🔴 침체 (자금이탈)"
 
                 returns_60 = c.pct_change().tail(60).dropna()
                 if len(returns_60) >= 5:
@@ -191,10 +216,38 @@ def get_finance_data(
         except Exception:
             pass
 
+    # 변동성 체감 위험도 등급 (어떤 경로로 계산되든 100% 산출)
+    if vol_60d is not None:
+        if vol_60d < 0.20:
+            risk_grade = "🛡️ 안심 (비중확대)"
+        elif vol_60d < 0.35:
+            risk_grade = "🟢 표준 (정상비중)"
+        elif vol_60d < 0.60:
+            risk_grade = "🟠 주의 (비중조절)"
+        else:
+            risk_grade = "⚡ 경계 (소액접근)"
+
     curr_p = safe_float(output.get("stck_prpr"))
     w52_h = safe_float(output.get("w52_hgpr"))
     if curr_p is not None and w52_h is not None and w52_h > 0:
         drawdown_52w = (curr_p - w52_h) / w52_h  # 노션 백분율 형식 (-0.15 = -15%)
+
+    # 스마트 가이드 (선택형 표준 태그 6종)
+    if curr_p is not None and ma200 is not None:
+        if curr_p >= ma200:
+            if drawdown_52w is not None and drawdown_52w <= -0.20:
+                smart_guide = "💎 낙폭과대 분할매수"
+            elif ma60 is not None and curr_p >= ma60 and mom_12m is not None and mom_12m >= 0.50:
+                smart_guide = "🚀 주도주 추세탑승"
+            elif ma60 is not None and curr_p < ma60:
+                smart_guide = "🟡 수급선 눌림목"
+            else:
+                smart_guide = "🟢 상승세 유지"
+        else:
+            if drawdown_52w is not None and drawdown_52w <= -0.35:
+                smart_guide = "⚠️ 바닥확인 필요"
+            else:
+                smart_guide = "❄️ 역배열 하락관망"
 
     return {
         "현재가": curr_p,
@@ -209,9 +262,15 @@ def get_finance_data(
         "직전고점": safe_float(swing_high),
         "직전저점": safe_float(swing_low),
         "200일선": safe_float(round(ma200, 2)) if ma200 else None,
+        "60일선": safe_float(round(ma60, 2)) if ma60 else None,
+        "수급선": safe_float(round(ma60, 2)) if ma60 else None,
         "추세": trend,
+        "스마트 가이드": smart_guide,
+        "모멘텀 진단": mom_diag,
+        "위험도 등급": risk_grade,
         "12M 모멘텀": safe_float(round(mom_12m, 4)) if mom_12m is not None else None,
         "52주 낙폭": safe_float(drawdown_52w),
+        "낙폭율": safe_float(drawdown_52w),
         "60일 변동성": safe_float(vol_60d),
     }
 
@@ -236,8 +295,9 @@ def build_finance_update_for_page(
 
     num_fields = [
         "현재가", "PER", "PBR", "EPS", "BPS", "배당수익률", "업종PER",
-        "직전고점", "직전저점", "60일 변동성", "52주 낙폭", "200일선", "12M 모멘텀"
+        "직전고점", "직전저점", "60일 변동성", "52주 낙폭", "낙폭율", "200일선", "60일선", "수급선", "12M 모멘텀"
     ]
+    select_fields = ["추세", "스마트 가이드", "모멘텀 진단", "위험도 등급"]
 
     update_props = {
         field: {"number": data[field]}
@@ -245,8 +305,17 @@ def build_finance_update_for_page(
         if data.get(field) is not None and field in props
     }
     
-    if data.get("추세") and "추세" in props:
-        update_props["추세"] = {"select": {"name": data["추세"]}}
+    # 노션 속성 타입(Select vs Status vs Rich_text) 자동 감지 방어 매핑
+    for s_field in select_fields:
+        val = data.get(s_field)
+        if val and s_field in props:
+            p_type = props[s_field].get("type", "select")
+            if p_type == "status":
+                update_props[s_field] = {"status": {"name": val}}
+            elif p_type == "rich_text":
+                update_props[s_field] = {"rich_text": [{"type": "text", "text": {"content": val}}]}
+            else:
+                update_props[s_field] = {"select": {"name": val}}
     
     set_page_date_property(update_props, props)
 

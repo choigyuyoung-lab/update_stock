@@ -110,7 +110,7 @@ def get_stock_financials(
                 if div_yield is not None:
                     res["배당수익률"] = div_yield * 100
 
-            # 3. 1년치 일봉 시계열로 직전고저점 및 5대 퀀트 지표 계산
+            # 3. 1년치 일봉 시계열로 직전고저점 및 퀀트 지표/해설 계산
             hist = stock.history(period="1y")
             if not hist.empty:
                 recent_20 = hist.tail(20)
@@ -120,20 +120,74 @@ def get_stock_financials(
                 c = hist["Close"].dropna()
                 if not c.empty:
                     curr_p = float(c.iloc[-1])
+                    ma50 = float(c.rolling(50).mean().iloc[-1]) if len(c) >= 50 else float(c.mean())
                     ma200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+                    
+                    res["50일선"] = safe_float(round(ma50, 2))
+                    res["수급선"] = safe_float(round(ma50, 2))
                     res["200일선"] = safe_float(round(ma200, 2))
-                    res["추세"] = "🟢 상승추세" if curr_p >= ma200 else "🔴 하락추세"
+                    
+                    # 🇺🇸 미국 특화 추세 판정 (50일 기관매집선 + 200일 대세선)
+                    if curr_p >= ma50 and curr_p >= ma200:
+                        res["추세"] = "🟢 기관주도"
+                    elif curr_p >= ma200:
+                        res["추세"] = "🟡 눌림조정"
+                    else:
+                        res["추세"] = "🔴 하락추세"
                     
                     mom_12m = ((curr_p - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
                     res["12M 모멘텀"] = safe_float(round(mom_12m, 4))
                     
+                    # 모멘텀 직관적 진단 (5단계 정밀 분류)
+                    if mom_12m >= 0.50:
+                        res["모멘텀 진단"] = "🚀 초강력 (주도주)"
+                    elif mom_12m >= 0.20:
+                        res["모멘텀 진단"] = "🔥 강세 (성장지속)"
+                    elif mom_12m >= 0.05:
+                        res["모멘텀 진단"] = "🟢 순항 (시장동행)"
+                    elif mom_12m >= -0.10:
+                        res["모멘텀 진단"] = "🟡 보합 (방향탐색)"
+                    else:
+                        res["모멘텀 진단"] = "🔴 침체 (자금이탈)"
+                    
                     peak_52w = float(hist["High"].tail(252).max()) if "High" in hist.columns else float(c.tail(252).max())
+                    drawdown_52w = None
                     if peak_52w > 0:
-                        res["52주 낙폭"] = safe_float(round((curr_p - peak_52w) / peak_52w, 4))
+                        drawdown_52w = (curr_p - peak_52w) / peak_52w
+                        res["52주 낙폭"] = safe_float(round(drawdown_52w, 4))
+                        res["낙폭율"] = safe_float(round(drawdown_52w, 4))
                         
+                    vol_60d = None
                     returns_60 = c.pct_change().tail(60).dropna()
                     if len(returns_60) >= 5:
-                        res["60일 변동성"] = safe_float(round(float(returns_60.std() * np.sqrt(252)), 4))
+                        vol_60d = float(returns_60.std() * np.sqrt(252))
+                        res["60일 변동성"] = safe_float(round(vol_60d, 4))
+                        
+                        # 변동성 체감 위험도 등급
+                        if vol_60d < 0.20:
+                            res["위험도 등급"] = "🛡️ 안심 (비중확대)"
+                        elif vol_60d < 0.35:
+                            res["위험도 등급"] = "🟢 표준 (정상비중)"
+                        elif vol_60d < 0.60:
+                            res["위험도 등급"] = "🟠 주의 (비중조절)"
+                        else:
+                            res["위험도 등급"] = "⚡ 경계 (소액접근)"
+
+                    # 스마트 가이드 (선택형 표준 태그 6종)
+                    if curr_p >= ma200:
+                        if drawdown_52w is not None and drawdown_52w <= -0.20:
+                            res["스마트 가이드"] = "💎 낙폭과대 분할매수"
+                        elif curr_p >= ma50 and mom_12m >= 0.50:
+                            res["스마트 가이드"] = "🚀 주도주 추세탑승"
+                        elif curr_p < ma50:
+                            res["스마트 가이드"] = "🟡 수급선 눌림목"
+                        else:
+                            res["스마트 가이드"] = "🟢 상승세 유지"
+                    else:
+                        if drawdown_52w is not None and drawdown_52w <= -0.35:
+                            res["스마트 가이드"] = "⚠️ 바닥확인 필요"
+                        else:
+                            res["스마트 가이드"] = "❄️ 역배열 하락관망"
 
             return res
             
@@ -174,8 +228,9 @@ def build_finance_update_for_page(
 
     number_keys = [
         "PER", "추정PER", "EPS", "추정EPS", "PBR", "BPS", "배당수익률",
-        "직전고점", "직전저점", "200일선", "12M 모멘텀", "52주 낙폭", "60일 변동성"
+        "직전고점", "직전저점", "200일선", "50일선", "수급선", "12M 모멘텀", "52주 낙폭", "낙폭율", "60일 변동성"
     ]
+    select_keys = ["추세", "스마트 가이드", "모멘텀 진단", "위험도 등급"]
     
     try:
         fin_data = get_stock_financials(ticker)
@@ -185,8 +240,17 @@ def build_finance_update_for_page(
             if is_valid_num(fin_data.get(key)) and key in props
         }
 
-        if fin_data.get("추세") and "추세" in props:
-            update_props["추세"] = {"select": {"name": fin_data["추세"]}}
+        # 노션 속성 타입(Select vs Status vs Rich_text) 자동 감지 방어 매핑
+        for s_key in select_keys:
+            val = fin_data.get(s_key)
+            if val and s_key in props:
+                p_type = props[s_key].get("type", "select")
+                if p_type == "status":
+                    update_props[s_key] = {"status": {"name": val}}
+                elif p_type == "rich_text":
+                    update_props[s_key] = {"rich_text": [{"type": "text", "text": {"content": val}}]}
+                else:
+                    update_props[s_key] = {"select": {"name": val}}
         
         set_page_date_property(update_props, props)
 
