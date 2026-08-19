@@ -5,31 +5,35 @@ on:
   repository_dispatch:
     types: [us_update, us_price_update]
 
-  # 2. GitHub 웹 UI 수동 실행 트리거 ("Run workflow" 버튼)
+  # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
 
 jobs:
   update-us:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Node.js 경고 제거
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.10 with Pip Cache
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # 🌟 캐시를 활성화하여 패키지 설치 시간을 단축합니다.
-          
-      # 🌟 이 부분을 수정했습니다: 수동 개별 설치 대신txt 목록 기반으로 안전하게 통합 설치합니다.
-      - name: Upgrade pip & Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
           
       - name: Run US Price Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_price_us.py
+        run: python update_price_us.py

@@ -5,31 +5,35 @@ on:
   repository_dispatch:
     types: [us_finance_update, us_finance]
 
-  # 2. GitHub 웹 UI 수동 실행 트리거 ("Run workflow" 버튼)
+  # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
 
 jobs:
   update-us-finance:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Node.js 경고 제거
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.10 with Pip Cache
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # 🌟requirements.txt가 준비되었으므로 캐시를 활성화하여 속도를 올립니다.
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
 
-      # 🌟 이 부분을 수정했습니다: 개별 나열 대신 txt 목록으로 안전하게 일괄 설치합니다.
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
 
       - name: Run US Finance Update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_finance_us.py
+        run: python update_finance_us.py
