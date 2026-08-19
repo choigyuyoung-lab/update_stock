@@ -138,17 +138,17 @@ def get_stock_financials(
                     mom_12m = ((curr_p - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
                     res["12M 모멘텀"] = safe_float(round(mom_12m, 4))
                     
-                    # 모멘텀 직관적 진단 (5단계 정밀 분류)
+                    # 모멘텀 직관적 진단 (5단계 정밀 분류 - 직관적 용어 적용)
                     if mom_12m >= 0.50:
-                        res["모멘텀 진단"] = "▲ 초강력세"
+                        res["모멘텀 진단"] = "▲ 주도대장"
                     elif mom_12m >= 0.20:
-                        res["모멘텀 진단"] = "▲ 성장강세"
+                        res["모멘텀 진단"] = "▲ 실적지속"
                     elif mom_12m >= 0.05:
-                        res["모멘텀 진단"] = "▲ 순항상승"
+                        res["모멘텀 진단"] = "▲ 시장동행"
                     elif mom_12m >= -0.10:
-                        res["모멘텀 진단"] = "━ 보합횡보"
+                        res["모멘텀 진단"] = "━ 방향탐색"
                     else:
-                        res["모멘텀 진단"] = "▼ 침체하락"
+                        res["모멘텀 진단"] = "▼ 자금이탈"
                     
                     peak_52w = float(hist["High"].tail(252).max()) if "High" in hist.columns else float(c.tail(252).max())
                     drawdown_52w = None
@@ -163,15 +163,15 @@ def get_stock_financials(
                         vol_60d = float(returns_60.std() * np.sqrt(252))
                         res["60일 변동성"] = safe_float(round(vol_60d, 4))
                         
-                        # 변동성 체감 위험도 등급
+                        # 변동성 체감 위험도 등급 (투자 비중 행동 용어로 직관화)
                         if vol_60d < 0.20:
-                            res["위험도 등급"] = "▲ 안심비중"
+                            res["위험도 등급"] = "▲ 비중확대"
                         elif vol_60d < 0.35:
-                            res["위험도 등급"] = "━ 표준비중"
+                            res["위험도 등급"] = "━ 정상비중"
                         elif vol_60d < 0.60:
-                            res["위험도 등급"] = "▼ 주의비중"
+                            res["위험도 등급"] = "▼ 비중조절"
                         else:
-                            res["위험도 등급"] = "▼ 경계소액"
+                            res["위험도 등급"] = "▼ 소액접근"
 
                     # 스마트 가이드 (표준 태그 6종)
                     if curr_p >= ma200:

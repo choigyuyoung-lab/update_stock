@@ -153,17 +153,17 @@ def get_finance_data(
 
                 mom_12m = ((curr_p_chart - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
                 
-                # 모멘텀 직관적 진단 (5단계 정밀 분류)
+                # 모멘텀 직관적 진단 (5단계 정밀 분류 - 직관적 용어 적용)
                 if mom_12m >= 0.50:
-                    mom_diag = "▲ 초강력세"
+                    mom_diag = "▲ 주도대장"
                 elif mom_12m >= 0.20:
-                    mom_diag = "▲ 성장강세"
+                    mom_diag = "▲ 실적지속"
                 elif mom_12m >= 0.05:
-                    mom_diag = "▲ 순항상승"
+                    mom_diag = "▲ 시장동행"
                 elif mom_12m >= -0.10:
-                    mom_diag = "━ 보합횡보"
+                    mom_diag = "━ 방향탐색"
                 else:
-                    mom_diag = "▼ 침체하락"
+                    mom_diag = "▼ 자금이탈"
 
                 returns_60 = c.pct_change().tail(60).dropna()
                 if len(returns_60) >= 5:
@@ -216,16 +216,16 @@ def get_finance_data(
         except Exception:
             pass
 
-    # 변동성 체감 위험도 등급 (어떤 경로로 계산되든 100% 산출)
+    # 변동성 체감 위험도 등급 (투자 비중 행동 용어로 직관화)
     if vol_60d is not None:
         if vol_60d < 0.20:
-            risk_grade = "▲ 안심비중"
+            risk_grade = "▲ 비중확대"
         elif vol_60d < 0.35:
-            risk_grade = "━ 표준비중"
+            risk_grade = "━ 정상비중"
         elif vol_60d < 0.60:
-            risk_grade = "▼ 주의비중"
+            risk_grade = "▼ 비중조절"
         else:
-            risk_grade = "▼ 경계소액"
+            risk_grade = "▼ 소액접근"
 
     curr_p = safe_float(output.get("stck_prpr"))
     w52_h = safe_float(output.get("w52_hgpr"))
