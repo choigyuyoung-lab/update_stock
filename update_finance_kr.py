@@ -145,25 +145,25 @@ def get_finance_data(
                 
                 # 🇰🇷 한국 특화 추세 판정 (60일 수급선 + 200일 대세선)
                 if curr_p_chart >= ma60 and curr_p_chart >= ma200:
-                    trend = "🟢 수급유입"
+                    trend = "▲ 수급유입"
                 elif curr_p_chart >= ma200:
-                    trend = "🟡 박스권"
+                    trend = "━ 박스권세"
                 else:
-                    trend = "🔴 하락추세"
+                    trend = "▼ 하락추세"
 
                 mom_12m = ((curr_p_chart - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
                 
                 # 모멘텀 직관적 진단 (5단계 정밀 분류)
                 if mom_12m >= 0.50:
-                    mom_diag = "🚀 초강력 (주도주)"
+                    mom_diag = "▲ 초강력세"
                 elif mom_12m >= 0.20:
-                    mom_diag = "🔥 강세 (성장지속)"
+                    mom_diag = "▲ 성장강세"
                 elif mom_12m >= 0.05:
-                    mom_diag = "🟢 순항 (시장동행)"
+                    mom_diag = "▲ 순항상승"
                 elif mom_12m >= -0.10:
-                    mom_diag = "🟡 보합 (방향탐색)"
+                    mom_diag = "━ 보합횡보"
                 else:
-                    mom_diag = "🔴 침체 (자금이탈)"
+                    mom_diag = "▼ 침체하락"
 
                 returns_60 = c.pct_change().tail(60).dropna()
                 if len(returns_60) >= 5:
@@ -219,35 +219,35 @@ def get_finance_data(
     # 변동성 체감 위험도 등급 (어떤 경로로 계산되든 100% 산출)
     if vol_60d is not None:
         if vol_60d < 0.20:
-            risk_grade = "🛡️ 안심 (비중확대)"
+            risk_grade = "▲ 안심비중"
         elif vol_60d < 0.35:
-            risk_grade = "🟢 표준 (정상비중)"
+            risk_grade = "━ 표준비중"
         elif vol_60d < 0.60:
-            risk_grade = "🟠 주의 (비중조절)"
+            risk_grade = "▼ 주의비중"
         else:
-            risk_grade = "⚡ 경계 (소액접근)"
+            risk_grade = "▼ 경계소액"
 
     curr_p = safe_float(output.get("stck_prpr"))
     w52_h = safe_float(output.get("w52_hgpr"))
     if curr_p is not None and w52_h is not None and w52_h > 0:
         drawdown_52w = (curr_p - w52_h) / w52_h  # 노션 백분율 형식 (-0.15 = -15%)
 
-    # 스마트 가이드 (선택형 표준 태그 6종)
+    # 스마트 가이드 (표준 태그 6종)
     if curr_p is not None and ma200 is not None:
         if curr_p >= ma200:
             if drawdown_52w is not None and drawdown_52w <= -0.20:
-                smart_guide = "💎 낙폭과대 분할매수"
+                smart_guide = "▲ 분할매수"
             elif ma60 is not None and curr_p >= ma60 and mom_12m is not None and mom_12m >= 0.50:
-                smart_guide = "🚀 주도주 추세탑승"
+                smart_guide = "▲ 추세탑승"
             elif ma60 is not None and curr_p < ma60:
-                smart_guide = "🟡 수급선 눌림목"
+                smart_guide = "━ 눌림지지"
             else:
-                smart_guide = "🟢 상승세 유지"
+                smart_guide = "▲ 상승유지"
         else:
             if drawdown_52w is not None and drawdown_52w <= -0.35:
-                smart_guide = "⚠️ 바닥확인 필요"
+                smart_guide = "▼ 바닥확인"
             else:
-                smart_guide = "❄️ 역배열 하락관망"
+                smart_guide = "▼ 하락관망"
 
     return {
         "현재가": curr_p,
@@ -278,6 +278,19 @@ def get_finance_data(
 # ==============================================================================
 # 3. 개별 페이지 재무 분석 및 페이로드 빌더
 # ==============================================================================
+def get_diagnostic_color(text: str) -> str:
+    """기호에 따른 노션 컬러값 반환 (▲: red, ━: green, ▼: blue)"""
+    if not text:
+        return "default"
+    if "▲" in text:
+        return "red"
+    elif "━" in text:
+        return "green"
+    elif "▼" in text:
+        return "blue"
+    return "default"
+
+
 def build_finance_update_for_page(
     page: Dict[str, Any],
     kis_ctx: Dict[str, Any]
@@ -313,7 +326,16 @@ def build_finance_update_for_page(
             if p_type == "status":
                 update_props[s_field] = {"status": {"name": val}}
             elif p_type == "rich_text":
-                update_props[s_field] = {"rich_text": [{"type": "text", "text": {"content": val}}]}
+                color = get_diagnostic_color(val)
+                update_props[s_field] = {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {"content": val},
+                            "annotations": {"color": color, "bold": True}
+                        }
+                    ]
+                }
             else:
                 update_props[s_field] = {"select": {"name": val}}
     
