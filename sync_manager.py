@@ -82,6 +82,19 @@ def mode_finish():
     print(f"⏰ 실행 시각 : {GRAY}{now_str}{RESET}")
     print(f"{CYAN}{'-'*60}{RESET}")
 
+    # 0. Gemini 모바일/웹 세션 프롬프트 자동 최신화
+    print(f"\n{GREEN}▶ [0/3] Gemini 모바일/웹 세션 프롬프트 최신화...{RESET}")
+    try:
+        from generate_gemini_prompt import generate_prompt, copy_to_clipboard
+        prompt = generate_prompt()
+        prompt_path = os.path.join(os.path.dirname(__file__), "gemini_context_prompt.md")
+        with open(prompt_path, "w", encoding="utf-8") as f:
+            f.write(prompt)
+        copy_to_clipboard(prompt)
+        print(f"  {CYAN}✅ gemini_context_prompt.md 최신화 및 클립보드 복사 완료!{RESET}")
+    except Exception as e:
+        print(f"  {YELLOW}⚠️ 프롬프트 자동 생성 건너뜀: {e}{RESET}")
+
     # 1. 상태 확인
     print(f"\n{GREEN}▶ [1/3] 로컬 변경 사항 확인 (git status)...{RESET}")
     code, status_out, _ = run_cmd(["git", "status", "--porcelain"])

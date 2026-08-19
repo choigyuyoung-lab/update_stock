@@ -68,8 +68,11 @@ d:\Github IDE\update_stock/
 ├── update_price_us.py            # 해외 주식 실시간 현재가 업데이트
 ├── notion_utils.py               # 노션 API 페이지네이션, 멀티스레드 안전 업데이트, 토큰 캐시 유틸리티
 ├── sync_manager.py               # 회사/집 PC 자동 인식 및 스마트 Git 동기화 매니저
+├── generate_gemini_prompt.py     # Gemini 웹/모바일 세션 프롬프트 자동 생성 및 클립보드 복사기
 ├── 작업시작_동기화.bat           # 작업 시작 시 원클릭 최신 동기화 실행 배치 파일
-├── 작업종료_동기화.bat           # 작업 종료/퇴근 시 원클릭 Git Push 자동화 배치 파일
+├── 작업종료_동기화.bat           # 작업 종료/퇴근 시 원클릭 Git Push 자동화 배치 파일 (프롬프트 최신화 내장)
+├── Gemini_프롬프트_생성.bat      # Gemini 웹/모바일 프롬프트 수동 즉시 생성 및 클립보드 복사 배치 파일
+├── gemini_context_prompt.md      # 생성된 최신 Gemini 웹/모바일 세션 프롬프트 파일
 └── QUANT_INTEGRATION_HANDOFF.md  # 퀀트 시스템 통합 및 인수인계 문서
 ```
 
