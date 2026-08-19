@@ -44,6 +44,7 @@ from notion_utils import (
     get_http_session,
     is_kr_ticker,
     is_valid_num,
+    batch_update_pages,
 )
 
 
@@ -60,49 +61,54 @@ DATABASE_ID = (
 
 SESSION = get_http_session()
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("PriceSyncUS")
 
 
 # ==============================================================================
-# 2. 해외 주식 시세 수집부 (Yahoo Finance)
+# 2. 야후 파이낸스 실시간 시세 수집부
 # ==============================================================================
 def get_stock_data(
     ticker: str,
     max_retries: int = 3,
-    base_delay: float = 2.0
+    base_delay: float = 1.0
 ) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Yahoo Finance에서 주식 데이터를 조회합니다.
-    Returns: (current_price, previous_close) 튜플. 실패 시 (None, None) 반환
-    """
-    attempt = 1
-    while attempt <= max_retries:
+    """yfinance를 호출하여 해외 주식 현재가 및 전일 종가를 추출합니다."""
+    clean_ticker = ticker.strip().upper()
+    
+    for attempt in range(1, max_retries + 1):
         try:
-            stock = yf.Ticker(ticker, session=SESSION)
-            hist = stock.history(period="1d")
+            stock = yf.Ticker(clean_ticker, session=SESSION)
             
+            # fast_info를 통한 초고속 추출
             current_price = None
             previous_close = None
             
-            if not hist.empty:
-                current_price = hist['Close'].iloc[-1]
+            try:
+                fast = stock.fast_info
+                current_price = getattr(fast, "last_price", None)
+                previous_close = getattr(fast, "previous_close", None)
+            except Exception:
+                pass
             
-            if current_price is not None:
-                try:
-                    info = stock.info
-                    previous_close = info.get('previousClose')
-                except Exception as e:
-                    logger.debug(f"   ⚠️ [{ticker}] 전일 종가 조회 실패: {e}")
+            # fast_info 누락 시 history 폴백
+            if current_price is None or previous_close is None:
+                hist = stock.history(period="5d")
+                if not hist.empty and len(hist) >= 2:
+                    current_price = float(hist["Close"].iloc[-1])
+                    previous_close = float(hist["Close"].iloc[-2])
+                elif not hist.empty and len(hist) == 1:
+                    current_price = float(hist["Close"].iloc[-1])
+                    previous_close = float(hist["Open"].iloc[0])
             
-            return (current_price, previous_close)
-            
+            if is_valid_num(current_price):
+                return (current_price, previous_close)
+                
         except (ConnectionError, TimeoutError) as exc:
             if attempt < max_retries:
                 delay = base_delay * attempt
-                logger.info(f"   ⚠️ [{ticker}] 네트워크 에러 재시도 {attempt}/{max_retries}, {delay}초 대기")
+                logger.info(f"   ⚠️ [{ticker}] 통신 재시도 {attempt}/{max_retries}, {delay}초 대기")
                 time.sleep(delay)
-                attempt += 1
                 continue
             logger.warning(f"   ❌ [{ticker}] 네트워크 에러 (최대 재시도 초과): {exc}")
             return (None, None)
@@ -110,13 +116,12 @@ def get_stock_data(
         except Exception as exc:
             if attempt < max_retries:
                 delay = base_delay * attempt
-                logger.info(f"   ⚠️ [{ticker}] 조회 실패 재시도 {attempt}/{max_retries}, {delay}초 대기: {exc}")
+                logger.info(f"   ⚠️ [{ticker}] 재시도 {attempt}/{max_retries}, {delay}초 대기: {exc}")
                 time.sleep(delay)
-                attempt += 1
                 continue
-            logger.warning(f"   ❌ [{ticker}] 데이터 조회 실패 (시도 {attempt}/{max_retries}): {exc}")
+            logger.warning(f"   ❌ [{ticker}] 시세 조회 실패: {exc}")
             return (None, None)
-    
+            
     return (None, None)
 
 
@@ -125,10 +130,11 @@ def get_stock_data(
 # ==============================================================================
 def build_price_update_for_page(
     page: Dict[str, Any]
-) -> Optional[Tuple[str, str, Dict[str, Any], str]]:
+) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
     """개별 해외 주식 페이지의 가격 데이터를 수집하고 업데이트 정보를 반환합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
+    name = get_page_text(props, ["종목명", "Name"]) or ticker
     if not ticker or is_kr_ticker(ticker):
         return None
 
@@ -144,11 +150,9 @@ def build_price_update_for_page(
         
         if upd:
             set_page_date_property(upd, props)
-            
             price_str = f"{round(current_price, 2)}" if current_price is not None and is_valid_num(current_price) else "N/A"
-            return (page["id"], ticker, upd, price_str)
+            return (page["id"], upd, ticker, f"{name} (${price_str})")
         else:
-            logger.warning(f"⚠️ [{ticker}] 유효한 데이터 없음")
             return None
             
     except Exception as e:
@@ -157,14 +161,14 @@ def build_price_update_for_page(
 
 
 # ==============================================================================
-# 4. 배치 수집 및 노션 다중 스레드 반영
+# 4. 배치 수집
 # ==============================================================================
 def batch_collect_us_price_data(
     pages: List[Dict[str, Any]],
     max_workers: int = 5
-) -> List[Tuple[str, str, Dict[str, Any], str]]:
+) -> List[Tuple[str, Dict[str, Any], str, str]]:
     """여러 페이지의 해외 주식 가격 데이터를 병렬로 수집합니다."""
-    updates: List[Tuple[str, str, Dict[str, Any], str]] = []
+    updates: List[Tuple[str, Dict[str, Any], str, str]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(build_price_update_for_page, page): page for page in pages}
         
@@ -179,50 +183,6 @@ def batch_collect_us_price_data(
                 logger.warning(f"❌ [{ticker}] 데이터 수집 중 에러: {exc}")
     
     return updates
-
-
-def batch_update_us_price_pages(
-    notion_client: Any,
-    updates: List[Tuple[str, str, Dict[str, Any], str]],
-    batch_size: int = 10,
-    delay_between_batches: float = 0.3
-) -> None:
-    """배치 단위로 노션 해외 주식 가격 페이지를 업데이트합니다."""
-    if not updates:
-        return
-    
-    logger.info(f"📦 [{len(updates)}개 항목] 해외 주식 가격 배치 업데이트 시작 (배치 크기: {batch_size})")
-    success_count = 0
-    fail_count = 0
-    
-    for batch_idx, i in enumerate(range(0, len(updates), batch_size), 1):
-        chunk = updates[i : i + batch_size]
-        logger.info(f"   📤 배치 {batch_idx}/{(len(updates) + batch_size - 1) // batch_size} 처리 중 ({len(chunk)}개)...")
-        
-        with ThreadPoolExecutor(max_workers=min(len(chunk), 5)) as exe:
-            futures = {}
-            for pid, ticker, props, price_str in chunk:
-                fut = exe.submit(safe_page_update, notion_client, pid, props)
-                futures[fut] = (pid, ticker, price_str)
-            
-            for fut in as_completed(futures):
-                pid, ticker, price_str = futures[fut]
-                try:
-                    ok = fut.result()
-                    if ok:
-                        logger.info(f"      ✅ [Global: {ticker}] 가격: {price_str}")
-                        success_count += 1
-                    else:
-                        logger.warning(f"      ❌ [Global: {ticker}] 업데이트 실패")
-                        fail_count += 1
-                except Exception as exc:
-                    logger.warning(f"      ❌ [Global: {ticker}] 예외 발생: {exc}")
-                    fail_count += 1
-        
-        if batch_idx < (len(updates) + batch_size - 1) // batch_size:
-            time.sleep(delay_between_batches)
-    
-    logger.info(f"\n✨ 해외 주식 가격 배치 업데이트 완료: 성공 {success_count}개, 실패 {fail_count}개")
 
 
 # ==============================================================================
@@ -243,7 +203,7 @@ def main() -> None:
     logger.info(f"📊 총 {len(all_pages)}개 항목 발견")
     
     batch_collect_size = 35
-    updates: List[Tuple[str, str, Dict[str, Any], str]] = []
+    updates: List[Tuple[str, Dict[str, Any], str, str]] = []
     
     for batch_idx, i in enumerate(range(0, len(all_pages), batch_collect_size), 1):
         batch = all_pages[i : i + batch_collect_size]
@@ -256,8 +216,7 @@ def main() -> None:
             time.sleep(0.5)
     
     if updates:
-        logger.info(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
-        batch_update_us_price_pages(notion_client, updates, batch_size=10, delay_between_batches=0.3)
+        batch_update_pages(notion_client, updates, max_workers=3, delay=0.05, logger=logger)
     else:
         logger.warning("⚠️ 업데이트할 항목이 없습니다.")
         

@@ -43,6 +43,9 @@ from notion_utils import (
     match_keyword,
     find_best_bm,
     parse_keywords,
+    resolve_stock_taxonomy,
+    load_benchmark_config,
+    batch_update_pages,
 )
 
 
@@ -67,42 +70,7 @@ logger = logging.getLogger("MasterSyncKR")
 
 
 # ==============================================================================
-# 2. 지표 DB 동적 분석 (관계형 ID 매핑 및 키워드 인덱싱)
-# ==============================================================================
-def get_dynamic_config(client: Any) -> Dict[str, Any]:
-    """지표지수 DB를 스캔하여 티커별 Notion ID 매핑 및 키워드 목록을 동적으로 구성합니다."""
-    logger.info("🔍 지표지수 DB 동적 분석 및 매칭키워드 로드 시작...")
-    config: Dict[str, Any] = {"ticker_to_id": {}, "benchmarks": []}
-    try:
-        for page in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.2):
-            props = page.get("properties", {})
-            ticker = get_page_text(props, ["티커", "Ticker", "이름", "Name"]).upper()
-            if not ticker:
-                continue
-            summary = get_page_text(props, ["요약명"]).strip()
-            cat = props.get("구분", {}).get("select", {}).get("name", "") if props.get("구분", {}).get("select") else ""
-            country = props.get("국가", {}).get("select", {}).get("name", "") if props.get("국가", {}).get("select") else ""
-            kw_raw = get_page_text(props, ["매칭키워드", "키워드"])
-            keywords = parse_keywords(kw_raw, fallback_summary=summary)
-                
-            config["ticker_to_id"][ticker] = page["id"]
-            config["benchmarks"].append({
-                "ticker": ticker,
-                "summary": summary,
-                "category": cat,
-                "country": country,
-                "keywords": keywords,
-                "id": page["id"]
-            })
-
-        logger.info(f"✅ 지표 로드 완료 (총 {len(config['benchmarks'])}개 지표 및 키워드 활성화)")
-    except Exception as e:
-        logger.error(f"❌ 지표 DB 로드 실패: {e}")
-    return config
-
-
-# ==============================================================================
-# 3. 한국 주식 데이터 엔진 (FDR + KIS API 연동)
+# 2. 한국 주식 데이터 엔진 (FDR + KIS API 연동)
 # ==============================================================================
 class StockAutomationEngineKR:
     """FinanceDataReader 및 KIS 시세 조회를 결합한 한국 주식 메타데이터 엔진"""
@@ -154,7 +122,7 @@ class StockAutomationEngineKR:
 
 
 # ==============================================================================
-# 4. 페이지 처리 (기본 정보 + K산업BM / G산업BM / 시장BM 동적 매핑)
+# 3. 페이지 처리 (기본 정보 + K산업BM / G산업BM / 시장BM 동적 매핑)
 # ==============================================================================
 def process_page_kr(
     page: Dict[str, Any],
@@ -193,12 +161,11 @@ def process_page_kr(
     rprs_m = (kis_info.get("rprs_market") or "").upper() if kis_info else ""
 
     if is_etf or rprs_m == "ETF":
-        market_label = "ETF(KR)"
         is_etf = True
-    elif "KOSDAQ" in m_raw or "KSQ" in rprs_m:
-        market_label = "KOSDAQ"
-    else:
-        market_label = "KOSPI"
+
+    # 3D 자산분류 공통 유틸리티 호출
+    tax = resolve_stock_taxonomy(ticker=clean_t, name=stock_name, market_hint=m_raw, is_etf=is_etf)
+    market_label = tax["market"]
 
     if is_etf:
         sec_val = "ETF"
@@ -228,18 +195,20 @@ def process_page_kr(
         else:
             target_m_t = "229200"  # KODEX 코스닥150
 
-    # 2. K산업BM (국내 동종 산업 벤치마크 - 노션 지표 DB 매칭키워드 기반 순수 동적 탐색)
+    # 2. K산업BM & G산업BM (지표 DB 매칭키워드 기반 동적 매칭)
     text_corpus = f"{stock_name} {sec_val} {ind_val}".upper()
     kr_industry_bms = [bm for bm in config["benchmarks"] if bm["category"] == "산업" and bm["country"] == "KR"]
     target_k_ind_t = find_best_bm(text_corpus, kr_industry_bms)
 
-    # 3. G산업BM (글로벌 동종 산업 벤치마크 - 노션 지표 DB 매칭키워드 기반 순수 동적 탐색)
     us_industry_bms = [bm for bm in config["benchmarks"] if bm["category"] == "산업" and bm["country"] == "US"]
     target_g_ind_t = find_best_bm(text_corpus, us_industry_bms)
 
     update_props: Dict[str, Any] = {
         "종목명": make_rich_text(stock_name),
-        "Market": {"select": {"name": market_label}},
+        "Market": {"select": {"name": tax["market"]}},
+        "국가": {"select": {"name": tax["country"]}},
+        "상품유형": {"select": {"name": tax["product_type"]}},
+        "자산군": {"select": {"name": tax["asset_class"]}},
         "KR_섹터": make_rich_text(sec_val),
         "KR_산업": make_rich_text(ind_val),
     }
@@ -267,13 +236,13 @@ def process_page_kr(
 
 
 # ==============================================================================
-# 5. 메인 실행 함수
+# 4. 메인 실행 함수
 # ==============================================================================
 def main() -> None:
     """한국 주식 마스터 DB 동기화 메인 파이프라인"""
     client = build_notion_client(NOTION_TOKEN, use_httpx=True, timeout=60.0)
     kis_ctx = get_kis_auth_context()
-    config = get_dynamic_config(client)
+    config = load_benchmark_config(client, BENCHMARK_DATABASE_ID, logger=logger)
     engine = StockAutomationEngineKR(kis_ctx)
 
     all_pages = []
@@ -290,26 +259,7 @@ def main() -> None:
             update_payloads.append(res)
 
     if update_payloads:
-        logger.info(f"📝 {len(update_payloads)}개 종목 노션 DB 반영 시작 (안전 동시 워커 제어)...")
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {
-                executor.submit(safe_page_update, client, pid, props): (ticker, name)
-                for pid, props, ticker, name in update_payloads
-            }
-
-            for idx, future in enumerate(as_completed(futures), 1):
-                ticker, name = futures[future]
-                try:
-                    success = future.result()
-                    if success:
-                        logger.info(f"   ✅ [{idx}/{len(update_payloads)}] [Master Sync] {ticker} ({name}) 동기화 성공")
-                    else:
-                        logger.warning(f"   ❌ [{idx}/{len(update_payloads)}] [Master Sync] {ticker} ({name}) 노션 반영 실패")
-                except Exception as exc:
-                    logger.error(f"   ❌ [{ticker}] 트랜잭션 에러 발생: {exc}")
-
-                time.sleep(0.1)
+        batch_update_pages(client, update_payloads, max_workers=3, delay=0.1, logger=logger)
 
     logger.info("✨ 한국 주식 마스터 DB 통합 업데이트 프로세스 완료")
 

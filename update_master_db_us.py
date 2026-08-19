@@ -43,6 +43,9 @@ from notion_utils import (
     match_keyword,
     find_best_bm,
     parse_keywords,
+    resolve_stock_taxonomy,
+    load_benchmark_config,
+    batch_update_pages,
 )
 
 # ==============================================================================
@@ -64,152 +67,130 @@ BENCHMARK_DATABASE_ID = (
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("MasterSyncUS")
 
-# ==============================================================================
-# 2. 지표 DB 동적 분석 (관계형 ID 매핑 및 키워드 인덱싱)
-# ==============================================================================
-def get_dynamic_config_us(client: Any) -> Dict[str, Any]:
-    """지표지수 DB의 미국/글로벌 티커 및 매칭키워드 수집"""
-    logger.info("🔍 지표지수 DB 동적 분석 및 글로벌 매칭키워드 로드 시작...")
-    config = {"ticker_to_id": {}, "benchmarks": []}
-    try:
-        for page in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.2):
-            props = page.get("properties", {})
-            ticker = get_page_text(props, ["티커", "Ticker", "이름", "Name"]).upper()
-            if not ticker:
-                continue
-            summary = get_page_text(props, ["요약명"]).strip()
-            cat = props.get("구분", {}).get("select", {}).get("name", "") if props.get("구분", {}).get("select") else ""
-            country = props.get("국가", {}).get("select", {}).get("name", "") if props.get("국가", {}).get("select") else ""
-            kw_raw = get_page_text(props, ["매칭키워드", "키워드"])
-            keywords = parse_keywords(kw_raw, fallback_summary=summary)
-                
-            config["ticker_to_id"][ticker] = page["id"]
-            config["benchmarks"].append({
-                "ticker": ticker,
-                "summary": summary,
-                "category": cat,
-                "country": country,
-                "keywords": keywords,
-                "id": page["id"]
-            })
-        logger.info(f"✅ 총 {len(config['benchmarks'])}개의 지수 및 키워드 데이터 로드 완료")
-    except Exception as e:
-        logger.error(f"❌ 지표 로드 실패: {e}")
-    return config
 
 # ==============================================================================
-# 3. 미국 주식 데이터 엔진 (인메모리 인덱스 & 실시간 캐시)
+# 2. 미국 주식 데이터 엔진 (인메모리 인덱스 & 실시간 캐시)
 # ==============================================================================
 class StockAutomationEngineUS:
-    """S&P500 / NASDAQ / NYSE 인메모리 패스트트랙 및 yfinance 폴백 엔진"""
+    """FinanceDataReader 및 yfinance 기반 고속 인메모리 종목 메타데이터 엔진"""
+
     def __init__(self):
-        logger.info("📡 미국 주식 마스터 엔진 가동 (S&P500 / NASDAQ / NYSE 인메모리 패스트트랙)...")
+        logger.info("📡 미국/글로벌 종목 메타데이터 엔진 초기화 중...")
         self.session = get_http_session()
 
+        # FDR 오픈 피드를 통한 초고속 메모리 로드
         try:
-            self.df_sp500 = fdr.StockListing('S&P500')
-            self.sp500_dict = self.df_sp500.set_index('Symbol').to_dict('index')
+            self.df_nasdaq = fdr.StockListing('NASDAQ').set_index('Symbol')
+            self.nasdaq_symbols = set(self.df_nasdaq.index)
         except Exception as e:
-            logger.warning(f"⚠️ S&P500 로드 실패: {e}")
-            self.df_sp500 = pd.DataFrame(columns=['Symbol', 'Name', 'Sector', 'Industry'])
-            self.sp500_dict = {}
-
-        try:
-            df_nasdaq = fdr.StockListing('NASDAQ')
-            self.nasdaq_symbols = set(df_nasdaq['Symbol'].astype(str).str.strip().str.upper())
-        except Exception as e:
-            logger.warning(f"⚠️ NASDAQ 리스트 로드 실패: {e}")
+            logger.warning(f"⚠️ NASDAQ 로드 실패: {e}")
+            self.df_nasdaq = pd.DataFrame()
             self.nasdaq_symbols = set()
 
         try:
-            df_nyse = fdr.StockListing('NYSE')
-            self.nyse_symbols = set(df_nyse['Symbol'].astype(str).str.strip().str.upper())
+            self.df_nyse = fdr.StockListing('NYSE').set_index('Symbol')
+            self.nyse_symbols = set(self.df_nyse.index)
         except Exception as e:
-            logger.warning(f"⚠️ NYSE 리스트 로드 실패: {e}")
+            logger.warning(f"⚠️ NYSE 로드 실패: {e}")
+            self.df_nyse = pd.DataFrame()
             self.nyse_symbols = set()
 
-        self.nasdaq_100 = self._get_nas100()
+        try:
+            self.sp500_dict = fdr.StockListing('S&P500').set_index('Symbol').to_dict('index')
+        except Exception as e:
+            logger.warning(f"⚠️ S&P500 로드 실패: {e}")
+            self.sp500_dict = {}
 
-    def _get_nas100(self) -> Set[str]:
-        """Wikipedia를 활용한 나스닥 100 종목코드 수집"""
-        urls = [
-            'https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies',
-            'https://en.wikipedia.org/wiki/Nasdaq-100'
-        ]
-        for url in urls:
-            try:
-                res = self.session.get(url, timeout=10)
-                if res.status_code == 200:
-                    dfs = pd.read_html(io.StringIO(res.text))
-                    for df in dfs:
-                        for col in ['Ticker', 'Symbol']:
-                            if col in df.columns and len(df) >= 50:
-                                return set(df[col].astype(str).str.strip().str.upper().tolist())
-            except Exception as e:
-                logger.warning(f"⚠️ 나스닥 100 수집 실패 ({url}): {e}")
-        return set()
+        try:
+            df_nq100 = fdr.StockListing('NASDAQ')
+            self.nasdaq_100 = set(df_nq100.head(100)['Symbol']) if not df_nq100.empty else set()
+        except Exception:
+            self.nasdaq_100 = set()
 
-    def get_market_label(self, clean_t: str) -> str:
-        """상세 마켓 판별 로직"""
-        if clean_t in self.nasdaq_symbols or clean_t in self.nasdaq_100:
-            return "NASDAQ"
-        if clean_t in self.nyse_symbols or clean_t in self.sp500_dict:
-            return "NYSE"
-        return "기타"
 
 # ==============================================================================
-# 4. 페이지 처리 (기본 정보 자동 기입 + 지표 동적 매핑)
+# 3. 개별 페이지 분석 및 페이로드 빌더
 # ==============================================================================
-def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, client: Any, config: Dict[str, Any]) -> None:
-    """개별 미국 주식 페이지의 섹터/업종/벤치마크 매핑 정보를 분석하고 즉시 갱신합니다."""
-    pid, props = page["id"], page.get("properties", {})
-    raw_t = get_page_text(props, ["티커", "Ticker"]).upper()
+def process_page_us(
+    page: Dict[str, Any],
+    engine: StockAutomationEngineUS,
+    client: Any,
+    config: Dict[str, Any]
+) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
+    """개별 미국/해외 주식 페이지의 메타데이터와 벤치마크를 정합화하고 업데이트 페이로드를 생성합니다."""
+    pid = page["id"]
+    props = page.get("properties", {})
+    ticker_prop = props.get("티커") or props.get("Ticker")
+    if not ticker_prop:
+        return None
+
+    raw_t = ticker_prop.get("title", [{}])[0].get("plain_text", "").strip().upper()
     if not raw_t or is_kr_ticker(raw_t):
-        return
+        return None
 
-    name = ""
+    # 기본값
+    name = raw_t
+    m_hint = "GLOBAL"
     sec = ""
     ind = ""
-    market_label = engine.get_market_label(raw_t)
-    target_m_t, target_ind_t = None, None
+    target_m_t = None
+    target_ind_t = None
+    is_etf_flag = False
 
-    # 1. S&P 500 인메모리 패스트트랙
+    # 1. 인메모리 빠른 조회 (S&P500 -> NASDAQ -> NYSE)
     if raw_t in engine.sp500_dict:
-        sp_item = engine.sp500_dict[raw_t]
-        name = extract_short_brand_name(sp_item.get('Name', raw_t))
-        sec = sp_item.get('Sector', '')
-        ind = sp_item.get('Industry', '')
-        market_label = "NASDAQ" if raw_t in engine.nasdaq_100 or raw_t in engine.nasdaq_symbols else "NYSE"
+        row = engine.sp500_dict[raw_t]
+        name = extract_short_brand_name(row.get('Name', raw_t))
+        sec = row.get('Sector', '')
+        ind = row.get('Industry', '')
+        m_hint = "NASDAQ" if raw_t in engine.nasdaq_symbols else "NYSE"
+    elif raw_t in engine.df_nasdaq.index:
+        row = engine.df_nasdaq.loc[raw_t]
+        name = extract_short_brand_name(row.get('Name', raw_t))
+        ind = str(row.get('Industry', ''))
+        sec = str(row.get('IndustryCode', ''))
+        m_hint = "NASDAQ"
+    elif raw_t in engine.df_nyse.index:
+        row = engine.df_nyse.loc[raw_t]
+        name = extract_short_brand_name(row.get('Name', raw_t))
+        ind = str(row.get('Industry', ''))
+        sec = str(row.get('IndustryCode', ''))
+        m_hint = "NYSE"
     else:
-        # 2. S&P 500 외 종목(ADR, 중소형주, ETF)만 YFinance 조회
+        # 2. YFinance 폴백
         try:
-            stock_yf = yf.Ticker(raw_t, session=engine.session)
-            info = stock_yf.info
-            raw_name = info.get("longName") or info.get("shortName") or raw_t
-            name = extract_short_brand_name(raw_name)
-            sec = info.get("sector", "")
-            ind = info.get("industry", "")
-            
-            qtype = (info.get("quoteType") or "").upper()
+            yf_item = yf.Ticker(raw_t, session=engine.session)
+            info = yf_item.info
+            name = extract_short_brand_name(info.get("longName") or info.get("shortName") or raw_t)
+            sec = info.get("sector") or ""
+            ind = info.get("industry") or ""
+            quote_type = info.get("quoteType", "")
+            if quote_type == "ETF":
+                is_etf_flag = True
+
             exch = (info.get("exchange") or "").upper()
             full_exch = (info.get("fullExchangeName") or "").upper()
 
-            if qtype == "ETF":
-                market_label = "ETF(US)"
+            if raw_t.endswith(".T") or "TOKYO" in full_exch or "TSE" in exch:
+                m_hint = "TSE"
             elif exch in ["NMS", "NGM", "NCM"] or "NAS" in exch or "NASDAQ" in full_exch or raw_t in engine.nasdaq_symbols:
-                market_label = "NASDAQ"
+                m_hint = "NASDAQ"
             elif exch in ["NYQ", "NYC"] or "NY" in exch or "NYSE" in full_exch or raw_t in engine.nyse_symbols:
-                market_label = "NYSE"
-            elif exch in ["ASE", "PCX", "BATS", "BTQ"] or "AMEX" in full_exch or "ARCA" in full_exch:
-                market_label = "AMEX"
-            elif raw_t.endswith(".T"):
-                market_label = "기타"
+                m_hint = "NYSE"
+            else:
+                m_hint = "GLOBAL"
         except Exception as exc:
             logger.warning(f"⚠️ [{raw_t}] YFinance 조회 실패: {exc}")
             name = raw_t
+            if raw_t.endswith(".T"):
+                m_hint = "TSE"
+
+    # 3D 자산분류 공통 함수 호출
+    tax = resolve_stock_taxonomy(ticker=raw_t, name=name, market_hint=m_hint, is_etf=is_etf_flag)
+    market_label = tax["market"]
 
     # 3. 시장BM 및 G산업BM 매칭
-    if market_label != "기타":
+    if market_label not in ("기타", "TSE", "GLOBAL", "COMEX"):
         if raw_t in engine.nasdaq_100:
             target_m_t = "QQQ"
         elif raw_t in engine.sp500_dict or market_label == "NYSE":
@@ -227,7 +208,10 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
 
     update_props: Dict[str, Any] = {
         "종목명": make_rich_text(name),
-        "Market": {"select": {"name": market_label}},
+        "Market": {"select": {"name": tax["market"]}},
+        "국가": {"select": {"name": tax["country"]}},
+        "상품유형": {"select": {"name": tax["product_type"]}},
+        "자산군": {"select": {"name": tax["asset_class"]}},
         "US_섹터": make_rich_text(sec),
         "US_업종": make_rich_text(ind),
     }
@@ -245,7 +229,7 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
 
     # 5. 벤치마크 관계형 속성 반영
     update_props["K산업BM"] = {"relation": []}
-    if market_label == "기타":
+    if market_label in ("기타", "COMEX"):
         update_props["시장BM"] = {"relation": []}
         update_props["G산업BM"] = {"relation": []}
     else:
@@ -259,32 +243,32 @@ def process_page_us(page: Dict[str, Any], engine: StockAutomationEngineUS, clien
         else:
             update_props["G산업BM"] = {"relation": []}
 
-    if safe_page_update(client, pid, update_props):
-        logger.info(f"   ✅ [US] {raw_t} ({name}) 업데이트 완료")
+    return pid, update_props, raw_t, name
+
 
 # ==============================================================================
-# 5. 메인 실행 함수
+# 4. 메인 실행 함수
 # ==============================================================================
 def main() -> None:
     """미국/글로벌 주식 마스터 DB 동기화 메인 파이프라인"""
     client = build_notion_client(NOTION_TOKEN, use_httpx=True, timeout=60.0)
-
-    config = get_dynamic_config_us(client)
+    config = load_benchmark_config(client, BENCHMARK_DATABASE_ID, logger=logger)
     engine = StockAutomationEngineUS()
 
     all_pages = [page for page in paginate_database(client, MASTER_DATABASE_ID, page_size=100, retry_delay=0.1)]
-    logger.info(f"📡 노션 DB 수집 완료: 총 {len(all_pages)}개 페이지 대상 병렬 처리 시작...")
+    logger.info(f"📡 노션 DB 수집 완료: 총 {len(all_pages)}개 페이지 대상 분석 시작...")
 
-    if all_pages:
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(process_page_us, page, engine, client, config) for page in all_pages]
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as exc:
-                    logger.error(f"❌ 페이지 처리 중 에러: {exc}")
+    update_payloads = []
+    for page in all_pages:
+        res = process_page_us(page, engine, client, config)
+        if res:
+            update_payloads.append(res)
 
-    logger.info("✨ 모든 US 종목 업데이트 프로세스가 완료되었습니다.")
+    if update_payloads:
+        batch_update_pages(client, update_payloads, max_workers=3, delay=0.1, logger=logger)
+
+    logger.info("✨ 모든 US/Global 종목 업데이트 프로세스가 완료되었습니다.")
+
 
 if __name__ == "__main__":
     main()

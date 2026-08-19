@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import numpy as np
+import pandas as pd
+import FinanceDataReader as fdr
 
 # Windows 콘솔 UTF-8 출력 안전화
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -23,17 +25,8 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 logger = logging.getLogger("MacroService")
 
-
-# K-올라운드 마스터 7대 자산군 대표 프록시 ETF 매핑
-ASSET_CLASS_PROXIES: Dict[str, Dict[str, Any]] = {
-    "US_CORE_INDEX": {"name": "미국 대표지수", "ticker": "SPY", "target_pct": 25.0, "unit": "$"},
-    "DIVIDEND_GROWTH": {"name": "한·미 배당성장", "ticker": "SCHD", "target_pct": 15.0, "unit": "$"},
-    "KR_EQUITY": {"name": "국내 주식 & 밸류업", "ticker": "069500", "target_pct": 10.0, "unit": "원"},
-    "US_LONG_BOND": {"name": "미국 장기채", "ticker": "TLT", "target_pct": 20.0, "unit": "$"},
-    "KR_BOND_SHORT": {"name": "국내 채권 & 단기자금", "ticker": "153130", "target_pct": 10.0, "unit": "원"},
-    "GOLD": {"name": "금 (Gold)", "ticker": "GLD", "target_pct": 10.0, "unit": "$"},
-    "COMMODITY_CASH": {"name": "원자재 & 달러/현금", "ticker": "DBC", "target_pct": 10.0, "unit": "$"},
-}
+# config_portfolio의 단일 진실 공급원(Single Source of Truth) 프록시 매핑 사용
+from config_portfolio import ASSET_CLASS_PROXIES
 
 
 class MacroService:
@@ -49,7 +42,6 @@ class MacroService:
     def _fetch_series(self, symbol: str, start_date_str: str) -> Optional[Any]:
         """지정된 심볼의 시계열 데이터를 FinanceDataReader로 안전하게 조회합니다."""
         try:
-            import FinanceDataReader as fdr
             df = fdr.DataReader(symbol, start_date_str)
             if df is not None and not df.empty:
                 return df
@@ -171,7 +163,6 @@ class MacroService:
         200일선, 추세(상승/하락), 12개월 모멘텀, 52주 낙폭, 60일 변동성을 산출하고
         12개월 모멘텀 기준 순위를 매겨 반환합니다.
         """
-        import FinanceDataReader as fdr
         start_date = (self._get_kst_now() - timedelta(days=400)).strftime("%Y-%m-%d")
         results: List[Dict[str, Any]] = []
 
@@ -307,10 +298,10 @@ class MacroService:
         df_wti = self._fetch_series("CL", start_date_str)
         wti_now, wti_prev, wti_wow = self._extract_latest_and_prev_week(df_wti)
 
-        # 7. 금 선물 (GC 또는 GLD)
-        df_gold = self._fetch_series("GC", start_date_str)
+        # 7. 금 (GLD 또는 GC)
+        df_gold = self._fetch_series("GLD", start_date_str)
         if df_gold is None or df_gold.empty:
-            df_gold = self._fetch_series("GLD", start_date_str)
+            df_gold = self._fetch_series("GC", start_date_str)
         gold_now, gold_prev, gold_wow = self._extract_latest_and_prev_week(df_gold)
 
         # 8. KOSPI 지수

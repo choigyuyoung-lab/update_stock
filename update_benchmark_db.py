@@ -63,6 +63,12 @@ BENCHMARK_DATABASE_ID = (
     or os.environ.get("BENCHMARK_DB_ID")
     or get_env_var("BENCHMARK_DATABASE_ID")
 )
+INVESTMENT_DATABASE_ID = (
+    os.environ.get("DATABASE_ID")
+    or os.environ.get("INVESTMENT_DB_ID")
+    or os.environ.get("INVESTMENT_DATABASE_ID")
+    or get_env_var("DATABASE_ID")
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("BenchmarkSync")
@@ -78,7 +84,7 @@ SPECIAL_BM_US = {"GLD", "USO", "EWY"}
 class BenchmarkAutomationEngine:
     """FinanceDataReader 및 yfinance 기반 고속 인메모리 종목 메타데이터 엔진"""
 
-    def __init__(self):
+    def __init__(self, client: Optional[Any] = None):
         logger.info("📡 지표지수 DB 전담 엔진 초기화 중...")
         self.session = get_http_session()
 
@@ -99,6 +105,22 @@ class BenchmarkAutomationEngine:
         except Exception as e:
             logger.warning(f"⚠️ S&P500 로드 실패: {e}")
             self.df_sp500 = {}
+
+        # 투자주 DB 티커 인덱싱
+        self.inv_ticker_to_id: Dict[str, str] = {}
+        if client and INVESTMENT_DATABASE_ID:
+            try:
+                for page in paginate_database(client, INVESTMENT_DATABASE_ID, page_size=100, retry_delay=0.2):
+                    p_props = page.get("properties", {})
+                    t_str = get_page_text(p_props, ["티커", "Ticker", "종목코드"]).upper().strip()
+                    if t_str:
+                        self.inv_ticker_to_id[t_str] = page["id"]
+                        clean_t = t_str.split(".")[0].strip()
+                        if clean_t:
+                            self.inv_ticker_to_id[clean_t] = page["id"]
+                logger.info(f"✅ 투자주 DB 티커 인덱싱 완료 (총 {len(self.inv_ticker_to_id)}개 티커 키)")
+            except Exception as exc:
+                logger.warning(f"⚠️ 투자주 DB 인덱싱 실패: {exc}")
 
     def get_stock_name(self, ticker: str) -> str:
         """티커에 해당하는 공식 종목명을 검색합니다."""
@@ -163,6 +185,18 @@ def process_benchmark_page(
     # 2. 매칭키워드가 누락된 경우 요약명을 기본값으로 설정
     if not kw_val and summary:
         update_props["매칭키워드"] = make_rich_text(summary)
+
+    # 3. [신규] 티커 기반 '투자주 DB' 관계형 자동 연결
+    clean_ticker = ticker.split(".")[0].strip()
+    inv_id = engine.inv_ticker_to_id.get(ticker) or engine.inv_ticker_to_id.get(clean_ticker)
+    
+    current_inv_rels = props.get("투자주 DB", {}).get("relation", []) if props.get("투자주 DB") else props.get("투자주DB", {}).get("relation", [])
+    current_inv_ids = [r["id"] for r in current_inv_rels]
+    
+    rel_prop_name = "투자주 DB" if "투자주 DB" in props else ("투자주DB" if "투자주DB" in props else None)
+    if rel_prop_name and inv_id:
+        if not current_inv_ids or current_inv_ids[0] != inv_id:
+            update_props[rel_prop_name] = {"relation": [{"id": inv_id}]}
 
     if update_props:
         safe_page_update(client, pid, update_props)
@@ -253,7 +287,7 @@ def main() -> None:
     """지표지수 DB 점검 및 마스터 DB 헬스체크 메인 파이프라인"""
     logger.info("🚀 [지표지수 DB 자동 점검 및 업데이트 프로세스 시작]")
     client = build_notion_client(NOTION_TOKEN, use_httpx=True, timeout=60.0)
-    engine = BenchmarkAutomationEngine()
+    engine = BenchmarkAutomationEngine(client=client)
 
     pages = [p for p in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100)]
     logger.info(f"📋 지표지수 DB에서 총 {len(pages)}개의 지표 항목을 로드했습니다.")

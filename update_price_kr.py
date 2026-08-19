@@ -40,6 +40,7 @@ from notion_utils import (
     get_http_session,
     is_kr_ticker,
     is_valid_num,
+    batch_update_pages,
 )
 
 
@@ -98,32 +99,38 @@ def get_price_data(
             status = response.status_code
             if status in RETRY_STATUS_CODES and attempt < max_retries:
                 delay = base_delay * (2 ** (attempt - 1))
-                print(f"   ⚠️ [{ticker}] KIS API 재시도 {attempt}/{max_retries} - status={status}, {delay}초 대기")
+                print(f"   ⚠️ [{ticker}] KIS API {status} 에러. {delay}초 대기 후 재시도 ({attempt}/{max_retries})")
                 time.sleep(delay)
                 attempt += 1
                 continue
-            
+                
             response.raise_for_status()
-            out = response.json().get("output", {})
-            return {
-                "현재가": float(out.get("stck_prpr")) if out.get("stck_prpr") else None,
-                "전일 종가": float(out.get("stck_sdpr")) if out.get("stck_sdpr") else None,
-            }
+            data = response.json()
+            output = data.get("output", {})
+            if not output:
+                raise ValueError("응답 데이터(output)가 비어 있습니다.")
+
+            curr_price = float(output.get("stck_prpr", 0.0))
+            prev_close = float(output.get("stck_sdpr", 0.0))
             
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as exc:
+            if curr_price <= 0 and prev_close > 0:
+                curr_price = prev_close
+
+            return {
+                "현재가": curr_price if curr_price > 0 else None,
+                "전일 종가": prev_close if prev_close > 0 else None,
+            }
+
+        except (requests.exceptions.RequestException, ValueError) as exc:
             if attempt < max_retries:
                 delay = base_delay * (2 ** (attempt - 1))
-                print(f"   ⚠️ [{ticker}] KIS API 통신 오류 발생. 재시도 {attempt}/{max_retries}, {delay}초 대기: {exc}")
+                print(f"   ⚠️ [{ticker}] KIS 통신 에러. {delay}초 대기 후 재시도 ({attempt}/{max_retries}): {exc}")
                 time.sleep(delay)
                 attempt += 1
                 continue
             print(f"❌ [{ticker}] KIS API 요청 실패 (최대 재시도 초과): {exc}")
             return {}
-            
-        except Exception as exc:
-            print(f"❌ [{ticker}] 시스템 에러 파싱 실패: {exc}")
-            return {}
-            
+
     return {}
 
 
@@ -133,83 +140,59 @@ def get_price_data(
 def build_update_for_page(
     page: Dict[str, Any],
     kis_ctx: Dict[str, Any]
-) -> Optional[Tuple[str, str, Dict[str, Any]]]:
-    """페이지별 속성을 추출해 한투 가격 데이터와 매핑 구조를 빌드합니다."""
+) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
+    """개별 노션 페이지의 티커를 추출하여 한투 가격 정보를 조회하고 업데이트 페이로드를 생성합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
+    name = get_page_text(props, ["종목명", "Name"]) or ticker
+    
     if not ticker or not is_kr_ticker(ticker):
         return None
 
-    price_data = get_price_data(ticker, kis_ctx)
-    if not price_data:
-        print(f"⚠️ [{ticker}] 가격 데이터 미수신")
+    price_dict = get_price_data(ticker, kis_ctx)
+    if not price_dict:
         return None
+
+    curr_price = price_dict.get("현재가")
+    prev_close = price_dict.get("전일 종가")
 
     update_props: Dict[str, Any] = {}
-    if is_valid_num(price_data.get("현재가")):
-        update_props["현재가"] = {"number": price_data["현재가"]}
-    if is_valid_num(price_data.get("전일 종가")):
-        update_props["전일 종가"] = {"number": price_data["전일 종가"]}
+    if curr_price is not None and curr_price > 0:
+        update_props["현재가"] = {"number": curr_price}
         
-    set_page_date_property(update_props, props)
+    if prev_close is not None and prev_close > 0 and "전일 종가" in props:
+        update_props["전일 종가"] = {"number": prev_close}
 
-    if not update_props:
-        print(f"⚠️ [{ticker}] 업데이트할 유효한 데이터 없음")
-        return None
+    if update_props:
+        set_page_date_property(update_props, props)
+        return page["id"], update_props, ticker, name
 
-    return (page["id"], ticker, update_props)
+    return None
 
 
 # ==============================================================================
-# 4. 배치 수집 및 노션 다중 스레드 반영
+# 4. 일괄 데이터 수집
 # ==============================================================================
 def batch_collect_price_data(
     pages: List[Dict[str, Any]],
     kis_ctx: Dict[str, Any],
     max_workers: int = 3
-) -> List[Tuple[str, str, Dict[str, Any]]]:
-    """여러 페이지의 국내 주식 가격 데이터를 병렬로 수집합니다."""
-    updates: List[Tuple[str, str, Dict[str, Any]]] = []
+) -> List[Tuple[str, Dict[str, Any], str, str]]:
+    """페이지 청크 목록에 대해 멀티스레드로 시세를 병렬 수집합니다."""
+    updates: List[Tuple[str, Dict[str, Any], str, str]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(build_update_for_page, page, kis_ctx): page for page in pages}
         for fut in as_completed(futures):
             try:
-                result = fut.result()
-                if result:
-                    updates.append(result)
+                res = fut.result()
+                if res:
+                    updates.append(res)
             except Exception as exc:
                 page = futures[fut]
                 props = page.get("properties", {})
                 ticker = get_page_text(props, ["티커", "Ticker"]).upper() or "UNKNOWN"
                 print(f"❌ [{ticker}] 데이터 수집 중 예외 발생: {exc}")
     return updates
-
-
-def batch_update_pages(
-    notion_client: Any,
-    updates: List[Tuple[str, str, Dict[str, Any]]],
-    batch_size: int = 10,
-    delay_between_batches: float = 0.3
-) -> None:
-    """수집된 가격 정보를 배치화하여 노션에 안전하게 반영합니다."""
-    if not updates:
-        return
-    for i in range(0, len(updates), batch_size):
-        chunk = updates[i : i + batch_size]
-        with ThreadPoolExecutor(max_workers=min(len(chunk), 5)) as exe:
-            futures = {exe.submit(safe_page_update, notion_client, pid, props): (pid, ticker) for pid, ticker, props in chunk}
-            for fut in as_completed(futures):
-                pid, ticker = futures[fut]
-                try:
-                    ok = fut.result()
-                    if ok:
-                        print(f"✅ [Price] {ticker} 업데이트 완료")
-                    else:
-                        print(f"❌ [Price] {ticker} 업데이트 실패")
-                except Exception as exc:
-                    print(f"❌ [Price] {ticker} 업데이트 중 예외: {exc}")
-                    
-        time.sleep(delay_between_batches)
 
 
 # ==============================================================================
@@ -233,7 +216,7 @@ def main() -> None:
     print(f"📊 총 {len(all_pages)}개 항목 발견")
     
     batch_collect_size = 20
-    updates: List[Tuple[str, str, Dict[str, Any]]] = []
+    updates: List[Tuple[str, Dict[str, Any], str, str]] = []
     
     for batch_idx, i in enumerate(range(0, len(all_pages), batch_collect_size), 1):
         batch = all_pages[i : i + batch_collect_size]
@@ -246,8 +229,7 @@ def main() -> None:
             time.sleep(0.5)
             
     if updates:
-        print(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
-        batch_update_pages(notion, updates, batch_size=10, delay_between_batches=0.3)
+        batch_update_pages(notion, updates, max_workers=3, delay=0.05)
     else:
         print("⚠️ 업데이트할 항목이 없습니다.")
         

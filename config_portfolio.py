@@ -4,11 +4,12 @@ config_portfolio.py
 ===================
 한국 거주자 맞춤형 「K-올라운드 마스터 (K-All-Round Master)」 자산배분 기준,
 환율 구간별 전술적 매크로 룰, 계좌별 절세 특성 규칙(삼성이전 vs 미래연금 vs ISA vs IRP),
-종목/ETF 7대 자산군 지능형 분류 규칙(Aliases), 및 Google Gemini 기반 진단 프롬프트를 정의합니다.
+연간 세액공제 한도 및 자산군 지능형 분류(정규식/노션DB 연동), Google Gemini 진단 프롬프트를 정의합니다.
 """
 
+import re
 from typing import Any, Dict, List, Tuple
-from notion_utils import is_kr_ticker
+from notion_utils import is_kr_ticker, resolve_stock_taxonomy
 
 
 # ==============================================================================
@@ -23,16 +24,16 @@ from notion_utils import is_kr_ticker
 K_ALL_ROUND_MASTER_CONFIG: Dict[str, Dict[str, Any]] = {
     "US_CORE_INDEX": {
         "code": "US_CORE_INDEX",
-        "name": "미국 대표지수",
+        "name": "글로벌성장주",
         "target_pct": 25.0,
         "currency_exposure": "USD (환노출)",
-        "role": "S&P500, 나스닥 등 글로벌 1등 기업 성장 견인 및 자본 이득",
+        "role": "S&P500, 나스닥, 미국 빅테크 및 일본/유럽 글로벌 1등 혁신성장 주식",
         "preferred_accounts": ["연금저축", "IRP", "일반위탁"],
         "color": "blue",
     },
     "DIVIDEND_GROWTH": {
         "code": "DIVIDEND_GROWTH",
-        "name": "한·미 배당성장",
+        "name": "한미배당성장",
         "target_pct": 15.0,
         "currency_exposure": "USD / KRW",
         "role": "SCHD, 미국배당다우존스, K-배당 등 지속적 현금 인컴 창출 및 복리 재투자",
@@ -41,7 +42,7 @@ K_ALL_ROUND_MASTER_CONFIG: Dict[str, Dict[str, Any]] = {
     },
     "KR_EQUITY": {
         "code": "KR_EQUITY",
-        "name": "국내 주식 & 밸류업",
+        "name": "국내주식밸류",
         "target_pct": 10.0,
         "currency_exposure": "KRW (원화)",
         "role": "코스피200, 반도체/AI인프라, 저PBR 밸류업 등 저평가 사이클 알파 매매",
@@ -50,7 +51,7 @@ K_ALL_ROUND_MASTER_CONFIG: Dict[str, Dict[str, Any]] = {
     },
     "US_LONG_BOND": {
         "code": "US_LONG_BOND",
-        "name": "미국 장기채",
+        "name": "미국장기국채",
         "target_pct": 20.0,
         "currency_exposure": "USD (환노출)",
         "role": "미국 20~30년 국채, 경제 위기/금리인하 시 자본차익 및 환율 급등 버퍼",
@@ -59,7 +60,7 @@ K_ALL_ROUND_MASTER_CONFIG: Dict[str, Dict[str, Any]] = {
     },
     "KR_BOND_SHORT": {
         "code": "KR_BOND_SHORT",
-        "name": "국내 채권 & 단기자금",
+        "name": "국내단기채권",
         "target_pct": 10.0,
         "currency_exposure": "KRW (원화)",
         "role": "국고채, 단기채, KOFR, CD금리, IRP 안전자산 30% 충족 및 변동성 완충",
@@ -68,7 +69,7 @@ K_ALL_ROUND_MASTER_CONFIG: Dict[str, Dict[str, Any]] = {
     },
     "GOLD": {
         "code": "GOLD",
-        "name": "금 (Gold)",
+        "name": "골드실물자산",
         "target_pct": 10.0,
         "currency_exposure": "Gold / USD",
         "role": "KRX 금현물, 글로벌 금, 화폐 가치 하락 및 지정학적 리스크 절대 헤지",
@@ -77,7 +78,7 @@ K_ALL_ROUND_MASTER_CONFIG: Dict[str, Dict[str, Any]] = {
     },
     "COMMODITY_CASH": {
         "code": "COMMODITY_CASH",
-        "name": "원자재 & 달러/현금",
+        "name": "원자재와달러",
         "target_pct": 10.0,
         "currency_exposure": "USD / KRW",
         "role": "원자재(원유, 구리), 달러 예수금, 공급발 인플레 방어 및 저가매수 실탄",
@@ -104,9 +105,32 @@ ASSET_ORDER: List[str] = [
 # 리밸런싱 임계치 (±3.0%p)
 REBALANCING_DRIFT_THRESHOLD_PCT = 3.0
 
+# 7대 자산군 대표 프록시 ETF (단일 진실 공급원)
+ASSET_CLASS_PROXIES: Dict[str, Dict[str, Any]] = {
+    "US_CORE_INDEX": {"name": "글로벌성장주", "ticker": "SPY", "target_pct": 25.0, "unit": "$"},
+    "DIVIDEND_GROWTH": {"name": "한미배당성장", "ticker": "SCHD", "target_pct": 15.0, "unit": "$"},
+    "KR_EQUITY": {"name": "국내주식밸류", "ticker": "069500", "target_pct": 10.0, "unit": "원"},
+    "US_LONG_BOND": {"name": "미국장기국채", "ticker": "TLT", "target_pct": 20.0, "unit": "$"},
+    "KR_BOND_SHORT": {"name": "국내단기채권", "ticker": "153130", "target_pct": 10.0, "unit": "원"},
+    "GOLD": {"name": "골드실물자산", "ticker": "GLD", "target_pct": 10.0, "unit": "$"},
+    "COMMODITY_CASH": {"name": "원자재와달러", "ticker": "DBC", "target_pct": 10.0, "unit": "$"},
+}
+
 
 # ==============================================================================
-# 2. 환율 및 금리 동적 통계 밴드 룰 (3개월 롤링 퀀타일 기반 자율 적응)
+# 2. 연간 세액공제 법정한도 및 세제 혜택 설정 (연도 자동화)
+# ==============================================================================
+TAX_DEDUCTION_CONFIG: Dict[str, Any] = {
+    "PENSION_TARGET": 6_000_000.0,  # 연금저축 한도 (600만원)
+    "IRP_TARGET": 3_000_000.0,       # IRP 추가 한도 (300만원)
+    "TOTAL_TARGET": 9_000_000.0,     # 통합 세액공제 한도 (900만원)
+    "REFUND_RATE_MIN": 0.132,        # 기본 환급률 (13.2%)
+    "REFUND_RATE_MAX": 0.165,        # 소득 5500만원 이하 우대 환급률 (16.5%)
+}
+
+
+# ==============================================================================
+# 3. 환율 및 금리 동적 통계 밴드 룰 (3개월 롤링 퀀타일 기반 자율 적응)
 # ==============================================================================
 FX_MACRO_RULES = {
     "DYNAMIC_METHOD": "Rolling 60-Trading-Days Quantile Band (Q25 / Q50 / Q75)",
@@ -129,66 +153,8 @@ FX_MACRO_RULES = {
 
 
 # ==============================================================================
-# 3. 7대 자산군 지능형 분류(Aliases) 엔진
+# 4. 노션 DB 및 7대 자산군 지능형 분류 엔진 (Hierarchical Asset Classifier)
 # ==============================================================================
-# 1. 금 (GOLD)
-GOLD_KEYWORDS = [
-    "KRX금", "금현물", "골드", "GOLD", "IAU", "GLD", "SGOL", "BAR",
-    "금선물", "골드선물", "금은", "SILVER", "은선물", "ACE KRX금", "ACE KRX금현물"
-]
-
-# 2. 국내 채권 & 단기자금 (KR_BOND_SHORT)
-KR_BOND_SHORT_KEYWORDS = [
-    "단기채", "국고채3년", "국고채1년", "KOFR", "CD금리", "머니마켓", "MMF",
-    "단기자금", "단기채권", "종합채권", "국채선물3년", "KIS국고채3년",
-    "KODEX 단기채권", "TIGER 단기채권", "KBSTAR 단기채권", "ACE 단기채권",
-    "SOL 단기채권", "KODEX KOFR금리액티브", "TIGER KOFR금리액티브",
-    "KODEX CD금리액티브", "TIGER CD금리액티브", "153130"
-]
-
-# 3. 미국 장기채 (US_LONG_BOND)
-US_LONG_BOND_KEYWORDS = [
-    "미국채30년", "미국채20년", "미국채10년", "미국장기국채", "미국30년국채",
-    "미국채10년액티브", "TLT", "TMF", "SPTLL", "TLH", "EDV", "ZROZ",
-    "ACE 미국30년국채액티브", "TIGER 미국30년국채프리미엄", "KODEX 미국30년국채액티브",
-    "SOL 미국30년국채액티브", "KBSTAR 미국30년국채액티브", "미국채 30년",
-]
-
-# 4. 국내 주식 & 밸류업 (KR_EQUITY)
-KR_EQUITY_KEYWORDS = [
-    "KODEX 200", "TIGER 200", "KBSTAR 200", "코스피200", "KOSPI200", "코스닥150",
-    "KODEX 코스닥150", "TIGER 코스닥150", "밸류업", "K-밸류업", "기업밸류업",
-    "저PBR", "KODEX 은행", "TIGER 은행", "KBSTAR 금융채", "현대차", "삼성전자",
-    "SK하이닉스", "LG에너지솔루션", "삼성바이오로직스", "기아", "KB금융", "신한지주",
-    "삼성물산", "POSCO홀딩스", "NAVER", "카카오", "셀트리온", "코스피", "코스닥"
-]
-
-# 5. 한·미 배당성장 (DIVIDEND_GROWTH)
-DIVIDEND_GROWTH_KEYWORDS = [
-    "SCHD", "미국배당다우존스", "TIGER 미국배당다우존스", "ACE 미국배당다우존스",
-    "SOL 미국배당다우존스", "KODEX 미국배당다우존스", "KBSTAR 미국배당다우존스",
-    "DGRO", "VIG", "NOBL", "DVY", "배당성장", "미국배당", "K-배당", "고배당",
-    "ARIRANG 고배당주", "KBSTAR 고배당", "TIGER 미국배당+7%프리미엄다우존스"
-]
-
-# 6. 미국 대표지수 (US_CORE_INDEX)
-US_CORE_INDEX_KEYWORDS = [
-    "S&P500", "S&P 500", "SPY", "VOO", "IVV", "SPLG", "나스닥100", "NASDAQ100",
-    "QQQ", "QQQM", "TIGER 미국S&P500", "ACE 미국S&P500", "KODEX 미국S&P500TR",
-    "SOL 미국S&P500", "KBSTAR 미국S&P500", "TIGER 미국나스닥100", "ACE 미국나스닥100",
-    "KODEX 미국나스닥100TR", "SOL 미국나스닥100", "다우존스", "DIA", "VTI",
-    "미국S&P500", "미국나스닥", "미국주식"
-]
-
-# 7. 원자재 & 달러/현금 (COMMODITY_CASH)
-COMMODITY_CASH_KEYWORDS = [
-    "원자재", "구리", "원유", "WTI", "달러", "달러선물", "USD", "DBC", "GSG", "USO",
-    "BNO", "CPER", "TIGER 원유선물", "KODEX WTI원유선물", "KODEX 구리선물",
-    "TIGER 구리선물", "KODEX 미국달러선물", "달러예수금", "현금", "예수금"
-]
-
-# 국가 식별 키워드
-KR_EXPLICIT_KEYWORDS = ["한국", "국내", "KOREA", "KOSPI", "KOSDAQ", "KRX", "코스피", "코스닥"]
 
 
 def classify_asset(
@@ -197,88 +163,55 @@ def classify_asset(
     market: str = "",
     country: str = "",
     custom_portfolio: str = "",
-    custom_selection: str = ""
+    custom_selection: str = "",
+    custom_asset_class: str = "",
+    custom_product_type: str = ""
 ) -> Tuple[str, str]:
     """
-    종목명, 티커, 마켓, 국가, 노션 커스텀 속성을 다각도로 검사하여
-    K-올라운드 마스터 7대 자산군 코드(Code)와 표시 이름(Name)을 반환합니다.
+    노션 [투자주 DB]의 '자산군', '상품유형', '국가' 속성을 최우선으로 읽고,
+    [종목별 보유현황 DB] 메타 및 종목명 룰을 다계층으로 검사하여 7대 자산군 코드와 이름을 반환합니다.
     """
-    n_upper = name.upper()
-    t_upper = ticker.upper()
-    m_upper = market.upper()
-    c_upper = country.upper()
-    port_upper = custom_portfolio.upper()
-    sel_upper = custom_selection.upper()
+    n_str = (name or "").strip()
+    t_str = (ticker or "").strip().upper()
+    c_str = (country or "").strip().upper()
+    m_str = (market or "").strip().upper()
+    ac_str = (custom_asset_class or "").strip()
+    pt_str = (custom_product_type or "").strip()
+    port_str = (custom_portfolio or "").strip()
+    sel_str = (custom_selection or "").strip()
 
-    # 1. 노션 '포트폴리오' / '선택' 커스텀 속성 최우선 반영
-    if any(kw in port_upper or kw in sel_upper for kw in ["미국대표", "US_CORE", "CORE", "S&P", "나스닥"]):
+    # 1. [1순위 - SSOT] 노션 '투자주 DB'의 '자산군' 속성 최우선 직결 반영
+    if ac_str in ("글로벌성장주", "미국주식성장", "미국대표지수"):
         return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
-    if any(kw in port_upper or kw in sel_upper for kw in ["배당", "DIVIDEND", "SCHD"]):
+    if ac_str in ("한미배당성장", "한·미 배당성장"):
         return "DIVIDEND_GROWTH", K_ALL_ROUND_MASTER_CONFIG["DIVIDEND_GROWTH"]["name"]
-    if any(kw in port_upper or kw in sel_upper for kw in ["국내주식", "밸류업", "KR_EQUITY", "VALUE"]):
+    if ac_str in ("국내주식밸류", "국내 주식 & 밸류업", "국내주식테마"):
         return "KR_EQUITY", K_ALL_ROUND_MASTER_CONFIG["KR_EQUITY"]["name"]
-    if any(kw in port_upper or kw in sel_upper for kw in ["미국채", "장기채", "US_BOND", "LONG_BOND"]):
+    if ac_str in ("미국장기국채", "미국 장기채"):
         return "US_LONG_BOND", K_ALL_ROUND_MASTER_CONFIG["US_LONG_BOND"]["name"]
-    if any(kw in port_upper or kw in sel_upper for kw in ["단기채", "단기자금", "KR_BOND", "CASH_KRW"]):
+    if ac_str in ("국내단기채권", "국내 채권 & 단기자금"):
         return "KR_BOND_SHORT", K_ALL_ROUND_MASTER_CONFIG["KR_BOND_SHORT"]["name"]
-    if any(kw in port_upper or kw in sel_upper for kw in ["금", "GOLD", "금현물"]):
+    if ac_str in ("골드실물자산", "금 (Gold)", "골드실물"):
         return "GOLD", K_ALL_ROUND_MASTER_CONFIG["GOLD"]["name"]
-    if any(kw in port_upper or kw in sel_upper for kw in ["원자재", "COMMODITY", "달러", "USD"]):
+    if ac_str in ("원자재와달러", "원자재 & 달러/현금"):
         return "COMMODITY_CASH", K_ALL_ROUND_MASTER_CONFIG["COMMODITY_CASH"]["name"]
 
-    # 2. 금 (Gold)
-    if any(kw.upper() in n_upper or kw.upper() == t_upper for kw in GOLD_KEYWORDS):
-        return "GOLD", K_ALL_ROUND_MASTER_CONFIG["GOLD"]["name"]
+    # 2. [2순위 - SSOT] 노션에 자산군이 누락된 경우 공통 3D 분류 엔진(resolve_stock_taxonomy) 호출
+    tax = resolve_stock_taxonomy(ticker=t_str, name=n_str, market_hint=m_str, country_hint=c_str)
+    resolved_asset = tax.get("asset_class", "글로벌성장주")
 
-    # 3. 미국 장기채 (US Long Bond)
-    if any(kw.upper() in n_upper or kw.upper() == t_upper for kw in US_LONG_BOND_KEYWORDS):
-        return "US_LONG_BOND", K_ALL_ROUND_MASTER_CONFIG["US_LONG_BOND"]["name"]
+    mapping = {
+        "글로벌성장주": "US_CORE_INDEX",
+        "한미배당성장": "DIVIDEND_GROWTH",
+        "국내주식밸류": "KR_EQUITY",
+        "미국장기국채": "US_LONG_BOND",
+        "국내단기채권": "KR_BOND_SHORT",
+        "골드실물자산": "GOLD",
+        "원자재와달러": "COMMODITY_CASH",
+    }
 
-    # 4. 국내 채권 및 단기자금 (KR Bond / Cash)
-    if any(kw.upper() in n_upper or kw.upper() == t_upper for kw in KR_BOND_SHORT_KEYWORDS):
-        return "KR_BOND_SHORT", K_ALL_ROUND_MASTER_CONFIG["KR_BOND_SHORT"]["name"]
-
-    # 5. 한·미 배당성장 (Dividend Growth)
-    if any(kw.upper() in n_upper or kw.upper() == t_upper for kw in DIVIDEND_GROWTH_KEYWORDS):
-        return "DIVIDEND_GROWTH", K_ALL_ROUND_MASTER_CONFIG["DIVIDEND_GROWTH"]["name"]
-
-    # 6. 원자재 & 달러/현금 (Commodity & Cash)
-    if any(kw.upper() in n_upper or kw.upper() == t_upper for kw in COMMODITY_CASH_KEYWORDS):
-        return "COMMODITY_CASH", K_ALL_ROUND_MASTER_CONFIG["COMMODITY_CASH"]["name"]
-
-    # 7. 국가/마켓 기반 국내 주식 vs 미국 주식 분류
-    # 7-1. 국가 속성 기준
-    if c_upper in ("미국", "USA", "US"):
-        return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
-    if c_upper in ("한국", "KOR", "KR", "KOREA"):
-        if any(kw.upper() in n_upper for kw in US_CORE_INDEX_KEYWORDS):
-            return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
-        return "KR_EQUITY", K_ALL_ROUND_MASTER_CONFIG["KR_EQUITY"]["name"]
-
-    # 7-2. 티커 기준 (숫자 6자리 -> 한국 ETF/주식)
-    if ticker.isdigit() and len(ticker) == 6:
-        if any(kw.upper() in n_upper for kw in US_CORE_INDEX_KEYWORDS):
-            return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
-        if any(kw.upper() in n_upper for kw in KR_EQUITY_KEYWORDS):
-            return "KR_EQUITY", K_ALL_ROUND_MASTER_CONFIG["KR_EQUITY"]["name"]
-        return "KR_EQUITY", K_ALL_ROUND_MASTER_CONFIG["KR_EQUITY"]["name"]
-
-    # 7-3. 마켓 속성 기준
-    if m_upper in ("US", "NASDAQ", "NYSE", "AMEX"):
-        return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
-    if m_upper in ("KRX", "KOSPI", "KOSDAQ", "KONEX"):
-        if any(kw.upper() in n_upper for kw in US_CORE_INDEX_KEYWORDS):
-            return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
-        return "KR_EQUITY", K_ALL_ROUND_MASTER_CONFIG["KR_EQUITY"]["name"]
-
-    # 7-4. 키워드 기반 분류
-    if any(kw.upper() in n_upper for kw in US_CORE_INDEX_KEYWORDS):
-        return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
-    if any(kw.upper() in n_upper for kw in KR_EXPLICIT_KEYWORDS):
-        return "KR_EQUITY", K_ALL_ROUND_MASTER_CONFIG["KR_EQUITY"]["name"]
-
-    # 기본값: 미국 대표지수
-    return "US_CORE_INDEX", K_ALL_ROUND_MASTER_CONFIG["US_CORE_INDEX"]["name"]
+    code = mapping.get(resolved_asset, "US_CORE_INDEX")
+    return code, K_ALL_ROUND_MASTER_CONFIG[code]["name"]
 
 
 # 별칭 호환성 제공
@@ -333,13 +266,12 @@ ACCOUNT_POLICIES: Dict[str, Dict[str, Any]] = {
 
 
 # ==============================================================================
-# 4. Google Gemini 4단계 지능형 모델 풀 (Model Pool) 및 프롬프트 시스템
+# 5. Google Gemini 4단계 지능형 모델 풀 (Model Pool) 및 프롬프트 시스템
 # ==============================================================================
 GEMINI_MODEL_POOL: List[str] = [
     "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-2.5-pro",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
 ]
 
 GEMINI_MODEL_NAME = GEMINI_MODEL_POOL[0]
@@ -353,7 +285,7 @@ SYSTEM_PROMPT = """당신은 대한민국 최고의 공인재무설계사(CFP)�
 ### 🏛️ [6대 계좌별 고유 성격 및 조언 원칙 (절대 위반 금지)]
 1. **🅰️ 삼성연금 (연금저축 - 연 600만원 세액공제 목표)**:
    - 종목: `KODEX 미국S&P500` 단일 종목 주 10만원 적립 + 연말 일시금 완납.
-   - **조언 원칙**: **매도 리밸런싱 절대 금지**. 1년 600만원 세액공제 달성률 점검 및 주간 적립 지속성 확인.
+   - **조언 원칙**: **매도 리밸런싱 절대 금지**. 당해연도 세액공제 달성률 점검 및 주간 적립 지속성 확인.
 2. **🅰️ 미래연금 (미래에셋 - 규칙 적립식)**:
    - 종목: `TIGER 미국S&P500` (10만) + `KODEX 미국나스닥100` (10만) 주간 적립.
    - **조언 원칙**: **매도 리밸런싱 절대 금지**. 2대 지수 수량 축적 및 평단가 관리 상태 점검.
@@ -386,7 +318,7 @@ USER_PROMPT_TEMPLATE = """아래 제공된 [실시간 매크로 지표], [세액
 {macro_table_markdown}
 - **환율 3M 동적 밴드 진단**: {fx_rule_status} (현재 환율: {fx_rate:,.1f}원)
 
-## 📊 2. 전체 자산 및 세액공제(900만원) 실시간 진척도
+## 📊 2. 전체 자산 및 당해연도({current_year}년) 세액공제({total_tax_limit:,.0f}원) 실시간 진척도
 - **분석 기준 일시**: {analysis_date}
 - **총 평가 자산**: {total_eval_krw:,.0f} 원 (주식/ETF: {stock_total_krw:,.0f}원 + 현금 예수금: {cash_total_krw:,.0f}원)
 - **포트폴리오 위험도(VaR)**: 95% 1주일 최대 예상 변동성 약 **-{portfolio_var_krw:,.0f}원 (-{portfolio_var_pct:.2f}%)**
@@ -414,9 +346,9 @@ USER_PROMPT_TEMPLATE = """아래 제공된 [실시간 매크로 지표], [세액
 ### 2. 🏛️ 6대 계좌별 핀포인트 맞춤 진단 & 실행 가이드
 #### ① [삼성연금 & 미래연금] 코어 적립식 계좌
 - 주간 적립(삼성연금 10만, 미래연금 20만) 정상 실행 여부 및 평단가 관리 상태 점검 (매도 금지 확인)
-- 연 600만원 세액공제 달성률 및 연말 추가 납입 계획 점검 (명사형 종결)
+- {current_year}년 {pension_tax_limit:,.0f}원 세액공제 달성률 및 연말 추가 납입 계획 점검 (명사형 종결)
 
-#### ② [삼성IRP] 세액공제(연 300만) & 7:3 패키지 매수 가이드
+#### ② [삼성IRP] 세액공제(연 {irp_tax_limit:,.0f}만) & 7:3 패키지 매수 가이드
 - 법정 안전자산 30% 충족 여부 및 위험 70%(테크TOP10) + 안전 30%(배당국채혼합/30년국채) 2종목 패키지 추천 (명사형 종결)
 
 #### ③ [연금이전 (삼성이전)] 100% ETF 월배당 인컴 & 분배금 재투자 가이드
@@ -437,5 +369,5 @@ USER_PROMPT_TEMPLATE = """아래 제공된 [실시간 매크로 지표], [세액
 ### 4. ✅ 차주 핵심 실행 체크리스트 (3대 액션)
 1. **코어 적립식 주간 자동 매수 확인**: (삼성연금/미래연금 매수 집행 점검: 명사형 종결)
 2. **삼성ISA / 연금이전 퀀트 신호 대응**: (스마트가이드 기반 전술적 매수 추천 종목 확인: 명사형 종결)
-3. **세액공제 납입 스케줄 점검**: (연간 900만원 목표 달성을 위한 잔여액 관리: 명사형 종결)
+3. **당해연도({current_year}년) 세액공제 납입 스케줄 점검**: ({current_year}년 {total_tax_limit:,.0f}원 한도 달성을 위한 잔여 납입액 관리: 명사형 종결)
 """

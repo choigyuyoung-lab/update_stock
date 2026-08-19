@@ -45,6 +45,8 @@ from notion_utils import (
     get_http_session,
     is_kr_ticker,
     safe_float,
+    calculate_quant_indicators,
+    batch_update_pages,
 )
 
 
@@ -121,60 +123,21 @@ def get_finance_data(
     time.sleep(0.1)
 
     # 2단계: 1년치 일봉 데이터(FDR)로 직전고저점 및 5대 퀀트 지표(200일선, 추세, 12M모멘텀, 52주낙폭, 60일변동성) 계산
-    swing_high = None
-    swing_low = None
-    vol_60d = None
-    drawdown_52w = None
-    ma200 = None
-    ma60 = None
-    trend = None
-    mom_12m = None
-    mom_diag = None
-    risk_grade = None
-    smart_guide = None
+    curr_p = safe_float(output.get("stck_prpr"))
+    w52_h = safe_float(output.get("w52_hgpr"))
+    df_chart = None
 
     try:
         fdr_start = (datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=400)).strftime("%Y-%m-%d")
         df_chart = fdr.DataReader(clean_ticker, fdr_start)
-        if df_chart is not None and not df_chart.empty:
-            c = df_chart["Close"].dropna() if "Close" in df_chart.columns else df_chart.iloc[:, 0].dropna()
-            if not c.empty:
-                curr_p_chart = float(c.iloc[-1])
-                ma60 = float(c.rolling(60).mean().iloc[-1]) if len(c) >= 60 else float(c.mean())
-                ma200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
-                
-                # 🇰🇷 한국 특화 추세 판정 (60일 수급선 + 200일 대세선)
-                if curr_p_chart >= ma60 and curr_p_chart >= ma200:
-                    trend = "▲ 수급유입"
-                elif curr_p_chart >= ma200:
-                    trend = "━ 박스권세"
-                else:
-                    trend = "▼ 하락추세"
-
-                mom_12m = ((curr_p_chart - float(c.iloc[0])) / float(c.iloc[0])) if len(c) > 0 else 0.0
-                
-                # 모멘텀 직관적 진단 (5단계 정밀 분류 - 직관적 용어 적용)
-                if mom_12m >= 0.50:
-                    mom_diag = "▲ 주도대장"
-                elif mom_12m >= 0.20:
-                    mom_diag = "▲ 실적지속"
-                elif mom_12m >= 0.05:
-                    mom_diag = "▲ 시장동행"
-                elif mom_12m >= -0.10:
-                    mom_diag = "━ 방향탐색"
-                else:
-                    mom_diag = "▼ 자금이탈"
-
-                returns_60 = c.pct_change().tail(60).dropna()
-                if len(returns_60) >= 5:
-                    vol_60d = float(returns_60.std() * np.sqrt(252))
-
-                if "High" in df_chart.columns and "Low" in df_chart.columns:
-                    recent_20 = df_chart.tail(20)
-                    swing_high = float(recent_20["High"].max())
-                    swing_low = float(recent_20["Low"].min())
     except Exception:
-        # FDR 예외 시 KIS 일봉 API로 스윙고저점 및 60일 변동성 폴백
+        pass
+
+    # 공통 5대 퀀트 엔진 호출
+    quant = calculate_quant_indicators(df_chart, current_price=curr_p, is_kr=True, high_52w_override=w52_h)
+
+    # FDR 실패 시 KIS 일봉 API로 폴백
+    if quant["swing_high"] is None:
         try:
             end_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
             start_date = (datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=120)).strftime("%Y%m%d")
@@ -191,63 +154,20 @@ def get_finance_data(
                 },
                 timeout=10,
             )
-            response.raise_for_status()
-            output3 = response.json().get("output2", [])
-            if isinstance(output3, list) and output3:
-                candles = list(reversed(output3))
-                formatted_candles = []
-                for day in candles:
-                    try:
-                        formatted_candles.append({
-                            "high": int(day["stck_hgpr"]),
-                            "low": int(day["stck_lwpr"]),
-                            "close": int(day["stck_clpr"])
-                        })
-                    except (KeyError, ValueError, TypeError):
-                        continue
-                recent_candles = formatted_candles[-20:]
-                if recent_candles:
-                    swing_high = max(day["high"] for day in recent_candles)
-                    swing_low = min(day["low"] for day in recent_candles)
-                closes = [c["close"] for c in formatted_candles]
-                if len(closes) >= 10:
-                    returns = pd.Series(closes[-60:]).pct_change().dropna()
-                    vol_60d = float(returns.std() * np.sqrt(252))
+            if response.status_code == 200:
+                output3 = response.json().get("output2", [])
+                if isinstance(output3, list) and output3:
+                    candles = list(reversed(output3))
+                    recent_candles = candles[-20:]
+                    if recent_candles:
+                        quant["swing_high"] = max(safe_float(day.get("stck_hgpr")) or 0 for day in recent_candles)
+                        quant["swing_low"] = min(safe_float(day.get("stck_lwpr")) or 999999999 for day in recent_candles)
+                    closes = [safe_float(c.get("stck_clpr")) or 0 for c in candles if c.get("stck_clpr")]
+                    if len(closes) >= 10:
+                        returns = pd.Series(closes[-60:]).pct_change().dropna()
+                        quant["vol_60d"] = float(returns.std() * np.sqrt(252))
         except Exception:
             pass
-
-    # 변동성 체감 위험도 등급 (투자 비중 행동 용어로 직관화)
-    if vol_60d is not None:
-        if vol_60d < 0.20:
-            risk_grade = "▲ 비중확대"
-        elif vol_60d < 0.35:
-            risk_grade = "━ 정상비중"
-        elif vol_60d < 0.60:
-            risk_grade = "▼ 비중조절"
-        else:
-            risk_grade = "▼ 소액접근"
-
-    curr_p = safe_float(output.get("stck_prpr"))
-    w52_h = safe_float(output.get("w52_hgpr"))
-    if curr_p is not None and w52_h is not None and w52_h > 0:
-        drawdown_52w = (curr_p - w52_h) / w52_h  # 노션 백분율 형식 (-0.15 = -15%)
-
-    # 스마트 가이드 (표준 태그 6종)
-    if curr_p is not None and ma200 is not None:
-        if curr_p >= ma200:
-            if drawdown_52w is not None and drawdown_52w <= -0.20:
-                smart_guide = "▲ 분할매수"
-            elif ma60 is not None and curr_p >= ma60 and mom_12m is not None and mom_12m >= 0.50:
-                smart_guide = "▲ 추세탑승"
-            elif ma60 is not None and curr_p < ma60:
-                smart_guide = "━ 눌림지지"
-            else:
-                smart_guide = "▲ 상승유지"
-        else:
-            if drawdown_52w is not None and drawdown_52w <= -0.35:
-                smart_guide = "▼ 바닥확인"
-            else:
-                smart_guide = "▼ 하락관망"
 
     return {
         "현재가": curr_p,
@@ -259,19 +179,19 @@ def get_finance_data(
         "52주 최고가": w52_h,
         "52주 최저가": safe_float(output.get("w52_lwpr")),
         "업종PER": safe_float(output.get("bts_per")),
-        "직전고점": safe_float(swing_high),
-        "직전저점": safe_float(swing_low),
-        "200일선": safe_float(round(ma200, 2)) if ma200 else None,
-        "60일선": safe_float(round(ma60, 2)) if ma60 else None,
-        "수급선": safe_float(round(ma60, 2)) if ma60 else None,
-        "추세": trend,
-        "스마트 가이드": smart_guide,
-        "모멘텀 진단": mom_diag,
-        "위험도 등급": risk_grade,
-        "12M 모멘텀": safe_float(round(mom_12m, 4)) if mom_12m is not None else None,
-        "52주 낙폭": safe_float(drawdown_52w),
-        "낙폭율": safe_float(drawdown_52w),
-        "60일 변동성": safe_float(vol_60d),
+        "직전고점": safe_float(quant["swing_high"]),
+        "직전저점": safe_float(quant["swing_low"]),
+        "200일선": safe_float(quant["ma200"]),
+        "60일선": safe_float(quant["ma_supply"]),
+        "수급선": safe_float(quant["ma_supply"]),
+        "추세": quant["trend"],
+        "스마트 가이드": quant["smart_guide"],
+        "모멘텀 진단": quant["mom_diag"],
+        "위험도 등급": quant["risk_grade"],
+        "12M 모멘텀": safe_float(quant["mom_12m"]),
+        "52주 낙폭": safe_float(quant["drawdown_52w"]),
+        "낙폭율": safe_float(quant["drawdown_52w"]),
+        "60일 변동성": safe_float(quant["vol_60d"]),
     }
 
 

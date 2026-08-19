@@ -16,7 +16,8 @@ import math
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Set, cast
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -702,6 +703,41 @@ def get_prop_value(props: Dict[str, Any], names: List[str]) -> Any:
         # 6. Relation
         elif ptype == "relation":
             return [r.get("id") for r in prop.get("relation", []) if isinstance(r, dict) and r.get("id")]
+
+        # 7. Rollup (상장주식DB 전체 등 상위 DB 롤업 속성 완벽 지원)
+        elif ptype == "rollup":
+            rollup_obj = prop.get("rollup", {})
+            r_type = rollup_obj.get("type")
+            if r_type == "number":
+                return rollup_obj.get("number")
+            elif r_type == "date":
+                d_val = rollup_obj.get("date")
+                return d_val.get("start") if isinstance(d_val, dict) else d_val
+            elif r_type == "array":
+                arr = rollup_obj.get("array", [])
+                extracted = []
+                for item in arr:
+                    if not isinstance(item, dict):
+                        continue
+                    itype = item.get("type")
+                    if itype in ("title", "rich_text"):
+                        txt = "".join([t.get("plain_text", "") for t in item.get(itype, []) if isinstance(t, dict)]).strip()
+                        if txt:
+                            extracted.append(txt)
+                    elif itype == "select":
+                        s_name = item.get("select", {}).get("name")
+                        if s_name:
+                            extracted.append(s_name)
+                    elif itype == "multi_select":
+                        extracted.extend([m.get("name") for m in item.get("multi_select", []) if isinstance(m, dict) and m.get("name")])
+                    elif itype == "number":
+                        num_val = item.get("number")
+                        if num_val is not None:
+                            extracted.append(num_val)
+                extracted = [x for x in extracted if x is not None and str(x).strip() != ""]
+                if len(extracted) == 1:
+                    return extracted[0]
+                return extracted if extracted else None
             
     return None
 
@@ -1140,5 +1176,384 @@ def safe_create_page(
                 print("   ⚠️ 나머지 블록 추가 중 일부 오류가 발생했습니다.")
 
     return page
+
+
+# ==============================================================================
+# 9. 공통 비즈니스 로직 및 퀀트/마스터 도메인 유틸리티 (SSOT Hub)
+# ==============================================================================
+
+# 일본 및 유럽 주요 식별 사전
+JAPAN_TICKERS = {"2454", "6525", "6758", "6954", "6871", "6656", "6981", "3436", "5803", "8035", "6920", "4062", "6857", "285A"}
+JAPAN_KEYWORDS = ["KOKUSAI", "SONY", "FANUC", "MICRONICS", "MURATA", "SUMCO", "FUJIKURA", "TOKYO ELECTRON", "LASERTEC", "IBIDEN", "ADVANTEST", "KIOXIA", "INSPEC", "ALL ABOUT"]
+EUROPE_TICKERS = {"MBGYY", "SBGSY", "SIEGY", "ABBNY", "MBGN", "MBG"}
+EUROPE_KEYWORDS = ["MERCEDES", "SCHNEIDER", "SIEMENS", "ABB"]
+
+
+def resolve_stock_taxonomy(
+    ticker: str,
+    name: str = "",
+    market_hint: str = "",
+    is_etf: Optional[bool] = None,
+    country_hint: str = ""
+) -> Dict[str, str]:
+    """
+    티커, 종목명, 마켓/국가 힌트를 종합 분석하여 4대 표준 분류 메타데이터를 원스톱으로 산출합니다.
+    Returns:
+        {
+            "market": "KOSPI" | "KOSDAQ" | "ETF(KR)" | "NASDAQ" | "NYSE" | "AMEX" | "ETF(US)" | "TSE" | "GLOBAL" | "COMEX",
+            "country": "한국" | "미국" | "일본" | "유럽" | "글로벌",
+            "product_type": "지수추종패시" | "개별기업주식" | "섹터테마알파" | "배당인컴상품" | "채권금리상품" | "실물현금자산",
+            "asset_class": "글로벌성장주" | "한미배당성장" | "국내주식밸류" | "미국장기국채" | "국내단기채권" | "골드실물자산" | "원자재와달러"
+        }
+    """
+    t = (ticker or "").strip().upper()
+    n = (name or "").strip()
+    m_hint = (market_hint or "").strip().upper()
+    c_hint = (country_hint or "").strip()
+
+    # 1. 일본 주식 (.T 접미사 및 주요 일본 종목코드/키워드)
+    if t.endswith(".T") or t in JAPAN_TICKERS or any(k in n.upper() for k in JAPAN_KEYWORDS) or c_hint == "일본":
+        return {
+            "market": "TSE",
+            "country": "일본",
+            "product_type": "개별기업주식",
+            "asset_class": "글로벌성장주"
+        }
+
+    # 2. 유럽 주식 및 ADR
+    if t in EUROPE_TICKERS or any(k in n.upper() for k in EUROPE_KEYWORDS) or c_hint == "유럽":
+        return {
+            "market": "GLOBAL",
+            "country": "유럽",
+            "product_type": "개별기업주식",
+            "asset_class": "글로벌성장주"
+        }
+
+    # 3. 선물 / 원자재
+    if m_hint == "COMEX" or t in ("GC", "CL", "NG", "HG", "SI"):
+        is_gold = t in ("GC", "SI") or any(k in n for k in ["금", "골드", "Gold"])
+        return {
+            "market": "COMEX",
+            "country": "글로벌",
+            "product_type": "실물현금자산",
+            "asset_class": "골드실물자산" if is_gold else "원자재와달러"
+        }
+
+    # 4. 한국 상장 종목 (KRX)
+    is_kr = is_kr_ticker(t) or m_hint in ("KOSPI", "KOSDAQ", "ETF(KR)", "KRX")
+    if is_kr:
+        # ETF 여부 판별
+        kr_etf_prefixes = ["KODEX", "TIGER", "ACE", "SOL", "PLUS", "KBSTAR", "TIMEFOLIO", "KOACT", "1Q", "ARIRANG", "HANARO", "RISE", "WOORI"]
+        detected_etf = is_etf if is_etf is not None else (m_hint == "ETF(KR)" or any(n.upper().startswith(p) for p in kr_etf_prefixes) or "ETF" in n.upper())
+
+        if not detected_etf:
+            m_label = "KOSDAQ" if "KOSDAQ" in m_hint or "KSQ" in m_hint else "KOSPI"
+            return {
+                "market": m_label,
+                "country": "한국",
+                "product_type": "개별기업주식",
+                "asset_class": "국내주식밸류"
+            }
+
+        # 4-1. 한국 ETF: 실물/금/원자재
+        if any(k in n for k in ["KRX금", "금현물", "골드선물", "금선물"]):
+            return {"market": "ETF(KR)", "country": "한국", "product_type": "실물현금자산", "asset_class": "골드실물자산"}
+        if any(k in n for k in ["원자재", "구리", "원유", "WTI", "달러", "USD"]):
+            return {"market": "ETF(KR)", "country": "글로벌", "product_type": "실물현금자산", "asset_class": "원자재와달러"}
+
+        # 4-2. 한국 ETF: 채권/금리
+        if any(k in n for k in ["CD금리", "KOFR", "단기채", "153130", "단기자금", "머니마켓"]):
+            return {"market": "ETF(KR)", "country": "한국", "product_type": "채권금리상품", "asset_class": "국내단기채권"}
+        if any(k in n for k in ["미국채", "30년국채", "장기국채", "TLT", "미국30년", "국채10년"]):
+            return {"market": "ETF(KR)", "country": "미국", "product_type": "채권금리상품", "asset_class": "미국장기국채"}
+        if any(k in n for k in ["국고채", "채권"]):
+            return {"market": "ETF(KR)", "country": "한국", "product_type": "채권금리상품", "asset_class": "국내단기채권"}
+
+        # 4-3. 한국 ETF: 배당 인컴
+        if any(k in n for k in ["미국배당다우존스", "SCHD", "배당다우존스", "고배당"]):
+            c = "미국" if any(k in n for k in ["미국", "글로벌"]) else "한국"
+            return {"market": "ETF(KR)", "country": c, "product_type": "배당인컴상품", "asset_class": "한미배당성장"}
+
+        # 4-4. 한국 ETF: 지수추종 패시브
+        if any(k in n for k in ["S&P500", "S&P 500", "나스닥100", "NASDAQ100"]):
+            return {"market": "ETF(KR)", "country": "미국", "product_type": "지수추종패시", "asset_class": "글로벌성장주"}
+        if any(k in n for k in ["KODEX 200", "TIGER 200", "KBSTAR 200", "코스피200", "코스닥150", "KODEX 코스닥150"]):
+            return {"market": "ETF(KR)", "country": "한국", "product_type": "지수추종패시", "asset_class": "국내주식밸류"}
+
+        # 4-5. 한국 ETF: 해외 테마 / 빅테크 밸류체인
+        if any(k in n for k in ["미국", "글로벌", "빅테크", "우주항공", "AI광통신", "HBM", "엔비디아", "구글", "마이크로소프트", "밸류체인"]):
+            c = "미국" if not any(k in n for k in ["글로벌", "우주"]) else "글로벌"
+            return {"market": "ETF(KR)", "country": c, "product_type": "섹터테마알파", "asset_class": "글로벌성장주"}
+
+        # 4-6. 한국 ETF: 국내 테마
+        return {"market": "ETF(KR)", "country": "한국", "product_type": "섹터테마알파", "asset_class": "국내주식밸류"}
+
+    # 5. 미국 상장 ETF (ETF(US))
+    if m_hint == "ETF(US)" or (is_etf is True and not is_kr):
+        if any(k in t for k in ["GLD", "IAU", "SGOL", "BAR"]):
+            return {"market": "ETF(US)", "country": "미국", "product_type": "실물현금자산", "asset_class": "골드실물자산"}
+        if any(k in t for k in ["DBC", "GSG", "USO", "BNO", "CPER"]):
+            return {"market": "ETF(US)", "country": "미국", "product_type": "실물현금자산", "asset_class": "원자재와달러"}
+        if any(k in t for k in ["TLT", "TMF", "SPTLL", "TLH", "EDV", "ZROZ"]):
+            return {"market": "ETF(US)", "country": "미국", "product_type": "채권금리상품", "asset_class": "미국장기국채"}
+        if any(k in t for k in ["SCHD", "DGRO", "VIG", "NOBL", "DVY"]):
+            return {"market": "ETF(US)", "country": "미국", "product_type": "배당인컴상품", "asset_class": "한미배당성장"}
+        if any(k in t for k in ["SPY", "VOO", "IVV", "SPLG", "QQQ", "QQQM", "DIA", "VTI"]):
+            return {"market": "ETF(US)", "country": "미국", "product_type": "지수추종패시", "asset_class": "글로벌성장주"}
+        return {"market": "ETF(US)", "country": "미국", "product_type": "섹터테마알파", "asset_class": "글로벌성장주"}
+
+    # 6. 미국 정규 상장 개별주 (NASDAQ, NYSE, AMEX)
+    m_us = m_hint if m_hint in ("NASDAQ", "NYSE", "AMEX") else "NASDAQ"
+    return {
+        "market": m_us,
+        "country": "미국",
+        "product_type": "개별기업주식",
+        "asset_class": "글로벌성장주"
+    }
+
+
+def load_benchmark_config(client: Any, benchmark_db_id: str, logger: Optional[Any] = None) -> Dict[str, Any]:
+    """지표지수 DB를 스캔하여 티커별 Notion ID 매핑 및 키워드 목록을 동적으로 구성하여 반환합니다."""
+    if logger:
+        logger.info("🔍 지표지수 DB 동적 분석 및 매칭키워드 로드 시작...")
+    config: Dict[str, Any] = {"ticker_to_id": {}, "benchmarks": []}
+    try:
+        for page in paginate_database(client, benchmark_db_id, page_size=100, retry_delay=0.2):
+            props = page.get("properties", {})
+            ticker = get_page_text(props, ["티커", "Ticker", "이름", "Name"]).upper()
+            if not ticker:
+                continue
+            summary = get_page_text(props, ["요약명"]).strip()
+            cat = props.get("구분", {}).get("select", {}).get("name", "") if props.get("구분", {}).get("select") else ""
+            country = props.get("국가", {}).get("select", {}).get("name", "") if props.get("국가", {}).get("select") else ""
+            kw_raw = get_page_text(props, ["매칭키워드", "키워드"])
+            keywords = parse_keywords(kw_raw, fallback_summary=summary)
+
+            config["ticker_to_id"][ticker] = page["id"]
+            config["benchmarks"].append({
+                "ticker": ticker,
+                "summary": summary,
+                "category": cat,
+                "country": country,
+                "keywords": keywords,
+                "id": page["id"]
+            })
+
+        if logger:
+            logger.info(f"✅ 지표 로드 완료 (총 {len(config['benchmarks'])}개 지표 및 키워드 활성화)")
+    except Exception as e:
+        if logger:
+            logger.error(f"❌ 지표 DB 로드 실패: {e}")
+    return config
+
+
+def batch_update_pages(
+    client: Any,
+    update_payloads: List[Tuple[str, Dict[str, Any], str, str]],
+    max_workers: int = 3,
+    delay: float = 0.05,
+    logger: Optional[Any] = None
+) -> Tuple[int, int]:
+    """
+    [(page_id, properties, ticker, name), ...] 형태의 페이로드를 받아 멀티스레드로 노션 DB에 안전하게 일괄 전송합니다.
+    Returns:
+        (success_count, fail_count)
+    """
+    total_cnt = len(update_payloads)
+    if total_cnt == 0:
+        return 0, 0
+
+    if logger:
+        logger.info(f"📝 총 {total_cnt}개 종목 노션 DB 반영 시작 (병렬 워커: {max_workers})...")
+
+    success_cnt = 0
+    fail_cnt = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(safe_page_update, client, pid, props): (ticker, name)
+            for pid, props, ticker, name in update_payloads
+        }
+
+        for idx, future in enumerate(as_completed(futures), 1):
+            ticker, name = futures[future]
+            try:
+                ok = future.result()
+                if ok:
+                    success_cnt += 1
+                    if logger and (idx % 25 == 0 or idx == total_cnt):
+                        logger.info(f"   ✅ [{idx}/{total_cnt}] [Batch Sync] {ticker} ({name}) 성공")
+                else:
+                    fail_cnt += 1
+                    if logger:
+                        logger.warning(f"   ❌ [{idx}/{total_cnt}] [Batch Sync] {ticker} ({name}) 실패")
+            except Exception as exc:
+                fail_cnt += 1
+                if logger:
+                    logger.error(f"   ❌ [{ticker}] 트랜잭션 에러: {exc}")
+
+            if delay > 0:
+                time.sleep(delay)
+
+    if logger:
+        logger.info(f"✨ 노션 배치 업데이트 완료: 성공 {success_cnt}건 / 실패 {fail_cnt}건 (총 {total_cnt}건)")
+
+    return success_cnt, fail_cnt
+
+
+def calc_margin_of_safety(current_price: float, target_price: float) -> str:
+    """목표주가 대비 현재가 괴리율 기반 안전마진 라벨을 산출합니다."""
+    if not target_price or target_price <= 0 or not current_price or current_price <= 0:
+        return ""
+    upside = current_price / target_price
+    pct_txt = f"{upside * 100:.1f}%"
+    if upside <= 0.6:
+        return f"🚀 {pct_txt}"
+    elif upside <= 0.8:
+        return f"✅ {pct_txt}"
+    elif upside < 1.0:
+        return f"⚠️ {pct_txt}"
+    else:
+        return f"🚨 {pct_txt}"
+
+
+def calc_52w_position(current_price: float, high_52w: float, low_52w: float) -> Optional[float]:
+    """52주 최고가/최저가 대비 현재가 위치(0.0~1.0)를 산출합니다."""
+    if not current_price or current_price <= 0:
+        return None
+    if not high_52w or not low_52w or high_52w <= low_52w:
+        return None
+    pos = (current_price - low_52w) / (high_52w - low_52w)
+    return round(pos, 4)
+
+
+def calculate_quant_indicators(
+    df_chart: Any,
+    current_price: Optional[float] = None,
+    is_kr: bool = False,
+    high_52w_override: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    GEMINI.md 5대 퀀트 엔진 수식에 따라 200일선, 수급선, 추세, 12M 모멘텀,
+    모멘텀 진단, 52주 낙폭, 60일 변동성, 위험도 등급, 스마트 가이드, 스윙 고저점을 산출합니다.
+    """
+    res: Dict[str, Any] = {
+        "ma200": None,
+        "ma_supply": None,
+        "trend": None,
+        "mom_12m": None,
+        "mom_diag": None,
+        "drawdown_52w": None,
+        "vol_60d": None,
+        "risk_grade": None,
+        "smart_guide": None,
+        "swing_high": None,
+        "swing_low": None,
+    }
+
+    if df_chart is None or getattr(df_chart, "empty", True):
+        return res
+
+    try:
+        # 종가 시리즈 추출
+        c = df_chart["Close"].dropna() if "Close" in df_chart.columns else df_chart.iloc[:, 0].dropna()
+        if c.empty:
+            return res
+
+        curr_p = float(current_price) if current_price and current_price > 0 else float(c.iloc[-1])
+        supply_window = 60 if is_kr else 50
+        ma_sup = float(c.rolling(supply_window).mean().iloc[-1]) if len(c) >= supply_window else float(c.mean())
+        ma_200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+
+        res["ma200"] = round(ma_200, 2 if not is_kr else 0)
+        res["ma_supply"] = round(ma_sup, 2 if not is_kr else 0)
+
+        # 1. 추세 판정 (수급선 + 200일선)
+        if is_kr:
+            if curr_p >= ma_sup and curr_p >= ma_200:
+                res["trend"] = "▲ 수급유입"
+            elif curr_p >= ma_200:
+                res["trend"] = "━ 박스권세"
+            else:
+                res["trend"] = "▼ 하락추세"
+        else:
+            if curr_p >= ma_sup and curr_p >= ma_200:
+                res["trend"] = "▲ 기관주도"
+            elif curr_p >= ma_200:
+                res["trend"] = "━ 눌림조정"
+            else:
+                res["trend"] = "▼ 하락추세"
+
+        # 2. 12M 모멘텀 및 5단계 진단
+        start_p = float(c.iloc[0])
+        mom_12m = ((curr_p - start_p) / start_p) if start_p > 0 else 0.0
+        res["mom_12m"] = round(mom_12m, 4)
+
+        if mom_12m >= 0.50:
+            res["mom_diag"] = "▲ 주도대장"
+        elif mom_12m >= 0.20:
+            res["mom_diag"] = "▲ 실적지속"
+        elif mom_12m >= 0.05:
+            res["mom_diag"] = "▲ 시장동행"
+        elif mom_12m >= -0.10:
+            res["mom_diag"] = "━ 방향탐색"
+        else:
+            res["mom_diag"] = "▼ 자금이탈"
+
+        # 3. 52주 최고가 대비 낙폭 (drawdown_52w)
+        peak_52w = float(high_52w_override) if high_52w_override and high_52w_override > 0 else (
+            float(df_chart["High"].tail(252).max()) if "High" in df_chart.columns else float(c.tail(252).max())
+        )
+        drawdown_52w = None
+        if peak_52w > 0:
+            drawdown_52w = (curr_p - peak_52w) / peak_52w
+            res["drawdown_52w"] = round(drawdown_52w, 4)
+
+        # 4. 60일 연환산 변동성 및 위험도 등급
+        returns_60 = c.pct_change().tail(60).dropna()
+        if len(returns_60) >= 5:
+            vol_60d = float(returns_60.std() * math.sqrt(252))
+            res["vol_60d"] = round(vol_60d, 4)
+
+            if vol_60d < 0.20:
+                res["risk_grade"] = "▲ 비중확대"
+            elif vol_60d < 0.35:
+                res["risk_grade"] = "━ 정상비중"
+            elif vol_60d < 0.60:
+                res["risk_grade"] = "▼ 비중조절"
+            else:
+                res["risk_grade"] = "▼ 소액접근"
+
+        # 5. 스마트 가이드 (표준 6종)
+        if curr_p >= ma_200:
+            if drawdown_52w is not None and drawdown_52w <= -0.20:
+                res["smart_guide"] = "▲ 분할매수"
+            elif curr_p >= ma_sup and mom_12m >= 0.50:
+                res["smart_guide"] = "▲ 추세탑승"
+            elif curr_p < ma_sup:
+                res["smart_guide"] = "━ 눌림지지"
+            else:
+                res["smart_guide"] = "▲ 상승유지"
+        else:
+            if drawdown_52w is not None and drawdown_52w <= -0.35:
+                res["smart_guide"] = "▼ 바닥확인"
+            else:
+                res["smart_guide"] = "▼ 하락관망"
+
+        # 6. 최근 20영업일 스윙 고점/저점
+        if "High" in df_chart.columns and "Low" in df_chart.columns:
+            recent_20 = df_chart.tail(20)
+            res["swing_high"] = round(float(recent_20["High"].max()), 2 if not is_kr else 0)
+            res["swing_low"] = round(float(recent_20["Low"].min()), 2 if not is_kr else 0)
+        else:
+            recent_20_c = c.tail(20)
+            res["swing_high"] = round(float(recent_20_c.max()), 2 if not is_kr else 0)
+            res["swing_low"] = round(float(recent_20_c.min()), 2 if not is_kr else 0)
+
+    except Exception:
+        pass
+
+    return res
+
 
 

@@ -47,6 +47,8 @@ from notion_utils import (
     markdown_to_notion_blocks,
     safe_create_page,
     safe_float,
+    calc_margin_of_safety,
+    calc_52w_position,
 )
 from config_portfolio import (
     K_ALL_ROUND_MASTER_CONFIG,
@@ -54,6 +56,7 @@ from config_portfolio import (
     ASSET_ORDER,
     REBALANCING_DRIFT_THRESHOLD_PCT,
     ACCOUNT_POLICIES,
+    TAX_DEDUCTION_CONFIG,
     FX_MACRO_RULES,
     classify_asset,
 )
@@ -369,17 +372,20 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
     # 1. 계좌 현황 수집 및 계좌 ID 매퍼 생성
     account_status, account_id_to_name = collect_account_status(client, ACCOUNT_STATUS_DB_ID)
     
-    # 2. 입출금 현황 DB에서 당해연도(2026년) 계좌별 입금액 집계
+    # 2. 멀티스레드 병렬 수집 (입출금현황, 종목별메타, 계좌별상세)
     current_year = get_kst_str("%Y")
-    yearly_deposits = collect_cash_flow_deposits(client, CASH_FLOW_DB_ID, account_id_to_name, current_year)
+    import concurrent.futures
 
-    # 3. 종목별 보유현황 메타 수집
-    stock_meta = collect_stock_holdings_meta(client, STOCK_HOLDINGS_DB_ID)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        f_dep = executor.submit(collect_cash_flow_deposits, client, CASH_FLOW_DB_ID, account_id_to_name, current_year)
+        f_meta = executor.submit(collect_stock_holdings_meta, client, STOCK_HOLDINGS_DB_ID)
+        f_acct = executor.submit(collect_account_holdings_detail, client, ACCOUNT_HOLDINGS_DB_ID, account_id_to_name)
+        
+        yearly_deposits = f_dep.result()
+        stock_meta = f_meta.result()
+        account_holdings = f_acct.result()
 
-    # 4. 계좌별 보유종목 상세 수집 (정확한 계좌 Relation 매핑)
-    account_holdings = collect_account_holdings_detail(client, ACCOUNT_HOLDINGS_DB_ID, account_id_to_name)
-
-    # 4. 투자주 DB(마스터) 전수 스캔 (숨김 퀀트 지표 포함)
+    # 3. 투자주 DB(마스터) 전수 스캔 (숨김 퀀트 지표 포함)
     print("📋 [Notion] 4. 투자주 DB(마스터) 스캔 시작...")
     raw_holdings: List[Dict[str, Any]] = []
     
@@ -398,22 +404,13 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
         high_52w = safe_float(get_prop_value(props, ["52주 최고가"])) or 0.0
         low_52w = safe_float(get_prop_value(props, ["52주 최저가"])) or 0.0
         pos_52w = get_prop_value(props, ["52주 위치", "52주위치"])
-        if pos_52w is None and high_52w > low_52w and current_price > 0:
-            pos_52w = (current_price - low_52w) / (high_52w - low_52w)
+        if pos_52w is None:
+            pos_52w = calc_52w_position(current_price, high_52w, low_52w)
 
         target_price = safe_float(get_prop_value(props, ["목표주가"])) or 0.0
         margin_of_safety = str(get_prop_value(props, ["안전마진"]) or "").strip()
         if not margin_of_safety and target_price > 0 and current_price > 0:
-            upside = current_price / target_price
-            pct_txt = f"{upside * 100:.1f}%"
-            if upside <= 0.6:
-                margin_of_safety = f"🚀 {pct_txt}"
-            elif upside <= 0.8:
-                margin_of_safety = f"✅ {pct_txt}"
-            elif upside < 1.0:
-                margin_of_safety = f"⚠️ {pct_txt}"
-            else:
-                margin_of_safety = f"🚨 {pct_txt}"
+            margin_of_safety = calc_margin_of_safety(current_price, target_price)
 
         target_range = str(get_prop_value(props, ["목표가 범위"]) or "").strip()
         div_yield = get_prop_value(props, ["배당수익률"])
@@ -424,9 +421,14 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
         if day_change is None and prev_close > 0 and current_price > 0:
             day_change = (current_price - prev_close) / prev_close
 
+        # 노션 '투자주 DB' 3차원 속성 (자산군, 상품유형, 국가) 추출
+        notion_asset_class = str(get_prop_value(props, ["자산군"]) or "").strip()
+        notion_prod_type = str(get_prop_value(props, ["상품유형"]) or "").strip()
+        notion_country = str(get_prop_value(props, ["국가"]) or "").strip()
+
         # 종목 메타 결합
         meta_info = stock_meta.get(name.upper()) or stock_meta.get(ticker.upper()) or {}
-        country = meta_info.get("country", "")
+        country = notion_country or meta_info.get("country", "")
         portfolio_theme = meta_info.get("portfolio_theme", "")
         selection = meta_info.get("selection", "")
 
@@ -462,6 +464,8 @@ def collect_all_portfolio_data(client: Any) -> Dict[str, Any]:
                 "country": country,
                 "portfolio_theme": portfolio_theme,
                 "selection": selection,
+                "asset_class": notion_asset_class,
+                "prod_type": notion_prod_type,
                 "invest_tags": invest_tags,
                 "pos_52w": pos_52w,
                 "high_52w": high_52w,
@@ -587,6 +591,8 @@ def analyze_integrated_portfolio(
             country=h.get("country", ""),
             custom_portfolio=h.get("portfolio_theme", ""),
             custom_selection=h.get("selection", ""),
+            custom_asset_class=h.get("asset_class", ""),
+            custom_product_type=h.get("prod_type", ""),
         )
 
         h_info = {
@@ -699,12 +705,14 @@ def analyze_integrated_portfolio(
                     "guide": d.get("guide", ""),
                 })
 
-    # 8. [신규] 연간 900만원 세액공제(입출금 현황 DB의 당해연도 입금 합산 기준) 실시간 트래커 산출
-    pension_target = 6_000_000.0
-    irp_target = 3_000_000.0
-    total_tax_target = pension_target + irp_target  # 9,000,000원
+    # 8. [신규] 연간 세액공제(입출금 현황 DB의 당해연도 입금 합산 기준) 실시간 트래커 산출
+    pension_target = TAX_DEDUCTION_CONFIG.get("PENSION_TARGET", 6_000_000.0)
+    irp_target = TAX_DEDUCTION_CONFIG.get("IRP_TARGET", 3_000_000.0)
+    total_tax_target = TAX_DEDUCTION_CONFIG.get("TOTAL_TARGET", pension_target + irp_target)
+    ref_min_rate = TAX_DEDUCTION_CONFIG.get("REFUND_RATE_MIN", 0.132)
+    ref_max_rate = TAX_DEDUCTION_CONFIG.get("REFUND_RATE_MAX", 0.165)
 
-    # 2026년 당해연도 입금액
+    # 당해연도 입금액
     pension_dep = yearly_deposits.get("삼성연금", 0.0)
     irp_dep = yearly_deposits.get("삼성IRP", 0.0)
     
@@ -718,18 +726,18 @@ def analyze_integrated_portfolio(
     total_tax_pct = min(100.0, (total_tax_dep / total_tax_target * 100.0)) if total_tax_target > 0 else 0.0
     total_tax_rem = max(0.0, total_tax_target - total_tax_dep)
     
-    # 예상 세액공제 환급액 (13.2% ~ 16.5%)
-    refund_min = min(total_tax_dep, total_tax_target) * 0.132
-    refund_max = min(total_tax_dep, total_tax_target) * 0.165
+    # 예상 세액공제 환급액
+    refund_min = min(total_tax_dep, total_tax_target) * ref_min_rate
+    refund_max = min(total_tax_dep, total_tax_target) * ref_max_rate
 
     tax_deduction_tracker_text = (
-        f"* **🏛️ 삼성연금 (연금저축 - 연 600만원 세액공제 목표)**: {current_year}년 누적 입금 **{pension_dep:,.0f} 원** "
+        f"* **🏛️ 삼성연금 (연금저축 - 연 {pension_target/10000:,.0f}만원 세액공제 목표)**: {current_year}년 누적 입금 **{pension_dep:,.0f} 원** "
         f"(달성률: **{pension_pct:.1f}%**, 연말 잔여 납입 필요액: **{pension_rem:,.0f} 원**)\n"
-        f"* **🛡️ 삼성IRP (개인형 IRP - 연 300만원 세액공제 목표)**: {current_year}년 누적 입금 **{irp_dep:,.0f} 원** "
+        f"* **🛡️ 삼성IRP (개인형 IRP - 연 {irp_target/10000:,.0f}만원 세액공제 목표)**: {current_year}년 누적 입금 **{irp_dep:,.0f} 원** "
         f"(달성률: **{irp_pct:.1f}%**, 연말 잔여 납입 필요액: **{irp_rem:,.0f} 원**)\n"
-        f"* **💰 [합계] {current_year}년 900만원 세액공제 달성 현황**: 총 **{total_tax_dep:,.0f} 원** 입금 완료 "
+        f"* **💰 [합계] {current_year}년 {total_tax_target/10000:,.0f}만원 세액공제 달성 현황**: 총 **{total_tax_dep:,.0f} 원** 입금 완료 "
         f"(전체 달성률: **{total_tax_pct:.1f}%**, 잔여 납입 필요액: **{total_tax_rem:,.0f} 원**)\n"
-        f"  ➡️ *현재까지 확보된 예상 절세 환급액: 약 **{refund_min:,.0f} 원 ~ {refund_max:,.0f} 원** (한도 900만원 완납 시 최대 148.5만원 환급)*"
+        f"  ➡️ *현재까지 확보된 예상 절세 환급액: 약 **{refund_min:,.0f} 원 ~ {refund_max:,.0f} 원** (한도 {total_tax_target/10000:,.0f}만원 완납 시 최대 {total_tax_target*ref_max_rate/10000:,.1f}만원 환급)*"
     )
 
     # 9. [개조식 & 탭 들여쓰기] 6대 계좌별 독립 상세 진단 마크다운 생성
@@ -954,6 +962,10 @@ def analyze_integrated_portfolio(
         "cash_total_krw": cash_total_krw,
         "cash_pct": cash_pct,
         "tax_deduction_tracker_text": tax_deduction_tracker_text,
+        "current_year": current_year,
+        "total_tax_limit": total_tax_target,
+        "pension_tax_limit": pension_target,
+        "irp_tax_limit": irp_target,
         "account_categorized_text": account_categorized_text,
         "portfolio_weighted_vol": port_weighted_vol,
         "portfolio_var_pct": portfolio_var_pct,

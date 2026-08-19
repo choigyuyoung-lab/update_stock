@@ -28,6 +28,14 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
+# Google GenAI 최신 SDK 안전 임포트
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
+
 from config_portfolio import (
     GEMINI_MODEL_POOL,
     SYSTEM_PROMPT,
@@ -68,13 +76,14 @@ class AIService:
             logger.warning("⚠️ GEMINI_API_KEY가 설정되지 않았습니다.")
             return
 
-        try:
-            from google import genai
-            self.client = genai.Client(api_key=self.api_key)
-            logger.info("✅ Google GenAI 클라이언트 초기화 완료")
-        except ImportError:
+        if genai is None or types is None:
             logger.error("❌ 'google-genai' 패키지가 설치되지 않았습니다. pip install google-genai 를 실행하세요.")
             self.client = None
+            return
+
+        try:
+            self.client = genai.Client(api_key=self.api_key)
+            logger.info("✅ Google GenAI 클라이언트 초기화 완료")
         except Exception as e:
             logger.error(f"❌ Google GenAI 클라이언트 초기화 실패: {e}")
             self.client = None
@@ -93,11 +102,6 @@ class AIService:
         포트폴리오 집계 데이터 및 실시간 매크로 지표를 입력받아
         Google Search Grounding 도구를 활성화한 4단계 모델 풀을 순차 호출하여
         「K-올라운드 마스터」 진단 리포트를 생성합니다.
-        
-        :param portfolio_summary: 포트폴리오 집계 데이터 + 매크로 스냅샷 딕셔너리
-        :param max_retries: 모델별 최대 재시도 횟수
-        :param base_delay: 기본 대기 시간(초)
-        :return: 마크다운 형식의 진단 리포트 문자열
         """
         if not self.is_available():
             raise EnvironmentError(
@@ -121,6 +125,10 @@ class AIService:
             "total_positions_count": portfolio_summary.get("total_positions_count", 0),
             "monitoring_count": portfolio_summary.get("monitoring_count", 0),
             "tax_deduction_tracker_text": portfolio_summary.get("tax_deduction_tracker_text", "세액공제 데이터 산출 완료"),
+            "current_year": portfolio_summary.get("current_year", "2026"),
+            "total_tax_limit": portfolio_summary.get("total_tax_limit", 9_000_000.0),
+            "pension_tax_limit": portfolio_summary.get("pension_tax_limit", 6_000_000.0),
+            "irp_tax_limit": portfolio_summary.get("irp_tax_limit", 3_000_000.0),
             "prev_report_summary_text": portfolio_summary.get("prev_report_summary_text", "- **비교 기준**: 직전 리포트 없음"),
             "account_categorized_text": portfolio_summary.get("account_categorized_text", ""),
             "account_summary_text": portfolio_summary.get("account_summary_text", ""),
@@ -130,8 +138,6 @@ class AIService:
             "holdings_detail_text": portfolio_summary.get("holdings_detail_text", ""),
         }
         user_prompt = USER_PROMPT_TEMPLATE.format(**format_kwargs)
-
-        from google.genai import types
 
         # Google Search Grounding 도구 정의
         search_tool = types.Tool(google_search=types.GoogleSearch())
