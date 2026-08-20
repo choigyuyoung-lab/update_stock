@@ -1,6 +1,6 @@
 # 🚀 [Context & Memory] K-올라운드 마스터 (update_stock) 프로젝트 AI 세션 연속성 프롬프트
 
-- **생성 일시**: 2026-08-20 08:39:11
+- **생성 일시**: 2026-08-20 09:00:14
 - **작업 환경**: 🏢 회사 PC (CHOIGYUYOUNG)
 
 ---
@@ -74,12 +74,13 @@
 
 ### 📋 현재 Git 작업 상태
 • 로컬 수정/작업 중인 파일 목록:
-  - M generate_gemini_prompt.py
+  - M gemini_context_prompt.md
+  -  M generate_gemini_prompt.py
 
 - **최근 커밋 로그**:
+29b13a2 refactor: update Gemini prompt template and logic for stock update process
 7a17cc8 sync: [🏢 회사 PC (CHOIGYUYOUNG)] 2026-08-20 08:32:00 작업 완료 동기화
 a1b6f6f sync: [🏢 회사 PC (CHOIGYUYOUNG)] 2026-08-20 08:18:55 작업 완료 동기화
-73f7749 refactor: update GEMINI.md documentation and optimize sync_manager.py logic
 
 ---
 

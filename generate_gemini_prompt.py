@@ -11,6 +11,7 @@ import sys
 import subprocess
 import datetime
 import socket
+from typing import Optional, List
 
 # 터미널 UTF-8 설정
 if sys.platform == "win32":
@@ -169,6 +170,81 @@ def generate_prompt() -> str:
 """
     return prompt_content
 
+import shutil
+
+def find_google_drive_dir() -> Optional[str]:
+    """PC 내 구글 드라이브 데스크톱 폴더 자동 탐색"""
+    possible_roots = [
+        r"G:\내 드라이브",
+        r"G:\My Drive",
+        os.path.expanduser(r"~\Google Drive"),
+        os.path.expanduser(r"~\내 드라이브"),
+        r"C:\Google Drive",
+        r"D:\Google Drive",
+    ]
+    
+    # 1. 기존에 생성된 update_stock 관련 폴더 우선 탐색
+    for root in possible_roots:
+        if os.path.exists(root):
+            for sub in ["update_stock_core", "update_stock", "update_stock_prompt"]:
+                candidate = os.path.join(root, sub)
+                if os.path.exists(candidate):
+                    return candidate
+
+    # 2. 루트 드라이브가 존재하면 update_stock_core 폴더 생성 후 반환
+    for root in possible_roots:
+        if os.path.exists(root):
+            target = os.path.join(root, "update_stock_core")
+            try:
+                os.makedirs(target, exist_ok=True)
+                return target
+            except Exception:
+                pass
+    return None
+
+def get_sync_target_files(workspace_dir: str) -> List[str]:
+    """프로젝트 내 유의미한 핵심 소스파일(.py, .md, .bat, .yml) 수집 (외부 라이브러리/샘플/캐시 제외)"""
+    targets = []
+    exclude_dirs = {
+        ".git", ".venv", "venv", "env", ".gemini", ".vscode", 
+        ".devcontainer", ".agents", "__pycache__", "backup", 
+        "open-trading-api", "reports"
+    }
+    
+    for root, dirs, files in os.walk(workspace_dir):
+        # 제외 폴더 필터링
+        dirs[:] = [d for d in dirs if d not in exclude_dirs and not d.startswith(".")]
+        
+        for f in files:
+            if f.endswith((".py", ".md", ".bat", ".yml")):
+                rel_path = os.path.relpath(os.path.join(root, f), workspace_dir)
+                targets.append(rel_path)
+    return sorted(targets)
+
+def sync_to_google_drive(prompt_path: str):
+    """구글 드라이브로 프롬프트 및 모든 신규/기존 코드 파일 자동 동기화"""
+    gdrive_dir = find_google_drive_dir()
+    if not gdrive_dir:
+        print(f"  {YELLOW}ℹ️ 구글 드라이브 데스크톱 폴더(G:\\내 드라이브 등)를 찾지 못해 로컬 저장만 완료했습니다.{RESET}")
+        return
+
+    workspace_dir = os.path.dirname(__file__)
+    target_files = get_sync_target_files(workspace_dir)
+    copied_count = 0
+
+    try:
+        for rel_file in target_files:
+            src = os.path.join(workspace_dir, rel_file)
+            dst = os.path.join(gdrive_dir, rel_file)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            copied_count += 1
+
+        print(f"☁️ {GREEN}{BOLD}구글 드라이브 전체 동기화 완료! (신규 파일 포함 {copied_count}개 파일){RESET}")
+        print(f"   📂 동기화 경로: {CYAN}{gdrive_dir}{RESET}")
+    except Exception as e:
+        print(f"  {YELLOW}⚠️ 구글 드라이브 복사 중 오류: {e}{RESET}")
+
 def main():
     print(f"{CYAN}{'='*60}{RESET}")
     print(f"{CYAN}{BOLD}  [K-올라운드] Gemini 모바일/웹 세션 프롬프트 자동 생성기{RESET}")
@@ -176,14 +252,17 @@ def main():
 
     prompt = generate_prompt()
     
-    # 1. 파일 저장
+    # 1. 로컬 파일 저장
     output_filename = "gemini_context_prompt.md"
     output_path = os.path.join(os.path.dirname(__file__), output_filename)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(prompt)
-    print(f"📁 파일 저장 완료: {YELLOW}{output_filename}{RESET}")
+    print(f"📁 로컬 파일 저장 완료: {YELLOW}{output_filename}{RESET}")
 
-    # 2. 클립보드 복사
+    # 2. 구글 드라이브 자동 동기화
+    sync_to_google_drive(output_path)
+
+    # 3. 클립보드 복사
     copied = copy_to_clipboard(prompt)
     if copied:
         print(f"📋 {GREEN}{BOLD}클립보드 자동 복사 성공!{RESET}")
@@ -193,8 +272,7 @@ def main():
     print(f"{CYAN}{'-'*60}{RESET}")
     print(f"💡 {BOLD}사용 방법:{RESET}")
     print(f"  1. 스마트폰의 {GREEN}Gemini 앱{RESET} 또는 {GREEN}gemini.google.com{RESET} 접속")
-    print(f"  2. 새 대화창에 {YELLOW}Ctrl + V (붙여넣기){RESET} 후 전송")
-    print(f"  3. 바로 이어서 모바일에서 작업 지시 및 Q&A 진행!")
+    print(f"  2. Gems 또는 대화창에서 {YELLOW}@Google Drive{RESET}로 실시간 조회하며 작업 진행!")
     print(f"{CYAN}{'='*60}{RESET}\n")
 
 if __name__ == "__main__":
