@@ -41,6 +41,8 @@ from notion_utils import (
     is_kr_ticker,
     is_valid_num,
     batch_update_pages,
+    build_dirty_payload,
+    is_market_holiday,
 )
 
 
@@ -141,7 +143,7 @@ def build_update_for_page(
     page: Dict[str, Any],
     kis_ctx: Dict[str, Any]
 ) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
-    """개별 노션 페이지의 티커를 추출하여 한투 가격 정보를 조회하고 업데이트 페이로드를 생성합니다."""
+    """개별 노션 페이지의 티커를 추출하여 한투 가격 정보를 조회하고 변경된 경우에만 업데이트 페이로드를 생성합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
     name = get_page_text(props, ["종목명", "Name"]) or ticker
@@ -153,19 +155,15 @@ def build_update_for_page(
     if not price_dict:
         return None
 
-    curr_price = price_dict.get("현재가")
-    prev_close = price_dict.get("전일 종가")
+    dirty_props = build_dirty_payload(
+        existing_props=props,
+        candidate_data=price_dict,
+        num_fields=["현재가", "전일 종가"],
+        select_fields=[],
+    )
 
-    update_props: Dict[str, Any] = {}
-    if curr_price is not None and curr_price > 0:
-        update_props["현재가"] = {"number": curr_price}
-        
-    if prev_close is not None and prev_close > 0 and "전일 종가" in props:
-        update_props["전일 종가"] = {"number": prev_close}
-
-    if update_props:
-        set_page_date_property(update_props, props)
-        return page["id"], update_props, ticker, name
+    if dirty_props:
+        return page["id"], dirty_props, ticker, name
 
     return None
 
@@ -200,6 +198,13 @@ def batch_collect_price_data(
 # ==============================================================================
 def main() -> None:
     """국내 주식 현재가 일괄 업데이트 메인 파이프라인"""
+    # 0. 휴장일 감지 및 조기 종료 (리소스 및 액션스 사용량 절감)
+    force_run = os.environ.get("FORCE_RUN", "").lower() in ("true", "1") or "--force" in sys.argv
+    is_closed, reason = is_market_holiday("KR")
+    if is_closed and not force_run:
+        print(f"🛑 [KRX 휴장일 감지] 오늘은 {reason}입니다. 불필요한 API 호출 및 리소스를 절약하기 위해 작업을 즉시 종료합니다. (강제실행: FORCE_RUN=true 또는 --force)")
+        return
+
     notion = build_notion_client(NOTION_TOKEN)
     kis_ctx = get_kis_auth_context()
     if not kis_ctx:
@@ -210,7 +215,7 @@ def main() -> None:
     all_pages = []
     
     print("📋 노션 데이터베이스 스캔 중...")
-    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.3):
+    for page in paginate_database(notion, DATABASE_ID, page_size=100, retry_delay=0.05):
         all_pages.append(page)
         
     print(f"📊 총 {len(all_pages)}개 항목 발견")

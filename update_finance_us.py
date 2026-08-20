@@ -44,6 +44,8 @@ from notion_utils import (
     safe_float,
     is_valid_num,
     calculate_quant_indicators,
+    build_dirty_payload,
+    is_market_holiday,
 )
 
 
@@ -173,7 +175,7 @@ def get_diagnostic_color(text: str) -> str:
 def build_finance_update_for_page(
     page: Dict[str, Any]
 ) -> Optional[Tuple[str, str, Dict[str, Any], str]]:
-    """개별 해외 주식 페이지의 재무 데이터를 수집하고 업데이트 정보를 반환합니다."""
+    """개별 해외 주식 페이지의 재무 데이터를 수집하고 변경된 경우에만 업데이트 정보를 반환합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
     if not ticker or is_kr_ticker(ticker):
@@ -187,41 +189,19 @@ def build_finance_update_for_page(
     
     try:
         fin_data = get_stock_financials(ticker)
-        update_props = {
-            key: {"number": fin_data[key]}
-            for key in number_keys
-            if is_valid_num(fin_data.get(key)) and key in props
-        }
+        dirty_props = build_dirty_payload(
+            existing_props=props,
+            candidate_data=fin_data,
+            num_fields=number_keys,
+            select_fields=select_keys,
+            diagnostic_color_fn=get_diagnostic_color
+        )
 
-        # 노션 속성 타입(Select vs Status vs Rich_text) 자동 감지 방어 매핑
-        for s_key in select_keys:
-            val = fin_data.get(s_key)
-            if val and s_key in props:
-                p_type = props[s_key].get("type", "select")
-                if p_type == "status":
-                    update_props[s_key] = {"status": {"name": val}}
-                elif p_type == "rich_text":
-                    color = get_diagnostic_color(val)
-                    update_props[s_key] = {
-                        "rich_text": [
-                            {
-                                "type": "text",
-                                "text": {"content": val},
-                                "annotations": {"color": color, "bold": True}
-                            }
-                        ]
-                    }
-                else:
-                    update_props[s_key] = {"select": {"name": val}}
-        
-        set_page_date_property(update_props, props)
-
-        if not update_props:
-            logger.info(f"⚠️ [{ticker}] 업데이트할 유효 데이터 없음")
+        if not dirty_props:
             return None
         
         preview = ", ".join([f"{k}={v}" for k, v in list(fin_data.items())[:3]])
-        return (page["id"], ticker, update_props, preview)
+        return (page["id"], ticker, dirty_props, preview)
         
     except Exception as e:
         logger.warning(f"❌ [{ticker}] 데이터 수집 중 에러: {e}")
@@ -257,7 +237,7 @@ def batch_update_us_finance_pages(
     notion_client: Any,
     updates: List[Tuple[str, str, Dict[str, Any], str]],
     batch_size: int = 10,
-    delay_between_batches: float = 0.3
+    delay_between_batches: float = 0.1
 ) -> None:
     """배치 단위로 노션 해외 주식 재무 정보 페이지를 업데이트합니다."""
     if not updates:
@@ -302,6 +282,13 @@ def batch_update_us_finance_pages(
 # ==============================================================================
 def main() -> None:
     """해외 주식 재무 정보 일괄 업데이트 메인 파이프라인"""
+    # 0. 미국 휴장일 감지 및 조기 종료 (리소스 및 액션스 사용량 절감)
+    force_run = os.environ.get("FORCE_RUN", "").lower() in ("true", "1") or "--force" in sys.argv
+    is_closed, reason = is_market_holiday("US")
+    if is_closed and not force_run:
+        logger.info(f"🛑 [미국 증시 휴장일 감지] 오늘은 {reason}입니다. 불필요한 API 호출 및 리소스를 절약하기 위해 작업을 즉시 종료합니다. (강제실행: FORCE_RUN=true 또는 --force)")
+        return
+
     notion_client = build_notion_client(NOTION_TOKEN)
     kst = timezone(timedelta(hours=9))
     logger.info(f"🌍 [해외 주식 재무 업데이트] 시작 - {datetime.now(kst)}")
@@ -309,7 +296,7 @@ def main() -> None:
     all_pages = []
     
     logger.info("📋 노션 데이터베이스 스캔 중...")
-    for page in paginate_database(notion_client, DATABASE_ID, page_size=100, retry_delay=0.3):
+    for page in paginate_database(notion_client, DATABASE_ID, page_size=100, retry_delay=0.05):
         all_pages.append(page)
     
     logger.info(f"📊 총 {len(all_pages)}개 항목 발견")
@@ -325,11 +312,11 @@ def main() -> None:
         updates.extend(batch_updates)
         
         if i + batch_collect_size < len(all_pages):
-            time.sleep(1.5)
+            time.sleep(0.5)
     
     if updates:
         logger.info(f"\n📝 {len(updates)}개 항목을 노션에 업데이트합니다...")
-        batch_update_us_finance_pages(notion_client, updates, batch_size=10, delay_between_batches=0.3)
+        batch_update_us_finance_pages(notion_client, updates, batch_size=10, delay_between_batches=0.1)
     else:
         logger.warning("⚠️ 업데이트할 항목이 없습니다.")
 

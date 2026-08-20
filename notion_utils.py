@@ -14,7 +14,7 @@ import json
 import re
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Set, cast
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -90,6 +90,229 @@ def get_kst_str(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
 def kst_isoformat() -> str:
     """전 세계 어느 가상 서버에서 실행되든 한국 표준시(KST, Asia/Seoul)를 기준으로 ISO 일시를 반환합니다."""
     return get_kst_now().isoformat()
+
+
+# ==============================================================================
+# 2-1. 한국(KRX) & 미국(NYSE) 정밀 휴장일/공휴일 판별 엔진
+# ==============================================================================
+def get_easter_date(year: int) -> date:
+    """Meeus/Jones/Butcher 알고리즘으로 양력 부활절(Easter Sunday) 일자를 산출합니다."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _get_nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
+    """지정된 월의 n번째 특정 요일(0:월 ~ 6:일) 일자를 반환합니다."""
+    first_day = date(year, month, 1)
+    first_weekday = first_day.weekday()
+    offset = (weekday - first_weekday) % 7
+    return first_day + timedelta(days=offset + (n - 1) * 7)
+
+
+def _get_last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    """지정된 월의 마지막 특정 요일 일자를 반환합니다."""
+    if month == 12:
+        next_month_first = date(year + 1, 1, 1)
+    else:
+        next_month_first = date(year, month + 1, 1)
+    last_day = next_month_first - timedelta(days=1)
+    offset = (last_day.weekday() - weekday) % 7
+    return last_day - timedelta(days=offset)
+
+
+def get_us_market_holidays(year: int) -> Dict[date, str]:
+    """미국 증권시장(NYSE/NASDAQ) 공식 휴장일 맵을 반환합니다."""
+    holidays: Dict[date, str] = {}
+    
+    # 1. New Year's Day (1월 1일)
+    nyd = date(year, 1, 1)
+    if nyd.weekday() == 5:
+        holidays[date(year - 1, 12, 31)] = "New Year's Day (Observed)"
+    elif nyd.weekday() == 6:
+        holidays[date(year, 1, 2)] = "New Year's Day (Observed)"
+    else:
+        holidays[nyd] = "New Year's Day"
+        
+    # 2. Martin Luther King Jr. Day (1월 세 번째 월요일)
+    holidays[_get_nth_weekday_of_month(year, 1, 0, 3)] = "Martin Luther King Jr. Day"
+    
+    # 3. Washington's Birthday / Presidents' Day (2월 세 번째 월요일)
+    holidays[_get_nth_weekday_of_month(year, 2, 0, 3)] = "Presidents' Day"
+    
+    # 4. Good Friday (부활절 직전 금요일)
+    easter = get_easter_date(year)
+    holidays[easter - timedelta(days=2)] = "Good Friday"
+    
+    # 5. Memorial Day (5월 마지막 월요일)
+    holidays[_get_last_weekday_of_month(year, 5, 0)] = "Memorial Day"
+    
+    # 6. Juneteenth National Independence Day (6월 19일)
+    june19 = date(year, 6, 19)
+    if june19.weekday() == 5:
+        holidays[date(year, 6, 18)] = "Juneteenth (Observed)"
+    elif june19.weekday() == 6:
+        holidays[date(year, 6, 20)] = "Juneteenth (Observed)"
+    else:
+        holidays[june19] = "Juneteenth"
+        
+    # 7. Independence Day (7월 4일)
+    july4 = date(year, 7, 4)
+    if july4.weekday() == 5:
+        holidays[date(year, 7, 3)] = "Independence Day (Observed)"
+    elif july4.weekday() == 6:
+        holidays[date(year, 7, 5)] = "Independence Day (Observed)"
+    else:
+        holidays[july4] = "Independence Day"
+        
+    # 8. Labor Day (9월 첫 번째 월요일)
+    holidays[_get_nth_weekday_of_month(year, 9, 0, 1)] = "Labor Day"
+    
+    # 9. Thanksgiving Day (11월 네 번째 목요일)
+    holidays[_get_nth_weekday_of_month(year, 11, 3, 4)] = "Thanksgiving Day"
+    
+    # 10. Christmas Day (12월 25일)
+    xmas = date(year, 12, 25)
+    if xmas.weekday() == 5:
+        holidays[date(year, 12, 24)] = "Christmas Day (Observed)"
+    elif xmas.weekday() == 6:
+        holidays[date(year, 12, 26)] = "Christmas Day (Observed)"
+    else:
+        holidays[xmas] = "Christmas Day"
+        
+    return holidays
+
+
+# 한국 음력 공휴일 및 주요 선거일 사전 정의 테이블 (2024~2030)
+KR_LUNAR_AND_SPECIAL_HOLIDAYS: Dict[int, Dict[date, str]] = {
+    2024: {
+        date(2024, 2, 9): "설날 연휴", date(2024, 2, 10): "설날", date(2024, 2, 11): "설날 연휴", date(2024, 2, 12): "설날 대체공휴일",
+        date(2024, 4, 10): "제22대 국회의원 선거",
+        date(2024, 5, 15): "부처님오신날",
+        date(2024, 9, 16): "추석 연휴", date(2024, 9, 17): "추석", date(2024, 9, 18): "추석 연휴",
+    },
+    2025: {
+        date(2025, 1, 28): "설날 연휴", date(2025, 1, 29): "설날", date(2025, 1, 30): "설날 연휴",
+        date(2025, 5, 5): "어린이날/부처님오신날", date(2025, 5, 6): "대체공휴일",
+        date(2025, 10, 5): "추석 연휴", date(2025, 10, 6): "추석", date(2025, 10, 7): "추석 연휴", date(2025, 10, 8): "대체공휴일",
+    },
+    2026: {
+        date(2026, 2, 16): "설날 연휴", date(2026, 2, 17): "설날", date(2026, 2, 18): "설날 연휴",
+        date(2026, 5, 24): "부처님오신날", date(2026, 5, 25): "부처님오신날 대체공휴일",
+        date(2026, 6, 3): "제9회 전국동시지방선거",
+        date(2026, 9, 24): "추석 연휴", date(2026, 9, 25): "추석", date(2026, 9, 26): "추석 연휴",
+    },
+    2027: {
+        date(2027, 2, 6): "설날 연휴", date(2027, 2, 7): "설날", date(2027, 2, 8): "설날 연휴", date(2027, 2, 9): "설날 대체공휴일",
+        date(2027, 3, 3): "제21대 대통령 선거",
+        date(2027, 5, 13): "부처님오신날",
+        date(2027, 9, 14): "추석 연휴", date(2027, 9, 15): "추석", date(2027, 9, 16): "추석 연휴",
+    },
+    2028: {
+        date(2028, 1, 26): "설날 연휴", date(2028, 1, 27): "설날", date(2028, 1, 28): "설날 연휴",
+        date(2028, 5, 2): "부처님오신날",
+        date(2028, 10, 2): "추석 연휴", date(2028, 10, 3): "추석/개천절", date(2028, 10, 4): "추석 연휴", date(2028, 10, 5): "대체공휴일",
+    },
+    2029: {
+        date(2029, 2, 12): "설날 연휴", date(2029, 2, 13): "설날", date(2029, 2, 14): "설날 연휴", date(2029, 2, 15): "설날 대체공휴일",
+        date(2029, 5, 20): "부처님오신날", date(2029, 5, 21): "대체공휴일",
+        date(2029, 9, 21): "추석 연휴", date(2029, 9, 22): "추석", date(2029, 9, 23): "추석 연휴", date(2029, 9, 24): "대체공휴일",
+    },
+    2030: {
+        date(2030, 2, 2): "설날 연휴", date(2030, 2, 3): "설날", date(2030, 2, 4): "설날 연휴",
+        date(2030, 5, 9): "부처님오신날",
+        date(2030, 9, 11): "추석 연휴", date(2030, 9, 12): "추석", date(2030, 9, 13): "추석 연휴",
+    },
+}
+
+
+def get_kr_market_holidays(year: int) -> Dict[date, str]:
+    """한국 증권시장(KRX) 공식 공휴일 및 휴장일(근로자의 날, 연말 폐장일 포함) 맵을 반환합니다."""
+    holidays: Dict[date, str] = {}
+    
+    # 1. 고정 양력 공휴일
+    fixed_holidays = [
+        (1, 1, "신정"),
+        (3, 1, "3·1절"),
+        (5, 1, "근로자의 날 (KRX 휴장)"),
+        (5, 5, "어린이날"),
+        (6, 6, "현충일"),
+        (8, 15, "광복절"),
+        (10, 3, "개천절"),
+        (10, 9, "한글날"),
+        (12, 25, "성탄절"),
+    ]
+    
+    substitute_targets = {"3·1절", "어린이날", "광복절", "개천절", "한글날", "성탄절"}
+    
+    for m, d, name in fixed_holidays:
+        dt = date(year, m, d)
+        holidays[dt] = name
+        if name in substitute_targets:
+            if dt.weekday() == 5:  # 토요일
+                holidays[dt + timedelta(days=2)] = f"{name} 대체공휴일"
+            elif dt.weekday() == 6:  # 일요일
+                holidays[dt + timedelta(days=1)] = f"{name} 대체공휴일"
+
+    # 2. 음력 및 선거일 등 특별 공휴일 병합
+    if year in KR_LUNAR_AND_SPECIAL_HOLIDAYS:
+        holidays.update(KR_LUNAR_AND_SPECIAL_HOLIDAYS[year])
+
+    # 3. KRX 연말 폐장일 (12월 마지막 영업일 직전일 결제 폐장)
+    dec31 = date(year, 12, 31)
+    if dec31.weekday() == 5:
+        holidays[date(year, 12, 30)] = "연말 결제 폐장일"
+    elif dec31.weekday() == 6:
+        holidays[date(year, 12, 29)] = "연말 결제 폐장일"
+    else:
+        holidays[dec31] = "연말 결제 폐장일"
+
+    return holidays
+
+
+def is_market_holiday(market: str = "KR", dt: Optional[datetime] = None) -> Tuple[bool, str]:
+    """
+    지정된 시장('KR' 또는 'US')의 특정 일시(기본값: 현지 시각 기준 오늘)가 휴장일인지 판별합니다.
+    Returns: (is_closed, reason)
+    """
+    m = market.upper()
+    if m == "KR":
+        now_dt = dt or datetime.now(ZoneInfo("Asia/Seoul"))
+        d = now_dt.date()
+        if d.weekday() == 5:
+            return True, "토요일 (주말 휴장)"
+        if d.weekday() == 6:
+            return True, "일요일 (주말 휴장)"
+        hols = get_kr_market_holidays(d.year)
+        if d in hols:
+            return True, f"공휴일/휴장일 ({hols[d]})"
+        return False, "정규 영업일"
+        
+    elif m == "US":
+        now_dt = dt or datetime.now(ZoneInfo("America/New_York"))
+        d = now_dt.date()
+        if d.weekday() == 5:
+            return True, "토요일 (미국 주말 휴장)"
+        if d.weekday() == 6:
+            return True, "일요일 (미국 주말 휴장)"
+        hols = get_us_market_holidays(d.year)
+        if d in hols:
+            return True, f"미국 공휴일/휴장일 ({hols[d]})"
+        return False, "미국 정규 영업일"
+        
+    return False, "알 수 없는 시장"
 
 
 def get_db_id(
@@ -391,9 +614,9 @@ def paginate_database(
     client: Any,
     database_id: str,
     page_size: int = DEFAULT_PAGE_SIZE,
-    retry_delay: float = 1.0,
+    retry_delay: float = 0.05,
 ) -> Iterable[Dict[str, Any]]:
-    """노션 데이터베이스 전체 페이지를 페이지네이션하며 하나씩 yield하는 Generator"""
+    """노션 데이터베이스 전체 페이지를 고속으로 페이지네이션하며 하나씩 yield하는 Generator"""
     start_cursor = None
     while True:
         response = safe_databases_query(client, database_id, start_cursor=start_cursor, page_size=page_size)
@@ -402,7 +625,8 @@ def paginate_database(
         if not response.get("has_more"):
             break
         start_cursor = response.get("next_cursor")
-        time.sleep(retry_delay)
+        if retry_delay > 0:
+            time.sleep(retry_delay)
 
 
 def safe_page_update(
@@ -479,6 +703,126 @@ def set_page_date_property(
     default_name = candidate_names[0]
     props_to_update[default_name] = {"date": {"start": date_val}}
     return default_name
+
+
+# ==============================================================================
+# 5-1. Smart Dirty Checking (속성 변경 감지 엔진 및 I/O 절감)
+# ==============================================================================
+def extract_prop_raw_value(prop: Dict[str, Any]) -> Any:
+    """노션 속성 객체에서 순수 원시 데이터 값을 추출합니다."""
+    if not prop or not isinstance(prop, dict):
+        return None
+    
+    p_type = prop.get("type", "")
+    if p_type == "number":
+        return prop.get("number")
+    elif p_type == "select":
+        sel = prop.get("select")
+        return sel.get("name") if sel else None
+    elif p_type == "status":
+        st = prop.get("status")
+        return st.get("name") if st else None
+    elif p_type in ("rich_text", "title"):
+        texts = prop.get(p_type, [])
+        if texts and isinstance(texts, list):
+            return "".join(t.get("plain_text", "") for t in texts).strip()
+        return ""
+    elif p_type == "date":
+        d = prop.get("date")
+        return d.get("start") if d else None
+    return None
+
+
+def is_value_different(old_val: Any, new_val: Any, tolerance: float = 1e-4) -> bool:
+    """기존 값과 신규 값의 실질적 차이 여부를 판별합니다 (부동소수점 오차 감안)."""
+    if old_val is None and new_val is None:
+        return False
+    if old_val is None or new_val is None:
+        return True
+    
+    # 숫자형 비교
+    if isinstance(old_val, (int, float)) and isinstance(new_val, (int, float)):
+        return abs(float(old_val) - float(new_val)) > tolerance
+        
+    return str(old_val).strip() != str(new_val).strip()
+
+
+def build_dirty_payload(
+    existing_props: Dict[str, Any],
+    candidate_data: Dict[str, Any],
+    num_fields: Optional[List[str]] = None,
+    select_fields: Optional[List[str]] = None,
+    date_candidate_names: Optional[List[str]] = None,
+    diagnostic_color_fn: Optional[Any] = None,
+    iso_date_str: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    [Smart Dirty Checking 엔진]
+    기존 노션 속성과 신규 수집 데이터를 대조하여, '실질적으로 변경된 속성'만 추출합니다.
+    변경된 항목이 전혀 없는 경우 None을 반환하여 불필요한 Notion API I/O를 100% Skip합니다.
+    """
+    if num_fields is None:
+        num_fields = []
+    if select_fields is None:
+        select_fields = []
+
+    dirty_props: Dict[str, Any] = {}
+    has_meaningful_change = False
+
+    # 1. 숫자형 지표 검사 및 변경 감지 (스키마 방어: field in existing_props)
+    for field in num_fields:
+        if field not in existing_props:
+            continue
+        new_val = candidate_data.get(field)
+        if new_val is None:
+            continue
+            
+        old_val = extract_prop_raw_value(existing_props[field])
+        if is_value_different(old_val, new_val):
+            dirty_props[field] = {"number": new_val}
+            has_meaningful_change = True
+
+    # 2. 선택형/진단형(Select / Status / RichText) 지표 검사 및 변경 감지
+    for field in select_fields:
+        if field not in existing_props:
+            continue
+        new_val = candidate_data.get(field)
+        if not new_val:
+            continue
+
+        old_val = extract_prop_raw_value(existing_props[field])
+        if is_value_different(old_val, new_val):
+            p_type = existing_props[field].get("type", "select")
+            if p_type == "status":
+                dirty_props[field] = {"status": {"name": str(new_val)}}
+            elif p_type == "rich_text":
+                color = diagnostic_color_fn(str(new_val)) if diagnostic_color_fn else "default"
+                dirty_props[field] = {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {"content": str(new_val)},
+                            "annotations": {"color": color, "bold": True}
+                        }
+                    ]
+                }
+            else:
+                dirty_props[field] = {"select": {"name": str(new_val)}}
+            has_meaningful_change = True
+
+    # 3. 실질 데이터 변경이 없을 경우 API 호출 차단 (Skip)
+    if not has_meaningful_change:
+        return None
+
+    # 4. 실질 데이터 변경이 확인된 경우에만 날짜 속성 주입
+    set_page_date_property(
+        dirty_props,
+        existing_props,
+        candidate_names=date_candidate_names,
+        iso_date_str=iso_date_str
+    )
+
+    return dirty_props
 
 
 # ==============================================================================

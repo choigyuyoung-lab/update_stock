@@ -45,6 +45,8 @@ from notion_utils import (
     is_kr_ticker,
     is_valid_num,
     batch_update_pages,
+    build_dirty_payload,
+    is_market_holiday,
 )
 
 
@@ -131,7 +133,7 @@ def get_stock_data(
 def build_price_update_for_page(
     page: Dict[str, Any]
 ) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
-    """개별 해외 주식 페이지의 가격 데이터를 수집하고 업데이트 정보를 반환합니다."""
+    """개별 해외 주식 페이지의 가격 데이터를 수집하고 변경된 경우에만 업데이트 정보를 반환합니다."""
     props = page.get("properties", {})
     ticker = get_page_text(props, ["티커", "Ticker"]).upper()
     name = get_page_text(props, ["종목명", "Name"]) or ticker
@@ -141,17 +143,23 @@ def build_price_update_for_page(
     try:
         current_price, previous_close = get_stock_data(ticker)
         
-        upd: Dict[str, Any] = {}
+        cand_data: Dict[str, Any] = {}
         if is_valid_num(current_price):
-            upd["현재가"] = {"number": current_price}
+            cand_data["현재가"] = current_price
         
-        if is_valid_num(previous_close) and "전일 종가" in props:
-            upd["전일 종가"] = {"number": previous_close}
+        if is_valid_num(previous_close):
+            cand_data["전일 종가"] = previous_close
         
-        if upd:
-            set_page_date_property(upd, props)
+        dirty_props = build_dirty_payload(
+            existing_props=props,
+            candidate_data=cand_data,
+            num_fields=["현재가", "전일 종가"],
+            select_fields=[],
+        )
+
+        if dirty_props:
             price_str = f"{round(current_price, 2)}" if current_price is not None and is_valid_num(current_price) else "N/A"
-            return (page["id"], upd, ticker, f"{name} (${price_str})")
+            return (page["id"], dirty_props, ticker, f"{name} (${price_str})")
         else:
             return None
             
@@ -190,6 +198,13 @@ def batch_collect_us_price_data(
 # ==============================================================================
 def main() -> None:
     """해외 주식 현재가 일괄 업데이트 메인 파이프라인"""
+    # 0. 미국 휴장일 감지 및 조기 종료 (리소스 및 액션스 사용량 절감)
+    force_run = os.environ.get("FORCE_RUN", "").lower() in ("true", "1") or "--force" in sys.argv
+    is_closed, reason = is_market_holiday("US")
+    if is_closed and not force_run:
+        logger.info(f"🛑 [미국 증시 휴장일 감지] 오늘은 {reason}입니다. 불필요한 API 호출 및 리소스를 절약하기 위해 작업을 즉시 종료합니다. (강제실행: FORCE_RUN=true 또는 --force)")
+        return
+
     notion_client = build_notion_client(NOTION_TOKEN)
     kst = timezone(timedelta(hours=9))
     logger.info(f"⚡ [해외 주식 가격 업데이트] 시작 - {datetime.now(kst)}")
@@ -197,7 +212,7 @@ def main() -> None:
     all_pages = []
     
     logger.info("📋 노션 데이터베이스 스캔 중...")
-    for page in paginate_database(notion_client, DATABASE_ID, page_size=100, retry_delay=0.3):
+    for page in paginate_database(notion_client, DATABASE_ID, page_size=100, retry_delay=0.05):
         all_pages.append(page)
     
     logger.info(f"📊 총 {len(all_pages)}개 항목 발견")
