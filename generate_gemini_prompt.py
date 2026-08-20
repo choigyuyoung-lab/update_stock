@@ -202,45 +202,40 @@ def find_google_drive_dir() -> Optional[str]:
                 pass
     return None
 
-def get_sync_target_files(workspace_dir: str) -> List[str]:
-    """프로젝트 내 유의미한 핵심 소스파일(.py, .md, .bat, .yml) 수집 (외부 라이브러리/샘플/캐시 제외)"""
-    targets = []
-    exclude_dirs = {
-        ".git", ".venv", "venv", "env", ".gemini", ".vscode", 
-        ".devcontainer", ".agents", "__pycache__", "backup", 
-        "open-trading-api", "reports"
-    }
-    
-    for root, dirs, files in os.walk(workspace_dir):
-        # 제외 폴더 필터링
-        dirs[:] = [d for d in dirs if d not in exclude_dirs and not d.startswith(".")]
-        
-        for f in files:
-            if f.endswith((".py", ".md", ".bat", ".yml")):
-                rel_path = os.path.relpath(os.path.join(root, f), workspace_dir)
-                targets.append(rel_path)
-    return sorted(targets)
-
-def sync_to_google_drive(prompt_path: str):
-    """구글 드라이브로 프롬프트 및 모든 신규/기존 코드 파일 자동 동기화"""
+def clean_and_sync_google_drive(prompt_path: str):
+    """구글 드라이브를 깨끗이 정리하고 핵심 파일들만 Flat하게 동기화"""
     gdrive_dir = find_google_drive_dir()
     if not gdrive_dir:
         print(f"  {YELLOW}ℹ️ 구글 드라이브 데스크톱 폴더(G:\\내 드라이브 등)를 찾지 못해 로컬 저장만 완료했습니다.{RESET}")
         return
 
     workspace_dir = os.path.dirname(__file__)
-    target_files = get_sync_target_files(workspace_dir)
+
+    # 1. 불필요한 기존 잔여 서브폴더(open-trading-api, reports, .github 등) 정리
+    for item in os.listdir(gdrive_dir):
+        item_path = os.path.join(gdrive_dir, item)
+        if os.path.isdir(item_path):
+            try:
+                shutil.rmtree(item_path)
+            except Exception:
+                pass
+
+    # 2. 프로젝트 루트의 유의미한 소스파일(.py, .md, .txt, .bat)만 수집
+    target_files = []
+    for f in os.listdir(workspace_dir):
+        if f.endswith((".py", ".md", ".txt", ".bat")) and not f.startswith("."):
+            target_files.append(f)
+
     copied_count = 0
-
     try:
-        for rel_file in target_files:
-            src = os.path.join(workspace_dir, rel_file)
-            dst = os.path.join(gdrive_dir, rel_file)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-            copied_count += 1
+        for fname in target_files:
+            src = os.path.join(workspace_dir, fname)
+            dst = os.path.join(gdrive_dir, fname)
+            if os.path.isfile(src):
+                shutil.copy2(src, dst)
+                copied_count += 1
 
-        print(f"☁️ {GREEN}{BOLD}구글 드라이브 전체 동기화 완료! (신규 파일 포함 {copied_count}개 파일){RESET}")
+        print(f"☁️ {GREEN}{BOLD}구글 드라이브 클린 동기화 완료! (핵심 파일 {copied_count}개){RESET}")
         print(f"   📂 동기화 경로: {CYAN}{gdrive_dir}{RESET}")
     except Exception as e:
         print(f"  {YELLOW}⚠️ 구글 드라이브 복사 중 오류: {e}{RESET}")
@@ -259,8 +254,8 @@ def main():
         f.write(prompt)
     print(f"📁 로컬 파일 저장 완료: {YELLOW}{output_filename}{RESET}")
 
-    # 2. 구글 드라이브 자동 동기화
-    sync_to_google_drive(output_path)
+    # 2. 구글 드라이브 클린 동기화
+    clean_and_sync_google_drive(output_path)
 
     # 3. 클립보드 복사
     copied = copy_to_clipboard(prompt)
