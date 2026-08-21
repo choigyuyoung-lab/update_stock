@@ -3,7 +3,7 @@ name: Benchmark DB Sync & Health Check
 on:
   # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [benchmark_sync]
+    types: [benchmark_sync, benchmark_db_sync, sync_benchmark]
 
   # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
@@ -37,4 +37,4 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
           BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
-        run: python update_benchmark_db.py
+        run: python sync_benchmark.py

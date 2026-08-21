@@ -14,5 +14,6 @@ beautifulsoup4
 lxml
 httpx
 
-# 4. Google GenAI (Gemini) SDK
+# 4. Google GenAI (Gemini) SDK & YouTube Parser
 google-genai>=1.0.0
+youtube-transcript-api>=1.2.4

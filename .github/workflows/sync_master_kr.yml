@@ -3,7 +3,7 @@ name: KR Master DB Sync
 on:
   # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [kr_master_sync]
+    types: [kr_master_sync, kr_master_db_sync, sync_master_kr]
 
   # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
@@ -49,4 +49,4 @@ jobs:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_PROD_APP_SECRET }}
           IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
-        run: python update_master_db_kr.py
+        run: python sync_master_kr.py

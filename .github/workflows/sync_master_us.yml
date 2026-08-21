@@ -3,7 +3,7 @@ name: US/Global Master DB Sync
 on:
   # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [us_master_sync]
+    types: [us_master_sync, us_master_db_sync, sync_master_us]
 
   # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
@@ -38,4 +38,4 @@ jobs:
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
           BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
           IS_FULL_UPDATE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
-        run: python update_master_db_us.py
+        run: python sync_master_us.py

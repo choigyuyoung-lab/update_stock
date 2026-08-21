@@ -3,7 +3,7 @@ name: US Stock Price Update
 on:
   # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [us_update, us_price_update]
+    types: [us_update, us_price_update, sync_price_us]
 
   # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
@@ -36,4 +36,4 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_price_us.py
+        run: python sync_price_us.py

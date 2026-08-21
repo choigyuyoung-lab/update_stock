@@ -3,7 +3,7 @@ name: KR Stock Finance Update
 on:
   # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [kr_finance_update, kr_finance]
+    types: [kr_finance_update, kr_finance, sync_finance_kr]
 
   # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
@@ -47,4 +47,4 @@ jobs:
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_PROD_APP_SECRET }}
-        run: python update_finance_kr.py
+        run: python sync_finance_kr.py

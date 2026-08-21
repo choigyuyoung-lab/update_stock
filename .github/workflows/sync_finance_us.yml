@@ -3,7 +3,7 @@ name: US Finance Update
 on:
   # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [us_finance_update, us_finance]
+    types: [us_finance_update, us_finance, sync_finance_us]
 
   # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
@@ -36,4 +36,4 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python update_finance_us.py
+        run: python sync_finance_us.py
