@@ -200,6 +200,57 @@ def extract_video_id(video_input: str) -> Optional[str]:
     return None
 
 
+def extract_playlist_id(playlist_input: str) -> Optional[str]:
+    """유튜브 URL 또는 텍스트에서 Playlist ID를 추출합니다."""
+    playlist_input = str(playlist_input).strip()
+    if not playlist_input:
+        return None
+
+    # 이미 PL/UU/FL 등으로 시작하는 ID인 경우
+    if re.match(r'^(?:PL|UU|FL|RD|OLAK5uy_)[A-Za-z0-9_-]+$', playlist_input):
+        return playlist_input
+
+    # URL에서 list= 파라미터 매칭
+    m = re.search(r'[?&]list=([A-Za-z0-9_-]+)', playlist_input)
+    if m:
+        return m.group(1)
+    return None
+
+
+def resolve_playlist_info(playlist_input: str) -> Optional[Dict[str, str]]:
+    """
+    유튜브 재생목록 URL 또는 ID를 바탕으로 재생목록 ID와 제목을 수집합니다.
+    """
+    pid = extract_playlist_id(playlist_input)
+    if not pid:
+        return None
+
+    url = f"https://www.youtube.com/playlist?list={pid}"
+    title = f"YouTube Playlist ({pid})"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            m_title = (
+                re.search(r'<meta property="og:title" content="([^"]+)"', res.text) or
+                re.search(r'<title>([^<]+)</title>', res.text)
+            )
+            if m_title:
+                raw_title = m_title.group(1).strip()
+                title = re.sub(r' - YouTube$', '', raw_title).strip()
+    except Exception as e:
+        logger.debug(f"재생목록 메타데이터 조회 생략: {e}")
+
+    return {
+        "playlist_id": pid,
+        "name": title,
+    }
+
+
 def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
     """
     유튜브 영상 URL 또는 Video ID를 바탕으로 영상 메타데이터를 수집합니다.
@@ -224,11 +275,13 @@ def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.debug(f"oEmbed 메타데이터 조회 생략: {e}")
 
+    now_kst = get_kst_str("%Y-%m-%d %H:%M")
     return {
         "video_id": vid,
         "title": title,
         "url": video_url,
-        "publish_date": get_kst_str("%Y-%m-%d"),
+        "publish_date": now_kst[:10],
+        "publish_time_kst": now_kst,
         "channel_name": channel_name,
     }
 
@@ -283,8 +336,30 @@ def load_active_sources_from_notion(client: Any, guide_db_id: str) -> List[Dict[
                 if opt.get("name")
             ]
 
-            # [Self-Healing] Channel ID가 누락된 경우 URL/핸들로 자동 판별 후 노션 업데이트
-            if source_type == "채널(RSS)" and not channel_id and url_or_handle:
+            # [Self-Healing] Channel ID 또는 Playlist ID가 누락된 경우 URL/핸들로 자동 판별 후 노션 업데이트
+            is_playlist = (source_type == "재생목록") or (url_or_handle and extract_playlist_id(url_or_handle) is not None)
+            if is_playlist:
+                source_type = "재생목록"
+                if not channel_id and url_or_handle:
+                    logger.info(f"🔍 [{name or url_or_handle}] 재생목록 ID 누락 감지 -> 유튜브 URL 자동 해석 중...")
+                    pl_info = resolve_playlist_info(url_or_handle)
+                    if pl_info and pl_info.get("playlist_id"):
+                        channel_id = pl_info["playlist_id"]
+                        if not name or name == "Untitled":
+                            name = pl_info.get("name", name)
+
+                        update_payload: Dict[str, Any] = {
+                            "Channel ID": {"rich_text": [{"text": {"content": channel_id}}]}
+                        }
+                        if name:
+                            update_payload["채널명 / 제목"] = {"title": [{"text": {"content": name}}]}
+
+                        try:
+                            client.pages.update(page_id=page_id, properties=update_payload)
+                            logger.info(f"   ✨ [Notion 자동 보정] Playlist ID 저장 완료: {channel_id}")
+                        except Exception as ex:
+                            logger.warning(f"   ⚠️ Notion Playlist ID 보정 저장 실패: {ex}")
+            elif source_type == "채널(RSS)" and not channel_id and url_or_handle:
                 logger.info(f"🔍 [{name or url_or_handle}] Channel ID 누락 감지 -> 유튜브 핸들/URL 자동 해석 중...")
                 info = resolve_channel_info(url_or_handle)
                 if info and info.get("channel_id"):
@@ -336,15 +411,140 @@ def update_guide_last_scanned(client: Any, page_id: str) -> None:
         logger.debug(f"   ⚠️ 최근 수집일 갱신 실패 (Page: {page_id}): {e}")
 
 
-# ==============================================================================
-# 5. 유튜브 RSS 피드 파서 (API 쿼터 0 소모)
-# ==============================================================================
-def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_videos: int = 5) -> List[Dict[str, Any]]:
+def append_video_history_to_guide_page(
+    client: Any,
+    page_id: str,
+    video_meta: Dict[str, Any],
+    analyzed: Optional[YouTubeAnalysisResult] = None,
+    study_page_id: Optional[str] = None
+) -> None:
     """
-    유튜브 채널 RSS 피드를 파싱하여 최근 업로드된 비디오 목록을 반환합니다.
+    [Youtube 투자가이드]의 해당 채널/재생목록 페이지 본문에 수집된 동영상 이력을 표(Table) 형식으로 누적 기록하고
+    [투자공부 by Youtube DB]의 상세 분석 리포트 페이지와 상호 연결합니다.
+    """
+    if not page_id or not client:
+        return
+
+    vid = video_meta.get("video_id", "")
+    title = video_meta.get("title", "YouTube Video")
+    url = video_meta.get("url", f"https://www.youtube.com/watch?v={vid}")
+    pub_time_kst = video_meta.get("publish_time_kst") or video_meta.get("publish_date", get_kst_str("%Y-%m-%d"))
+    summary_short = ""
+    if analyzed and analyzed.overall_summary:
+        first_line = analyzed.overall_summary.strip().split("\n")[0]
+        summary_short = first_line[:100]
+
+    # 언급 종목 요약 (최대 3개)
+    assets_str = "-"
+    if analyzed and analyzed.assets:
+        tickers = [f"{a.ticker or a.name}" for a in analyzed.assets if a.ticker or a.name]
+        if tickers:
+            assets_str = ", ".join(tickers[:3])
+
+    # 투자공부 리포트 노션 페이지 URL
+    notion_report_url = f"https://notion.so/{study_page_id.replace('-', '')}" if study_page_id else ""
+
+    # 셀 구성 (5개 열: 게시일시, 유튜브 영상, 투자공부 리포트, 언급 종목, AI 요약)
+    cell_date = [{"type": "text", "text": {"content": pub_time_kst}, "annotations": {"code": True}}]
+    cell_yt = [{"type": "text", "text": {"content": title[:35] + ("..." if len(title) > 35 else ""), "link": {"url": url}}, "annotations": {"bold": True}}]
+    if notion_report_url:
+        cell_report = [{"type": "text", "text": {"content": "📄 리포트 열기", "link": {"url": notion_report_url}}, "annotations": {"bold": True, "color": "blue"}}]
+    else:
+        cell_report = [{"type": "text", "text": {"content": "-"}}]
+    cell_assets = [{"type": "text", "text": {"content": assets_str[:40]}}]
+    cell_summary = [{"type": "text", "text": {"content": summary_short[:80]}}]
+
+    data_row = {
+        "object": "block",
+        "type": "table_row",
+        "table_row": {
+            "cells": [cell_date, cell_yt, cell_report, cell_assets, cell_summary]
+        }
+    }
+
+    try:
+        # 기존 블록 목록 확인
+        existing_blocks = client.blocks.children.list(block_id=page_id).get("results", [])
+        existing_text = ""
+        existing_table_id = None
+
+        for b in existing_blocks:
+            b_type = b.get("type", "")
+            if b_type == "table":
+                existing_table_id = b.get("id")
+            rich_texts = b.get(b_type, {}).get("rich_text", [])
+            for rt in rich_texts:
+                existing_text += rt.get("plain_text", "") + " " + (rt.get("href") or "")
+
+        # 이미 본문에 해당 영상 URL이나 Video ID가 적혀있다면 중복 추가 생략
+        if vid and (vid in existing_text or url in existing_text):
+            logger.debug(f"   ℹ️ [투자가이드 본문] 이미 기록된 영상입니다: {vid}")
+            return
+
+        # 1. 기존 테이블이 있는 경우: 해당 테이블에 행(Row)만 추가
+        if existing_table_id:
+            try:
+                client.blocks.children.append(block_id=existing_table_id, children=[data_row])
+                logger.info(f"   📊 [투자가이드 표 행 추가] '{title[:25]}' ({pub_time_kst})")
+                return
+            except Exception as ex:
+                logger.warning(f"   ⚠️ 테이블 행 추가 실패 -> 신규 블록으로 재시도: {ex}")
+
+        # 2. 기존 테이블이 없는 경우: 헤더와 함께 신규 표 생성
+        header_row = {
+            "object": "block",
+            "type": "table_row",
+            "table_row": {
+                "cells": [
+                    [{"type": "text", "text": {"content": "게시일시 (KST)"}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": "유튜브 영상"}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": "📑 투자공부 리포트"}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": "언급 종목"}, "annotations": {"bold": True}}],
+                    [{"type": "text", "text": {"content": "AI 핵심 요약"}, "annotations": {"bold": True}}],
+                ]
+            }
+        }
+
+        new_blocks = [
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "🎬 수집된 동영상 이력 (KST 최신순)"}}]
+                }
+            },
+            {
+                "object": "block",
+                "type": "table",
+                "table": {
+                    "table_width": 5,
+                    "has_column_header": True,
+                    "has_row_header": False,
+                    "children": [header_row, data_row]
+                }
+            }
+        ]
+
+        client.blocks.children.append(block_id=page_id, children=new_blocks)
+        logger.info(f"   📊 [투자가이드 표 신규 생성] '{title}' ({pub_time_kst}) 적재 완료")
+
+    except Exception as e:
+        logger.warning(f"   ⚠️ [투자가이드 본문 기록 실패] {e}")
+
+
+# ==============================================================================
+# 5. 유튜브 RSS 피드 파서 (API 쿼터 0 소모 & KST 시간 기준 정렬)
+# ==============================================================================
+def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False) -> List[Dict[str, Any]]:
+    """
+    유튜브 채널 또는 재생목록 RSS 피드를 파싱하여 한국 시간(KST) 기준 최신 업로드 비디오 목록을 반환합니다.
     (YouTube Data API 쿼터를 전혀 소모하지 않음)
     """
-    rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    if is_playlist or channel_id.startswith("PL") or channel_id.startswith("UU") or channel_id.startswith("FL") or channel_id.startswith("RD") or channel_id.startswith("OLAK5uy_"):
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={channel_id}"
+    else:
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     videos = []
 
@@ -358,7 +558,7 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
         ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
 
         entries = root.findall("atom:entry", ns)
-        for entry in entries[:max_videos]:
+        for entry in entries:
             video_id_elem = entry.find("yt:videoId", ns)
             title_elem = entry.find("atom:title", ns)
             published_elem = entry.find("atom:published", ns)
@@ -370,25 +570,38 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
                 vpub = published_elem.text.strip() if published_elem is not None else ""
                 vurl = link_elem.attrib.get("href", f"https://www.youtube.com/watch?v={vid}") if link_elem is not None else f"https://www.youtube.com/watch?v={vid}"
 
+                pub_dt = None
                 pub_date = ""
+                pub_time_kst = ""
                 if vpub:
                     try:
-                        pub_dt = datetime.fromisoformat(vpub.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Seoul"))
+                        # UTC/ISO 날짜를 한국 표준시(KST, Asia/Seoul)로 변환
+                        utc_dt = datetime.fromisoformat(vpub.replace("Z", "+00:00"))
+                        pub_dt = utc_dt.astimezone(ZoneInfo("Asia/Seoul"))
                         pub_date = pub_dt.strftime("%Y-%m-%d")
+                        pub_time_kst = pub_dt.strftime("%Y-%m-%d %H:%M")
                     except Exception:
                         pub_date = vpub[:10]
+                        pub_time_kst = vpub[:16]
 
                 videos.append({
                     "video_id": vid,
                     "title": vtitle,
                     "url": vurl,
                     "publish_date": pub_date,
+                    "publish_time_kst": pub_time_kst,
+                    "publish_dt": pub_dt or datetime.min.replace(tzinfo=ZoneInfo("Asia/Seoul")),
                     "channel_name": channel_name or channel_id,
                 })
+
+        # 한국 시간(KST) 기준 최신 발행일시 역순(최신순) 엄격 정렬
+        videos.sort(key=lambda x: x["publish_dt"], reverse=True)
+
+        return videos[:max_videos]
+
     except Exception as e:
         logger.error(f"❌ [{channel_name}] RSS 파싱 에러: {e}")
-
-    return videos
+        return []
 
 
 # ==============================================================================
@@ -607,59 +820,6 @@ def create_unorganized_stock_items(
     return count
 
 
-def append_insight_callout_to_master_db(
-    client: Any,
-    master_map: Dict[str, str],
-    analyzed: YouTubeAnalysisResult,
-    video_meta: Dict[str, Any]
-) -> int:
-    """
-    추출된 추천 종목(result.assets)이 상장주식 Master DB에 존재하는 경우,
-    해당 종목 페이지 하단에 유튜브 분석 요약 Callout 블록을 자동으로 추가합니다.
-    """
-    assets = analyzed.assets or []
-    pub_date = analyzed.publish_date or video_meta.get("publish_date", get_kst_str("%Y-%m-%d"))
-    channel_name = video_meta.get("channel_name", "YouTube")
-    video_title = video_meta.get("title", "")
-    video_url = video_meta.get("url", "")
-    appended_count = 0
-
-    for asset in assets:
-        raw_ticker = str(asset.ticker or "").strip()
-        if not raw_ticker:
-            continue
-
-        clean_ticker = normalize_ticker(raw_ticker)
-        if clean_ticker not in master_map:
-            continue
-
-        master_page_id = master_map[clean_ticker]
-        opinion = str(asset.opinion or "중립").strip()
-        context = str(asset.context or "").strip()
-
-        callout_block = {
-            "object": "block",
-            "type": "callout",
-            "callout": {
-                "icon": {"type": "emoji", "emoji": "📺"},
-                "color": "gray_background",
-                "rich_text": [
-                    {"type": "text", "text": {"content": f"[{pub_date}] {channel_name} 유튜브 인사이트 ({opinion})\n", "annotations": {"bold": True}}},
-                    {"type": "text", "text": {"content": f"• 영상: {video_title}\n• 링크: {video_url}\n• 분석내용: {context}"}}
-                ]
-            }
-        }
-
-        try:
-            client.blocks.children.append(block_id=master_page_id, children=[callout_block])
-            appended_count += 1
-            logger.info(f"      📌 [Master DB Callout 추가] {clean_ticker} 페이지에 유튜브 인사이트 블록 추가 완료")
-        except Exception as e:
-            logger.warning(f"      ⚠️ [Master DB Callout 추가 실패] {clean_ticker}: {e}")
-
-    return appended_count
-
-
 # ==============================================================================
 # 8. 단일 영상 통합 처리 파이프라인
 # ==============================================================================
@@ -669,6 +829,7 @@ def process_single_video_item(
     ai_service: AIService,
     master_map: Dict[str, str],
     processed_ids: Set[str],
+    guide_page_id: Optional[str] = None,
     force: bool = False
 ) -> bool:
     """
@@ -676,7 +837,7 @@ def process_single_video_item(
     """
     vid = v["video_id"]
     vtitle = v.get("title", "")
-    pub_date = v.get("publish_date", "")
+    pub_date = v.get("publish_time_kst") or v.get("publish_date", "")
 
     if vid in processed_ids and not force:
         print(f"   ⚡ [이미 처리됨] '{vtitle[:30]}...' -> 스킵")
@@ -719,14 +880,15 @@ def process_single_video_item(
             master_map=master_map
         )
 
-    # 3) 📌 [상장주식 Master DB 개별 페이지] Callout 블록 적재
-    if MASTER_DB_ID and analyzed.assets:
-        print("   📥 [3/3] 상장주식 Master DB 개별 페이지에 Callout 인사이트 블록 추가 중...")
-        append_insight_callout_to_master_db(
+    # 3) 📑 [Youtube 투자가이드 DB 해당 채널/재생목록 페이지 본문] 수집된 동영상 이력 누적 적재
+    if guide_page_id:
+        print("   📥 [3/3] Youtube 투자가이드 페이지 본문에 동영상 수집 이력 적재 중...")
+        append_video_history_to_guide_page(
             client=notion_client,
-            master_map=master_map,
+            page_id=guide_page_id,
+            video_meta=v,
             analyzed=analyzed,
-            video_meta=v
+            study_page_id=page_id
         )
 
     if page_id:
@@ -905,6 +1067,7 @@ def main() -> None:
                         ai_service=ai_service,
                         master_map=master_map,
                         processed_ids=processed_ids,
+                        guide_page_id=src_page_id,
                         force=args.force
                     )
                     if success:
@@ -914,14 +1077,18 @@ def main() -> None:
                 else:
                     logger.warning(f"⚠️ 단일 영상 정보를 가져올 수 없습니다: {src_url}")
 
-            # B. 채널 RSS 피드 소스
+            # B. 채널 또는 재생목록 RSS 피드 소스
             else:
                 if not src_ch_id:
-                    logger.warning(f"⚠️ [{src_name}] Channel ID가 없어 스킵합니다.")
+                    logger.warning(f"⚠️ [{src_name}] Channel ID 또는 Playlist ID가 없어 스킵합니다.")
                     continue
 
-                print(f"\n📡 [채널 RSS] '{src_name}' 스캔 중 (최대 {src_max_v}개 영상, ID: {src_ch_id})...")
-                recent_videos = fetch_recent_videos_from_rss(src_ch_id, channel_name=src_name, max_videos=src_max_v)
+                is_pl = (src_type == "재생목록") or src_ch_id.startswith("PL") or src_ch_id.startswith("UU") or src_ch_id.startswith("FL")
+                label = "재생목록 RSS" if is_pl else "채널 RSS"
+                icon = "📑" if is_pl else "📡"
+
+                print(f"\n{icon} [{label}] '{src_name}' 스캔 중 (최대 {src_max_v}개 영상, ID: {src_ch_id})...")
+                recent_videos = fetch_recent_videos_from_rss(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl)
 
                 if not recent_videos:
                     print("   ℹ️ 최근 게시된 영상을 찾을 수 없습니다.")
@@ -933,6 +1100,7 @@ def main() -> None:
                             ai_service=ai_service,
                             master_map=master_map,
                             processed_ids=processed_ids,
+                            guide_page_id=src_page_id,
                             force=args.force
                         )
                         if success:
