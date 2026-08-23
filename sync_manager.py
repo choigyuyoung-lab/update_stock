@@ -253,6 +253,10 @@ def mode_finish() -> None:
     print(f"⏰ 실행 시각 : {GRAY}{now_str}{RESET}")
     print(f"{CYAN}{'-'*70}{RESET}")
 
+    state["last_location"] = location
+    state["last_sync_time"] = now_str
+    save_sync_state(state)
+
     for idx, repo in enumerate(repos, 1):
         print(f"\n{GREEN}▶ [{idx}/{len(repos)}] {repo['name']} Git 상태 점검 및 Push...{RESET}")
         _, status_out, _ = run_cmd(["git", "status", "--porcelain"], cwd=repo["path"])
@@ -276,10 +280,6 @@ def mode_finish() -> None:
             print(f"  {GREEN}🚀 {repo['name']} GitHub 원격 저장소 Push 성공!{RESET}")
         else:
             print(f"  {RED}❌ git push 실패: {p_err}{RESET}")
-
-    state["last_location"] = location
-    state["last_sync_time"] = now_str
-    save_sync_state(state)
 
     print(f"\n{GREEN}{'='*70}{RESET}")
     print(f"{GREEN}{BOLD}  🎉 모든 저장소 업로드 완료! 안심하고 이동/퇴근하세요.{RESET}")
