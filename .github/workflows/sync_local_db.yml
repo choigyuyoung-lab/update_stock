@@ -1,0 +1,59 @@
+name: Sync Local SQLite DB & Dictionary
+
+on:
+  # 1. cron-job.org 외부 Webhook 트리거
+  repository_dispatch:
+    types: [sync_local_db, local_db_update, compile_local_db]
+
+  # 2. GitHub 웹 UI 수동 실행 트리거
+  workflow_dispatch:
+
+jobs:
+  sync-local-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.10 with Pip Cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      # 🌟 KIS API 토큰 24시간 재사용 캐시
+      - name: Restore / Save KIS Token Cache
+        uses: actions/cache@v4
+        with:
+          path: .kis_token_cache.json
+          key: kis-token-cache-${{ github.run_id }}
+          restore-keys: |
+            kis-token-cache-
+
+      - name: Run Local SQLite DB & Dictionary Compilation
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
+          BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_PROD_APP_SECRET }}
+        run: python sync_local_db.py
+
+      # 🌟 최신 갱신된 data/*.csv 파일을 GitHub 저장소에 자동 커밋 & 푸시
+      - name: Commit & Push Updated Data CSVs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(data): auto-update stock dictionary & master CSVs [skip ci]"
+          file_pattern: "data/*.csv"

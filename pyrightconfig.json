@@ -1,0 +1,18 @@
+{
+    "include": ["."],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        ".venv",
+        "data",
+        "open-trading-api"
+    ],
+    "venvPath": ".",
+    "venv": ".venv",
+    "extraPaths": [
+        ".",
+        "core",
+        "services"
+    ],
+    "reportMissingTypeStubs": false
+}

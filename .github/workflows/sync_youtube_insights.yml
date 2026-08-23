@@ -1,0 +1,52 @@
+name: YouTube Macro & Stock Auto Sync
+
+on:
+  repository_dispatch:
+    types: [youtube_sync, youtube_collector, sync_youtube_insights]
+  workflow_dispatch:
+  schedule:
+    - cron: '30 9 * * 1-5'  # 월~금 18:30 KST
+
+jobs:
+  youtube-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.10 with Pip Cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      # 🌟 처리된 영상 중복 방지 캐시 복원/저장
+      - name: Restore / Save YouTube Video Cache
+        uses: actions/cache@v4
+        with:
+          path: .processed_youtube_videos.json
+          key: yt-processed-cache-${{ github.run_id }}
+          restore-keys: |
+            yt-processed-cache-
+
+      - name: Run YouTube Auto Collector & Notion Sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
+          MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
+          YOUTUBE_DATABASE_ID: ${{ secrets.YOUTUBE_DATABASE_ID || '2d0f59dbdb5b804891e4e054ef049d1c' }}
+          UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID || '2d8f59dbdb5b807aac70d3711b5b6e93' }}
+          UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID || '2f8f59dbdb5b804e8318e9a3f0efaf9d' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python sync_youtube_insights.py

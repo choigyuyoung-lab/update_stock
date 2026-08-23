@@ -1,0 +1,20 @@
+# 1. 환경 변수 및 노션 공식 SDK
+python-dotenv>=1.0.0
+notion-client>=2.2.1,<3.0.0
+
+# 2. 금융 데이터 수집 패키지
+yfinance>=0.2.31
+finance-datareader>=0.9.90
+
+# 3. 데이터 분석 및 웹 통신 패키지
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+httpx
+
+# 4. Google GenAI (Gemini) SDK & YouTube Parser
+google-genai>=1.0.0
+youtube-transcript-api>=1.2.4
+pydantic>=2.0.0
