@@ -290,7 +290,7 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "start"
     if mode == "start":
         mode_start()
-    elif mode == "finish":
+    elif mode in ["finish", "end"]:
         mode_finish()
     else:
         print(f"Unknown mode: {mode}. Use 'start' or 'finish'.")
