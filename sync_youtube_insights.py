@@ -40,13 +40,17 @@ from core.notion_utils import (
     get_page_text,
 )
 from services.ai_service import AIService, YouTubeAnalysisResult
+from services.stock_fallback_resolver import (
+    resolve_ticker_and_name,
+    _get_name_lookup_index,
+)
 
 
 def normalize_ticker(ticker: str) -> str:
     """티커 문자열에서 특수문자를 제거하고 대문자 표준 포맷으로 정규화합니다."""
     if not ticker:
         return ""
-    return re.sub(r'[^0-9A-Z]', '', str(ticker).strip().upper())
+    return re.sub(r'[^0-9A-Z]', '', ticker.strip().upper())
 
 
 # Windows 콘솔 UTF-8 출력 안전화
@@ -116,7 +120,7 @@ def resolve_channel_info(channel_input: str) -> Optional[Dict[str, str]]:
       - https://www.youtube.com/@3protv -> {"channel_id": "UChlv4GSd7OQl3js-jkLOnFA", "name": "삼프로TV"}
       - UChlv4GSd7OQl3js-jkLOnFA -> {"channel_id": "UChlv4GSd7OQl3js-jkLOnFA", "name": "삼프로TV"}
     """
-    channel_input = str(channel_input).strip()
+    channel_input = channel_input.strip()
     if not channel_input:
         return None
 
@@ -180,7 +184,7 @@ def resolve_channel_info(channel_input: str) -> Optional[Dict[str, str]]:
 
 def extract_video_id(video_input: str) -> Optional[str]:
     """유튜브 URL 또는 텍스트에서 11자리 Video ID를 추출합니다."""
-    video_input = str(video_input).strip()
+    video_input = video_input.strip()
     if not video_input:
         return None
 
@@ -202,7 +206,7 @@ def extract_video_id(video_input: str) -> Optional[str]:
 
 def extract_playlist_id(playlist_input: str) -> Optional[str]:
     """유튜브 URL 또는 텍스트에서 Playlist ID를 추출합니다."""
-    playlist_input = str(playlist_input).strip()
+    playlist_input = playlist_input.strip()
     if not playlist_input:
         return None
 
@@ -565,9 +569,9 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
             link_elem = entry.find("atom:link", ns)
 
             if video_id_elem is not None and title_elem is not None:
-                vid = video_id_elem.text.strip()
-                vtitle = title_elem.text.strip()
-                vpub = published_elem.text.strip() if published_elem is not None else ""
+                vid = (video_id_elem.text or "").strip()
+                vtitle = (title_elem.text or "").strip()
+                vpub = (published_elem.text or "").strip() if published_elem is not None else ""
                 vurl = link_elem.attrib.get("href", f"https://www.youtube.com/watch?v={vid}") if link_elem is not None else f"https://www.youtube.com/watch?v={vid}"
 
                 pub_dt = None
@@ -618,7 +622,7 @@ def get_video_transcript(video_id: str) -> Optional[str]:
             fetched = api.fetch(video_id, languages=languages)
             snippets = getattr(fetched, "snippets", fetched)
             full_text = " ".join([
-                getattr(item, "text", "") if hasattr(item, "text") else item.get("text", "")
+                getattr(item, "text", "") if hasattr(item, "text") else (item.get("text", "") if isinstance(item, dict) else "")
                 for item in snippets
             ])
         elif hasattr(YouTubeTranscriptApi, "get_transcript"):
@@ -722,10 +726,10 @@ def create_youtube_summary_notion_page(
         })
 
         for asset in assets:
-            t = str(asset.ticker or "-").strip()
-            n = str(asset.name or "-").strip()
-            op = str(asset.opinion or "중립").strip()
-            ctx = str(asset.context or "-").strip()
+            t = (asset.ticker or "-").strip()
+            n = (asset.name or "-").strip()
+            op = (asset.opinion or "중립").strip()
+            ctx = (asset.context or "-").strip()
 
             table_rows.append({
                 "object": "block",
@@ -785,10 +789,10 @@ def create_unorganized_stock_items(
     count = 0
 
     for asset in assets:
-        raw_ticker = str(asset.ticker or "").strip()
-        name = str(asset.name or "").strip()
-        context = str(asset.context or "").strip()
-        opinion = str(asset.opinion or "").strip()
+        raw_ticker = (asset.ticker or "").strip()
+        name = (asset.name or "").strip()
+        context = (asset.context or "").strip()
+        opinion = (asset.opinion or "").strip()
 
         if not raw_ticker:
             continue
@@ -859,6 +863,13 @@ def process_single_video_item(
     if not analyzed:
         print("   ❌ AI 분석 실패.")
         return False
+
+    # 🛡️ 공식 마스터 DB & 온톨로지 사전 기반 티커 2차 정밀 교차 검증 및 보정 (하드코딩 0%)
+    for asset in (analyzed.assets or []):
+        corrected_t, corrected_n = resolve_ticker_and_name(asset.ticker, asset.name)
+        asset.ticker = corrected_t
+        if corrected_n and not asset.name:
+            asset.name = corrected_n
 
     # 1) 📹 [투자공부 by Youtube DB]에 전체 시황 적재
     print(f"   📥 [1/3] 투자공부 DB 저장 중: '{analyzed.summarized_title_for_notion}'...")
@@ -960,6 +971,9 @@ def main() -> None:
     notion_client = build_notion_client(NOTION_TOKEN)
     ai_service = AIService()
 
+    # 0. 공식 SQLite 마스터 DB 및 온톨로지 사전 색인 프리로딩 (하드코딩 0%)
+    _get_name_lookup_index()
+
     # 1. 상장주식 Master DB 색인 로드
     master_map: Dict[str, str] = {}
     if MASTER_DB_ID:
@@ -1049,12 +1063,14 @@ def main() -> None:
         print(f"✅ 총 {len(active_sources)}개 활성 소스(채널/영상) 수집 시작")
 
         for src in active_sources:
-            src_name = src["name"]
-            src_type = src["type"]
-            src_url = src.get("url", "")
-            src_ch_id = src.get("channel_id", "")
-            src_page_id = src.get("page_id", "")
-            src_max_v = src.get("max_videos", args.max_videos)
+            src_name: str = str(src.get("name") or "")
+            src_type: str = str(src.get("type") or "")
+            src_url: str = str(src.get("url") or "")
+            src_ch_id: str = str(src.get("channel_id") or "")
+            src_page_id: str = str(src.get("page_id") or "")
+            raw_max_v = src.get("max_videos", args.max_videos)
+            src_max_v: int = int(raw_max_v) if isinstance(raw_max_v, (int, str)) and str(raw_max_v).isdigit() and int(raw_max_v) > 0 else (args.max_videos or 5)
+            guide_page_id: Optional[str] = src_page_id if src_page_id else None
 
             # A. 단일 영상 소스
             if src_type == "단일영상" or (src_url and extract_video_id(src_url) and not src_ch_id):
@@ -1067,13 +1083,13 @@ def main() -> None:
                         ai_service=ai_service,
                         master_map=master_map,
                         processed_ids=processed_ids,
-                        guide_page_id=src_page_id,
+                        guide_page_id=guide_page_id,
                         force=args.force
                     )
                     if success:
                         total_new_processed += 1
-                    if src_page_id:
-                        update_guide_last_scanned(notion_client, src_page_id)
+                    if guide_page_id:
+                        update_guide_last_scanned(notion_client, guide_page_id)
                 else:
                     logger.warning(f"⚠️ 단일 영상 정보를 가져올 수 없습니다: {src_url}")
 
@@ -1100,14 +1116,14 @@ def main() -> None:
                             ai_service=ai_service,
                             master_map=master_map,
                             processed_ids=processed_ids,
-                            guide_page_id=src_page_id,
+                            guide_page_id=guide_page_id,
                             force=args.force
                         )
                         if success:
                             total_new_processed += 1
 
-                if src_page_id:
-                    update_guide_last_scanned(notion_client, src_page_id)
+                if guide_page_id:
+                    update_guide_last_scanned(notion_client, guide_page_id)
 
     print("\n" + "=" * 80)
     print(f"🎉 [동기화 완료] 총 {total_new_processed}개의 신규 유튜브 영상 AI 분석 데이터가 노션에 적재되었습니다.")

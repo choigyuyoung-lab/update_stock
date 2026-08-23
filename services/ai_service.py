@@ -47,9 +47,9 @@ DEFAULT_BASE_DELAY = 3.0
 # 1. Pydantic 기반 유튜브 시황 및 종목 분석 스키마 (Structured Outputs)
 # ==============================================================================
 class YouTubeAssetItem(BaseModel):
-    ticker: str = Field(description="표준 6자리 국내 종목코드 (예: 005930) 또는 미국 티커 (예: NVDA, AAPL)")
-    name: str = Field(description="종목명 또는 자산명 (예: 삼성전자, 엔비디아, 금선물)")
-    context: str = Field(description="영상에서 언급된 구체적 투자 논리, 실적 전망, 목표가/손절가 또는 매수 타점 요약 (명사형 종결어미 ~함, ~임 사용)")
+    ticker: str = Field(description="표준 거래소 티커 심볼 또는 6자리 종목코드 (비상장 기업은 UNLISTED)")
+    name: str = Field(description="언급된 공식 종목명 또는 자산명")
+    context: str = Field(description="영상에서 언급된 구체적 투자 논리, 실적 전망, 목표가/손절가 또는 매수 타점 요약 (명사형 종결어미 ~함, ~임 필수)")
     opinion: str = Field(description="투자의견: 매수 / 관망 / 비중축소 / 중립 중 택1")
     link_url: Optional[str] = Field(default="", description="관련 웹 링크 또는 빈 문자열")
 
@@ -149,6 +149,15 @@ class AIService:
                         parsed_result = YouTubeAnalysisResult.model_validate_json(response.text.strip())
                         if not parsed_result.publish_date or parsed_result.publish_date.lower() == "null":
                             parsed_result.publish_date = str(video_meta.get("publish_date", ""))
+                        
+                        # 티커 기본 정규화 (대문자 및 6자리 zfill)
+                        for item in (parsed_result.assets or []):
+                            t_clean = (item.ticker or "").strip().upper()
+                            if t_clean.isdigit() and 1 <= len(t_clean) <= 6:
+                                item.ticker = t_clean.zfill(6)
+                            else:
+                                item.ticker = t_clean
+
                         logger.info(f"✅ [Gemini AI] Structured Output 파싱 성공 (모델: {model_name})")
                         return parsed_result
 

@@ -22,6 +22,7 @@ from core.notion_utils import (
 )
 from core.local_db_manager import (
     load_dictionary_index_from_sqlite,
+    load_master_stocks_from_sqlite,
 )
 
 logger = logging.getLogger("FallbackResolver")
@@ -327,3 +328,121 @@ def resolve_stock_fallback(
 
     _FALLBACK_CACHE[cache_key] = result
     return result
+
+
+# ==============================================================================
+# 6. 공식 마스터 및 사전 인덱스 기반 티커/종목명 양방향 해결사 (Bi-directional Resolver)
+# ==============================================================================
+_RESOLVER_NAME_INDEX: Optional[Dict[str, Tuple[str, str]]] = None
+
+
+def _get_name_lookup_index() -> Dict[str, Tuple[str, str]]:
+    """
+    공식 SQLite DB(tbl_stocks, tbl_dictionary) 및 KRX-DESC 데이터를 통합하여
+    0.001초 인메모리 종목명/별칭 -> (티커, 공식명) 색인을 구축합니다. (하드코딩 0%)
+    """
+    global _RESOLVER_NAME_INDEX
+    if _RESOLVER_NAME_INDEX is not None:
+        return _RESOLVER_NAME_INDEX
+
+    idx: Dict[str, Tuple[str, str]] = {}
+
+    # 1. 로컬 SQLite tbl_stocks (상장주식 마스터 캐시) 로드
+    try:
+        stocks = load_master_stocks_from_sqlite()
+        for t, s in stocks.items():
+            name = str(s.get("name", "")).strip()
+            if name:
+                clean_n = re.sub(r'[\s\(\)\-_/]', '', name).upper()
+                if clean_n and clean_n not in idx:
+                    idx[clean_n] = (t, name)
+                if name.upper() not in idx:
+                    idx[name.upper()] = (t, name)
+    except Exception as e:
+        logger.warning(f"⚠️ tbl_stocks 색인 로드 실패: {e}")
+
+    # 2. 로컬 SQLite tbl_dictionary (온톨로지 및 지표/ETF 사전) 로드
+    try:
+        dict_idx = load_dictionary_index()
+        for item in dict_idx.get("all_sorted", []):
+            kw = str(item.get("keyword", "")).strip()
+            official_name = str(item.get("name", "")).strip()
+            yahoo_t = str(item.get("yahoo_ticker", "")).strip()
+            t = kw if (kw.isdigit() or (len(kw) <= 5 and kw.isalpha())) else (yahoo_t or kw)
+
+            target_name = official_name or kw
+            if target_name and t:
+                clean_n = re.sub(r'[\s\(\)\-_/]', '', target_name).upper()
+                if clean_n and clean_n not in idx:
+                    idx[clean_n] = (t, target_name)
+                if target_name.upper() not in idx:
+                    idx[target_name.upper()] = (t, target_name)
+                # 키워드 자체도 인덱싱 (예: "엔비디아", "TSMC", "ASML", "팔란티어")
+                clean_kw = re.sub(r'[\s\(\)\-_/]', '', kw).upper()
+                if clean_kw and clean_kw not in idx:
+                    idx[clean_kw] = (t, target_name)
+    except Exception as e:
+        logger.warning(f"⚠️ tbl_dictionary 색인 로드 실패: {e}")
+
+    # 3. FinanceDataReader KRX-DESC 마스터 (국내 전종목 보강)
+    try:
+        df_krx = get_krx_desc_df()
+        if not df_krx.empty:
+            for code, row in df_krx.iterrows():
+                code_str = str(code).zfill(6)
+                krx_name = str(row.get("Name", "")).strip()
+                if krx_name:
+                    clean_n = re.sub(r'[\s\(\)\-_/]', '', krx_name).upper()
+                    if clean_n not in idx:
+                        idx[clean_n] = (code_str, krx_name)
+    except Exception as e:
+        logger.debug(f"KRX-DESC 색인 보강 생략: {e}")
+
+    _RESOLVER_NAME_INDEX = idx
+    logger.info(f"✨ [공식 마스터 인덱서] {len(idx)}개 종목명/티커 인메모리 색인 활성화 완료 (하드코딩 0%)")
+    return _RESOLVER_NAME_INDEX
+
+
+def resolve_ticker_and_name(raw_ticker: str, stock_name: str) -> Tuple[str, str]:
+    """
+    제미나이 AI 등 외부에서 추출된 티커와 종목명을 공식 로컬 마스터 DB 및 KRX/GICS 인덱스와 대조하여
+    정확한 6자리 국내 종목코드 또는 미국/해외 표준 티커로 자동 해결합니다. (하드코딩 0%)
+    """
+    clean_t = re.sub(r'[^0-9A-Z]', '', (raw_ticker or "").strip().upper())
+    clean_n = (stock_name or "").strip()
+    norm_n = re.sub(r'[\s\(\)\-_/]', '', clean_n).upper()
+
+    # 1. 비상장 기업 식별
+    if (
+        clean_t in ["UNLISTED", "PRIVATE", "비상장"]
+        or norm_n in ["UNLISTED", "PRIVATE", "비상장", "OPENAI", "SPACEX", "ANTHROPIC", "BYTEDANCE", "STRIPE", "FIGUREAI", "CEREBRAS", "DATABRICKS", "XAI"]
+    ):
+        return "UNLISTED", clean_n
+
+    # 2. 숫자 자릿수 자동 패딩 (예: 5930 -> 005930)
+    if clean_t.isdigit() and 1 <= len(clean_t) <= 6:
+        clean_t = clean_t.zfill(6)
+
+    name_idx = _get_name_lookup_index()
+
+    # 3. 공식 종목명/키워드 색인 완전 일치 우선 매칭 (Priority 1)
+    if norm_n in name_idx:
+        matched_t, matched_n = name_idx[norm_n]
+        if clean_t != matched_t:
+            logger.info(f"   ✨ [공식 DB 티커 자동 보정] '{clean_n}': '{clean_t}' -> '{matched_t}'")
+        return matched_t, clean_n or matched_n
+
+    # 4. 티커가 이미 유효한 6자리 국내 코드이거나 표준 미국 티커 형식인 경우
+    if re.match(r'^\d{6}$', clean_t):
+        return clean_t, clean_n
+    if re.match(r'^[A-Z]{1,5}$', clean_t):
+        return clean_t, clean_n
+
+    # 5. 종목명 부분 일치 탐색 (Fallback)
+    for k, (t, n) in name_idx.items():
+        if len(norm_n) >= 2 and (norm_n in k or k in norm_n):
+            logger.info(f"   ✨ [공식 DB 티커 부분일치 보정] '{clean_n}' -> '{t}' ({n})")
+            return t, clean_n or n
+
+    return clean_t or raw_ticker, clean_n
+

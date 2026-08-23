@@ -298,8 +298,7 @@ def load_dictionary_index_from_sqlite() -> Dict[str, Any]:
         "all_sorted": [],
     }
 
-    if not os.path.exists(DB_PATH):
-        return index_structure
+    init_database()
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -488,8 +487,7 @@ def upsert_stocks_batch(stocks: List[Dict[str, Any]]) -> int:
 def load_master_stocks_from_sqlite() -> Dict[str, Dict[str, Any]]:
     """SQLite DB에서 전체 상장주식 마스터 캐시를 딕셔너리로 즉시 로드합니다 (0.001s)."""
     ensure_data_dir()
-    if not os.path.exists(DB_PATH):
-        return {}
+    init_database()
     res: Dict[str, Dict[str, Any]] = {}
     with get_db_connection() as conn:
         cursor = conn.cursor()
