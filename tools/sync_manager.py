@@ -11,6 +11,7 @@ sync_manager.py
 import os
 import sys
 import json
+import re
 import socket
 import datetime
 import subprocess
@@ -226,10 +227,27 @@ def mode_start() -> None:
         if not os.path.exists(os.path.join(repo["path"], ".env")):
             print(f"  {RED}⚠️ [경고] .env 파일이 없습니다! API 키/토큰을 확인해주세요.{RESET}")
 
-        # 직전 작업/커밋 요약 출력
+    # 2. 직전 작업 이력 요약 브리핑
+    for repo in repos:
         show_recent_work_summary(repo["path"], repo["name"].split(" ")[0])
 
-    # 2. 주간/월간 전략 고도화 질문 팝업
+    # 3. AI 테크 레이더 최신 제안 브리핑
+    radar_report_path = os.path.join(WORKSPACE_ROOT, "k_all_round_portfolio", "reports", "tech_radar_latest.md")
+    if os.path.exists(radar_report_path):
+        try:
+            with open(radar_report_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            tool_matches = re.findall(r'-\s+\*\*([^*]+)\*\*\s*\(([^)]+)\):\s*([^\n]+)', content)
+            if tool_matches:
+                print(f"\n{CYAN}{BOLD}📡 [AI 테크 레이더 최신 추천 제안 브리핑]{RESET}")
+                for name, domain_link, summary in tool_matches[:3]:
+                    clean_summary = summary.split(".")[0] if "." in summary else summary[:60]
+                    print(f"  💡 {BOLD}{name}{RESET} ({domain_link.split('/')[0].strip()}): {GRAY}{clean_summary}{RESET}")
+                print(f"  👉 {YELLOW}원클릭 패치 실행: 4_테크레이더_패치적용.bat (또는 python -m tools.tool_apply_tech_radar_patch){RESET}")
+        except Exception as e:
+            print(f"  ⚠️ 테크 레이더 브리핑 읽기 오류: {e}")
+
+    # 4. 주기별 전략 고도화 & 코드 수정 영감 체크리스트
     check_periodic_strategy_questions(state)
 
     # 상태 업데이트
