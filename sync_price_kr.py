@@ -199,6 +199,17 @@ def main() -> None:
         print("❌ KIS 인증 컨텍스트 생성 실패. 프로세스를 중단합니다.")
         return
 
+    # 0. 상장주식 Master DB 색인 로드 (관계형 자동 복구용)
+    master_map: Dict[str, str] = {}
+    try:
+        from core.local_db_manager import get_db_connection
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT ticker, notion_page_id FROM tbl_stocks WHERE notion_page_id != '';")
+            master_map = {r['ticker'].strip().upper(): r['notion_page_id'] for r in cursor.fetchall()}
+    except Exception:
+        pass
+
     # 1. 노션 대상 페이지 전체 스캔
     all_pages = []
     print("📋 노션 대상 페이지 로드 중...")
@@ -235,7 +246,7 @@ def main() -> None:
             if sp:
                 price_map[mt] = sp
 
-    # 5. 더티 체크 및 노션 업데이트 페이로드 생성
+    # 5. 더티 체크 및 노션 업데이트 페이로드 생성 (시세 + 상장주식DB 관계형 셀프힐링)
     update_payloads: List[Tuple[str, Dict[str, Any], str, str]] = []
     for p, clean_t in kr_pages:
         props = p.get("properties", {})
@@ -244,11 +255,16 @@ def main() -> None:
         if not p_data:
             continue
 
+        rel_candidates = {}
+        if clean_t in master_map and "상장주식DB" in props:
+            rel_candidates["상장주식DB"] = master_map[clean_t]
+
         dirty_props = build_dirty_payload(
             existing_props=props,
             candidate_data=p_data,
             num_fields=["현재가", "전일 종가"],
             select_fields=[],
+            relation_fields=rel_candidates,
         )
         if dirty_props:
             update_payloads.append((p["id"], dirty_props, clean_t, name))

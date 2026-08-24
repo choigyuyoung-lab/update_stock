@@ -64,6 +64,16 @@ DATABASE_ID = (
     or os.environ.get("MASTER_DB_ID")
     or get_env_var("DATABASE_ID")
 )
+BENCHMARK_DATABASE_ID = (
+    os.environ.get("BENCHMARK_DATABASE_ID")
+    or os.environ.get("BENCHMARK_DB_ID")
+    or ""
+)
+MASTER_DATABASE_ID = (
+    os.environ.get("MASTER_DATABASE_ID")
+    or os.environ.get("MASTER_DB_ID")
+    or ""
+)
 
 SESSION = get_http_session()
 
@@ -98,55 +108,76 @@ def probe_kis_overseas_api(kis_ctx: Optional[Dict[str, Any]]) -> bool:
             url=f"{kis_ctx['url_base']}/uapi/overseas-price/v1/quotations/price",
             headers=headers,
             params=params,
-            timeout=3
+            timeout=3.0
         )
-        return res.status_code == 200
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("rt_cd") == "0":
+                return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def fetch_yfinance_batch(tickers: List[str]) -> Dict[str, Dict[str, Optional[float]]]:
-    """Yahoo Finance 일괄 다운로드(yf.download)로 모든 해외 티커의 현재가와 전일종가를 1~2초 만에 수집합니다."""
-    if not tickers:
-        return {}
-
+    """Yahoo Finance 일괄 다운로더를 통해 여러 종목의 시세를 1~2초 만에 일괄 수집합니다."""
     results: Dict[str, Dict[str, Optional[float]]] = {}
-    clean_tickers = [t.strip().upper() for t in tickers if t.strip()]
+    if not tickers:
+        return results
+
+    ticker_map = {t.replace(".", "-"): t for t in tickers}
+    yf_symbols = list(ticker_map.keys())
 
     try:
-        df = yf.download(clean_tickers, period="5d", progress=False, group_by="ticker", threads=True)
-        if df is not None and not df.empty:
-            for t in clean_tickers:
+        df = yf.download(
+            tickers=" ".join(yf_symbols),
+            period="5d",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=False,
+            progress=False,
+            threads=True
+        )
+
+        if df.empty:
+            return results
+
+        if len(yf_symbols) == 1:
+            sym = yf_symbols[0]
+            orig_t = ticker_map[sym]
+            c_series = df.get("Close")
+            if c_series is not None and not c_series.dropna().empty:
+                valid_closes = c_series.dropna()
+                cur_p = float(valid_closes.iloc[-1])
+                prev_p = float(valid_closes.iloc[-2]) if len(valid_closes) > 1 else cur_p
+                results[orig_t] = {"현재가": round(cur_p, 4), "전일 종가": round(prev_p, 4)}
+        else:
+            for sym, orig_t in ticker_map.items():
                 try:
-                    sub_df = df[t] if len(clean_tickers) > 1 and t in df.columns.levels[0] else df
-                    close_series = sub_df["Close"].dropna() if "Close" in sub_df else None
-                    if close_series is not None and not close_series.empty:
-                        curr_p = float(close_series.iloc[-1])
-                        prev_c = float(close_series.iloc[-2]) if len(close_series) >= 2 else curr_p
-                        if curr_p > 0:
-                            results[t] = {
-                                "현재가": curr_p,
-                                "전일 종가": prev_c if prev_c > 0 else curr_p
-                            }
+                    if sym in df.columns.levels[0]:
+                        sub_df = df[sym]
+                        c_series = sub_df.get("Close")
+                        if c_series is not None and not c_series.dropna().empty:
+                            valid_closes = c_series.dropna()
+                            cur_p = float(valid_closes.iloc[-1])
+                            prev_p = float(valid_closes.iloc[-2]) if len(valid_closes) > 1 else cur_p
+                            results[orig_t] = {"현재가": round(cur_p, 4), "전일 종가": round(prev_p, 4)}
                 except Exception:
                     pass
     except Exception as exc:
-        logger.warning(f"⚠️ YFinance 일괄 다운로드 중 예외 발생 (개별 폴백 진행): {exc}")
+        logger.warning(f"⚠️ yfinance 일괄 다운로드 실패: {exc}")
 
-    # 누락된 티커에 대해 개별 fast_info 보완
-    missing = [t for t in clean_tickers if t not in results]
+    # 누락 종목 개별 조회 폴백
+    missing = [t for t in tickers if t not in results]
     if missing:
-        for t in missing:
+        logger.info(f"   ℹ️ 누락 {len(missing)}개 종목 개별 폴백 조회 중...")
+        for mt in missing:
             try:
-                stock = yf.Ticker(t, session=SESSION)
-                fast = stock.fast_info
-                curr = getattr(fast, "last_price", None)
-                prev = getattr(fast, "previous_close", None)
-                if is_valid_num(curr):
-                    results[t] = {
-                        "현재가": float(curr),
-                        "전일 종가": float(prev) if is_valid_num(prev) else float(curr)
-                    }
+                hist = yf.Ticker(mt.replace(".", "-")).history(period="5d")
+                if not hist.empty and len(hist) >= 1:
+                    cur_p = float(hist["Close"].iloc[-1])
+                    prev_p = float(hist["Close"].iloc[-2]) if len(hist) > 1 else cur_p
+                    results[mt] = {"현재가": round(cur_p, 4), "전일 종가": round(prev_p, 4)}
             except Exception:
                 pass
 
@@ -166,14 +197,35 @@ def main() -> None:
     client = build_notion_client(NOTION_TOKEN, use_httpx=True, timeout=60.0)
     ensure_database_properties(client, DATABASE_ID, PRICE_US_SCHEMA, logger=logger)
 
-    # 1. 노션 대상 페이지 스캔
+    # 1. 벤치마크/환율 및 상장주식 Master 색인 로드 (관계형 자동 복구용)
+    fx_map: Dict[str, str] = {}
+    if BENCHMARK_DATABASE_ID:
+        try:
+            for p in paginate_database(client, BENCHMARK_DATABASE_ID, page_size=100, retry_delay=0.1):
+                t_str = get_page_text(p.get("properties", {}), ["티커", "Ticker", "이름"]).upper()
+                if t_str in ("USDKRW", "JPYKRW", "EURKRW"):
+                    fx_map[t_str] = p["id"]
+        except Exception:
+            pass
+
+    master_map: Dict[str, str] = {}
+    try:
+        from core.local_db_manager import get_db_connection
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT ticker, notion_page_id FROM tbl_stocks WHERE notion_page_id != '';")
+            master_map = {r['ticker'].strip().upper(): r['notion_page_id'] for r in cursor.fetchall()}
+    except Exception:
+        pass
+
+    # 2. 노션 대상 페이지 스캔
     all_pages = []
     logger.info("📋 노션 대상 페이지 로드 중...")
     for p in paginate_database(client, DATABASE_ID, page_size=100, retry_delay=0.1):
         all_pages.append(p)
     logger.info(f"   ✅ 총 {len(all_pages)}개 페이지 확인 완료")
 
-    # 2. 해외 주식 대상 페이지 및 티커 추출
+    # 3. 해외 주식 대상 페이지 및 티커 추출
     us_pages = []
     us_tickers = []
     for p in all_pages:
@@ -186,12 +238,12 @@ def main() -> None:
     unique_tickers = list(dict.fromkeys(us_tickers))
     logger.info(f"📊 해외 대상 종목: 총 {len(unique_tickers)}개 (고유 티커 기준)")
 
-    # 3. 초고속 일괄 시세 수집 (1~2초)
+    # 4. 초고속 일괄 시세 수집 (1~2초)
     logger.info("⚡ 해외 주식 일괄 시세 파이프라인 수집 시작...")
     price_map = fetch_yfinance_batch(unique_tickers)
     logger.info(f"   ✅ 해외 시세 수집 완료: {len(price_map)}/{len(unique_tickers)}개 종목 확보")
 
-    # 4. 더티 체크 및 업데이트 페이로드 생성
+    # 5. 더티 체크 및 업데이트 페이로드 생성 (시세 + 관계형 셀프힐링)
     update_payloads: List[Tuple[str, Dict[str, Any], str, str]] = []
     for p, ticker in us_pages:
         props = p.get("properties", {})
@@ -200,11 +252,22 @@ def main() -> None:
         if not p_data:
             continue
 
+        # 관계형 자동 복구(Self-Healing) 대상 구성
+        market_val = (props.get("Market", {}).get("select", {}).get("name") or "").upper()
+        target_fx_id = fx_map.get("JPYKRW") if (market_val == "TSE" or ticker.endswith(".T")) else fx_map.get("USDKRW")
+
+        rel_candidates = {}
+        if target_fx_id and "환율전환" in props:
+            rel_candidates["환율전환"] = target_fx_id
+        if ticker in master_map and "상장주식DB" in props:
+            rel_candidates["상장주식DB"] = master_map[ticker]
+
         dirty_props = build_dirty_payload(
             existing_props=props,
             candidate_data=p_data,
             num_fields=["현재가", "전일 종가"],
             select_fields=[],
+            relation_fields=rel_candidates,
         )
         if dirty_props:
             update_payloads.append((p["id"], dirty_props, ticker, name))

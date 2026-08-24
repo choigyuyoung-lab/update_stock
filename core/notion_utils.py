@@ -791,6 +791,7 @@ def build_dirty_payload(
     candidate_data: Dict[str, Any],
     num_fields: Optional[List[str]] = None,
     select_fields: Optional[List[str]] = None,
+    relation_fields: Optional[Dict[str, Optional[str]]] = None,
     date_candidate_names: Optional[List[str]] = None,
     diagnostic_color_fn: Optional[Any] = None,
     iso_date_str: Optional[str] = None,
@@ -849,11 +850,22 @@ def build_dirty_payload(
                 dirty_props[field] = {"select": {"name": str(new_val)}}
             has_meaningful_change = True
 
-    # 3. 실질 데이터 변경이 없을 경우 API 호출 차단 (Skip)
+    # 3. 관계형(Relation) 지표 검사 및 누락/변경 감지
+    if relation_fields:
+        for field, target_id in relation_fields.items():
+            if field not in existing_props or not target_id:
+                continue
+            cur_rels = existing_props[field].get("relation", [])
+            cur_ids = [r.get("id") for r in cur_rels if isinstance(r, dict) and r.get("id")]
+            if target_id not in cur_ids:
+                dirty_props[field] = {"relation": [{"id": target_id}]}
+                has_meaningful_change = True
+
+    # 4. 실질 데이터 변경이 없을 경우 API 호출 차단 (Skip)
     if not has_meaningful_change:
         return None
 
-    # 4. 실질 데이터 변경이 확인된 경우에만 날짜 속성 주입
+    # 5. 실질 데이터 변경이 확인된 경우에만 날짜 속성 주입
     set_page_date_property(
         dirty_props,
         existing_props,
