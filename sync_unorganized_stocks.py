@@ -50,7 +50,6 @@ MASTER_EXT_SCHEMA: Dict[str, Dict[str, Any]] = {
 
 INVESTMENT_SCHEMA: Dict[str, Dict[str, Any]] = {
     "업데이트 일자": {"date": {}},
-    "Market": {"select": {}},
     "국가": {"select": {}},
     "투자여부": {"multi_select": {}},
 }
@@ -257,13 +256,12 @@ def process_unorganized_page(
 
                 new_inv_props: Dict[str, Any] = {
                     "티커": {"title": [{"text": {"content": clean_ticker}}]},
-                    "종목명": {"rich_text": [{"text": {"content": m_name}}]},
-                    "Market": {"select": {"name": m_market}},
-                    "국가": {"select": {"name": m_country}},
-                    "상장주식DB": {"relation": [{"id": m_page_id}]},
+                    "상장주식DB 전체": {"relation": [{"id": m_page_id}]},
                     "투자여부": {"multi_select": [{"name": "관심"}]},
                     "업데이트 일자": {"date": {"start": kst_isoformat()}}
                 }
+                if m_country:
+                    new_inv_props["국가"] = {"select": {"name": m_country}}
 
                 # 환율전환 Relation 자동 바인딩 (해외 종목)
                 if m_market in ("NASDAQ", "NYSE", "AMEX", "ETF(US)") or m_country == "미국" or not is_kr_ticker(clean_ticker):
@@ -452,6 +450,14 @@ def main() -> None:
     print("\n🚀 미정리 종목 처리 및 매칭 시작...")
     unorganized_pages = get_all_pages(UNORGANIZED_DB_ID)
     print(f"   📋 총 {len(unorganized_pages)}개의 미정리 항목 처리 중...")
+
+    # 미정리 DB 내 환율 페이지 색인 (USDKRW, JPYKRW 등)
+    for p in unorganized_pages:
+        t = normalize(get_prop(p["properties"], "티커"))
+        if t in ("USDKRW", "JPYKRW", "EURKRW", "TWDKRW", "ILSKRW", "CNYKRW"):
+            fx_map[t] = p["id"]
+    if fx_map:
+        print(f"   ✅ 환율 전환 매핑 활성화: {list(fx_map.keys())}")
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         for p in unorganized_pages:
