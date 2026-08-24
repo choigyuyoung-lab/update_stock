@@ -9,6 +9,7 @@ finance-datareader>=0.9.90
 # 3. 데이터 분석 및 웹 통신 패키지
 pandas
 numpy
+exchange-calendars>=4.5.0
 requests
 beautifulsoup4
 lxml

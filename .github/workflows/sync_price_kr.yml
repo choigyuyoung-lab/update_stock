@@ -47,4 +47,4 @@ jobs:
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_PROD_APP_SECRET }}
-        run: python sync_price_kr.py
+        run: python -m jobs.price.job_sync_price_kr

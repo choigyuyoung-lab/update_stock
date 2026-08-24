@@ -19,7 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 # Windows 콘솔 UTF-8 출력 안전화
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stdout, "reconfigure"):
+            getattr(sys.stdout, "reconfigure")(encoding="utf-8")
     except Exception:
         pass
 
@@ -31,7 +32,8 @@ GRAY = "\033[90m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(TOOLS_DIR) if os.path.basename(TOOLS_DIR) == "tools" else TOOLS_DIR
 WORKSPACE_ROOT = os.path.dirname(PROJECT_ROOT) if os.path.basename(PROJECT_ROOT) in ["update_stock", "k_all_round_portfolio"] else PROJECT_ROOT
 STATE_FILE = os.path.join(WORKSPACE_ROOT, "update_stock", "data", ".sync_state.json")
 
@@ -161,7 +163,7 @@ def check_periodic_strategy_questions(state: Dict[str, Any]) -> None:
     if show_weekly:
         print(f"\n{CYAN}{BOLD}📅 [주간 전략 점검 (Weekly Checklist)]{RESET}")
         print(f"  🎬 1) {BOLD}[유튜브 인사이트]{RESET} 최근 새로 구독하거나 시황을 추적하고 싶은 신규 유튜브 채널 RSS가 있나요?")
-        print(f"     ➔ {GRAY}실행 방법: python sync_youtube_insights.py -c @채널핸들 / -v 영상링크 / -i (대화형){RESET}")
+        print(f"     ➔ {GRAY}수정 위치: update_stock/sync_youtube_insights.py (YOUTUBE_CHANNELS 목록){RESET}")
         print(f"  🤖 2) {BOLD}[AI 리포트 포맷]{RESET} Gemini AI 리포트의 진단 톤이나 주간 100만원 추천 배분표 서식을 개선할 아이디어가 있나요?")
         print(f"     ➔ {GRAY}수정 위치: k_all_round_portfolio/prompts/system_portfolio_quant.en.md{RESET}")
         state["last_weekly_check"] = today_str

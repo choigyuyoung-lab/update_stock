@@ -36,4 +36,4 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python sync_finance_us.py
+        run: python -m jobs.finance.job_sync_finance_us

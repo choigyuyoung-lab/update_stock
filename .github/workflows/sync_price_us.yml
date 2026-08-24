@@ -36,4 +36,4 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-        run: python sync_price_us.py
+        run: python -m jobs.price.job_sync_price_us

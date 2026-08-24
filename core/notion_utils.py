@@ -14,6 +14,7 @@ import json
 import re
 import math
 import time
+from functools import lru_cache
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
@@ -23,6 +24,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field, field_validator
 
 from notion_client import Client
 from notion_client.errors import HTTPResponseError
@@ -93,226 +95,76 @@ def kst_isoformat() -> str:
 
 
 # ==============================================================================
-# 2-1. 한국(KRX) & 미국(NYSE) 정밀 휴장일/공휴일 판별 엔진
+# 2-1. 한국(KRX) & 미국(NYSE) 정밀 휴장일/공휴일 판별 엔진 (exchange_calendars 기반)
 # ==============================================================================
-def get_easter_date(year: int) -> date:
-    """Meeus/Jones/Butcher 알고리즘으로 양력 부활절(Easter Sunday) 일자를 산출합니다."""
-    a = year % 19
-    b = year // 100
-    c = year % 100
-    d = b // 4
-    e = b % 4
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i = c // 4
-    k = c % 4
-    l = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * l) // 451
-    month = (h + l - 7 * m + 114) // 31
-    day = ((h + l - 7 * m + 114) % 31) + 1
-    return date(year, month, day)
-
-
-def _get_nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
-    """지정된 월의 n번째 특정 요일(0:월 ~ 6:일) 일자를 반환합니다."""
-    first_day = date(year, month, 1)
-    first_weekday = first_day.weekday()
-    offset = (weekday - first_weekday) % 7
-    return first_day + timedelta(days=offset + (n - 1) * 7)
-
-
-def _get_last_weekday_of_month(year: int, month: int, weekday: int) -> date:
-    """지정된 월의 마지막 특정 요일 일자를 반환합니다."""
-    if month == 12:
-        next_month_first = date(year + 1, 1, 1)
-    else:
-        next_month_first = date(year, month + 1, 1)
-    last_day = next_month_first - timedelta(days=1)
-    offset = (last_day.weekday() - weekday) % 7
-    return last_day - timedelta(days=offset)
-
-
-def get_us_market_holidays(year: int) -> Dict[date, str]:
-    """미국 증권시장(NYSE/NASDAQ) 공식 휴장일 맵을 반환합니다."""
-    holidays: Dict[date, str] = {}
-    
-    # 1. New Year's Day (1월 1일)
-    nyd = date(year, 1, 1)
-    if nyd.weekday() == 5:
-        holidays[date(year - 1, 12, 31)] = "New Year's Day (Observed)"
-    elif nyd.weekday() == 6:
-        holidays[date(year, 1, 2)] = "New Year's Day (Observed)"
-    else:
-        holidays[nyd] = "New Year's Day"
-        
-    # 2. Martin Luther King Jr. Day (1월 세 번째 월요일)
-    holidays[_get_nth_weekday_of_month(year, 1, 0, 3)] = "Martin Luther King Jr. Day"
-    
-    # 3. Washington's Birthday / Presidents' Day (2월 세 번째 월요일)
-    holidays[_get_nth_weekday_of_month(year, 2, 0, 3)] = "Presidents' Day"
-    
-    # 4. Good Friday (부활절 직전 금요일)
-    easter = get_easter_date(year)
-    holidays[easter - timedelta(days=2)] = "Good Friday"
-    
-    # 5. Memorial Day (5월 마지막 월요일)
-    holidays[_get_last_weekday_of_month(year, 5, 0)] = "Memorial Day"
-    
-    # 6. Juneteenth National Independence Day (6월 19일)
-    june19 = date(year, 6, 19)
-    if june19.weekday() == 5:
-        holidays[date(year, 6, 18)] = "Juneteenth (Observed)"
-    elif june19.weekday() == 6:
-        holidays[date(year, 6, 20)] = "Juneteenth (Observed)"
-    else:
-        holidays[june19] = "Juneteenth"
-        
-    # 7. Independence Day (7월 4일)
-    july4 = date(year, 7, 4)
-    if july4.weekday() == 5:
-        holidays[date(year, 7, 3)] = "Independence Day (Observed)"
-    elif july4.weekday() == 6:
-        holidays[date(year, 7, 5)] = "Independence Day (Observed)"
-    else:
-        holidays[july4] = "Independence Day"
-        
-    # 8. Labor Day (9월 첫 번째 월요일)
-    holidays[_get_nth_weekday_of_month(year, 9, 0, 1)] = "Labor Day"
-    
-    # 9. Thanksgiving Day (11월 네 번째 목요일)
-    holidays[_get_nth_weekday_of_month(year, 11, 3, 4)] = "Thanksgiving Day"
-    
-    # 10. Christmas Day (12월 25일)
-    xmas = date(year, 12, 25)
-    if xmas.weekday() == 5:
-        holidays[date(year, 12, 24)] = "Christmas Day (Observed)"
-    elif xmas.weekday() == 6:
-        holidays[date(year, 12, 26)] = "Christmas Day (Observed)"
-    else:
-        holidays[xmas] = "Christmas Day"
-        
-    return holidays
-
-
-# 한국 음력 공휴일 및 주요 선거일 사전 정의 테이블 (2024~2030)
-KR_LUNAR_AND_SPECIAL_HOLIDAYS: Dict[int, Dict[date, str]] = {
-    2024: {
-        date(2024, 2, 9): "설날 연휴", date(2024, 2, 10): "설날", date(2024, 2, 11): "설날 연휴", date(2024, 2, 12): "설날 대체공휴일",
-        date(2024, 4, 10): "제22대 국회의원 선거",
-        date(2024, 5, 15): "부처님오신날",
-        date(2024, 9, 16): "추석 연휴", date(2024, 9, 17): "추석", date(2024, 9, 18): "추석 연휴",
-    },
-    2025: {
-        date(2025, 1, 28): "설날 연휴", date(2025, 1, 29): "설날", date(2025, 1, 30): "설날 연휴",
-        date(2025, 5, 5): "어린이날/부처님오신날", date(2025, 5, 6): "대체공휴일",
-        date(2025, 10, 5): "추석 연휴", date(2025, 10, 6): "추석", date(2025, 10, 7): "추석 연휴", date(2025, 10, 8): "대체공휴일",
-    },
-    2026: {
-        date(2026, 2, 16): "설날 연휴", date(2026, 2, 17): "설날", date(2026, 2, 18): "설날 연휴",
-        date(2026, 5, 24): "부처님오신날", date(2026, 5, 25): "부처님오신날 대체공휴일",
-        date(2026, 6, 3): "제9회 전국동시지방선거",
-        date(2026, 9, 24): "추석 연휴", date(2026, 9, 25): "추석", date(2026, 9, 26): "추석 연휴",
-    },
-    2027: {
-        date(2027, 2, 6): "설날 연휴", date(2027, 2, 7): "설날", date(2027, 2, 8): "설날 연휴", date(2027, 2, 9): "설날 대체공휴일",
-        date(2027, 3, 3): "제21대 대통령 선거",
-        date(2027, 5, 13): "부처님오신날",
-        date(2027, 9, 14): "추석 연휴", date(2027, 9, 15): "추석", date(2027, 9, 16): "추석 연휴",
-    },
-    2028: {
-        date(2028, 1, 26): "설날 연휴", date(2028, 1, 27): "설날", date(2028, 1, 28): "설날 연휴",
-        date(2028, 5, 2): "부처님오신날",
-        date(2028, 10, 2): "추석 연휴", date(2028, 10, 3): "추석/개천절", date(2028, 10, 4): "추석 연휴", date(2028, 10, 5): "대체공휴일",
-    },
-    2029: {
-        date(2029, 2, 12): "설날 연휴", date(2029, 2, 13): "설날", date(2029, 2, 14): "설날 연휴", date(2029, 2, 15): "설날 대체공휴일",
-        date(2029, 5, 20): "부처님오신날", date(2029, 5, 21): "대체공휴일",
-        date(2029, 9, 21): "추석 연휴", date(2029, 9, 22): "추석", date(2029, 9, 23): "추석 연휴", date(2029, 9, 24): "대체공휴일",
-    },
-    2030: {
-        date(2030, 2, 2): "설날 연휴", date(2030, 2, 3): "설날", date(2030, 2, 4): "설날 연휴",
-        date(2030, 5, 9): "부처님오신날",
-        date(2030, 9, 11): "추석 연휴", date(2030, 9, 12): "추석", date(2030, 9, 13): "추석 연휴",
-    },
-}
+@lru_cache(maxsize=4)
+def _get_market_calendar(market: str):
+    """
+    한국(XKRX) 및 미국(XNYS) 거래소 캘린더 인스턴스를 캐싱하여 반환합니다.
+    """
+    import exchange_calendars as xcals
+    iso_code = "XKRX" if market.upper() == "KR" else "XNYS"
+    return xcals.get_calendar(iso_code)
 
 
 def get_kr_market_holidays(year: int) -> Dict[date, str]:
-    """한국 증권시장(KRX) 공식 공휴일 및 휴장일(근로자의 날, 연말 폐장일 포함) 맵을 반환합니다."""
-    holidays: Dict[date, str] = {}
-    
-    # 1. 고정 양력 공휴일
-    fixed_holidays = [
-        (1, 1, "신정"),
-        (3, 1, "3·1절"),
-        (5, 1, "근로자의 날 (KRX 휴장)"),
-        (5, 5, "어린이날"),
-        (6, 6, "현충일"),
-        (8, 15, "광복절"),
-        (10, 3, "개천절"),
-        (10, 9, "한글날"),
-        (12, 25, "성탄절"),
-    ]
-    
-    substitute_targets = {"3·1절", "어린이날", "광복절", "개천절", "한글날", "성탄절"}
-    
-    for m, d, name in fixed_holidays:
-        dt = date(year, m, d)
-        holidays[dt] = name
-        if name in substitute_targets:
-            if dt.weekday() == 5:  # 토요일
-                holidays[dt + timedelta(days=2)] = f"{name} 대체공휴일"
-            elif dt.weekday() == 6:  # 일요일
-                holidays[dt + timedelta(days=1)] = f"{name} 대체공휴일"
+    """한국 증권시장(KRX) 연간 공식 휴장일 맵을 반환합니다."""
+    try:
+        cal = _get_market_calendar("KR")
+        start_dt = f"{year}-01-01"
+        end_dt = f"{year}-12-31"
+        holidays_dt = cal.regular_holidays.holidays(start=start_dt, end=end_dt)
+        return {ts.date(): "KRX 공식 공휴일/휴장일" for ts in holidays_dt}
+    except Exception:
+        return {}
 
-    # 2. 음력 및 선거일 등 특별 공휴일 병합
-    if year in KR_LUNAR_AND_SPECIAL_HOLIDAYS:
-        holidays.update(KR_LUNAR_AND_SPECIAL_HOLIDAYS[year])
 
-    # 3. KRX 연말 폐장일 (12월 마지막 영업일 직전일 결제 폐장)
-    dec31 = date(year, 12, 31)
-    if dec31.weekday() == 5:
-        holidays[date(year, 12, 30)] = "연말 결제 폐장일"
-    elif dec31.weekday() == 6:
-        holidays[date(year, 12, 29)] = "연말 결제 폐장일"
-    else:
-        holidays[dec31] = "연말 결제 폐장일"
-
-    return holidays
+def get_us_market_holidays(year: int) -> Dict[date, str]:
+    """미국 증권시장(NYSE/NASDAQ) 연간 공식 휴장일 맵을 반환합니다."""
+    try:
+        cal = _get_market_calendar("US")
+        start_dt = f"{year}-01-01"
+        end_dt = f"{year}-12-31"
+        holidays_dt = cal.regular_holidays.holidays(start=start_dt, end=end_dt)
+        return {ts.date(): "미국 증시 공식 휴장일" for ts in holidays_dt}
+    except Exception:
+        return {}
 
 
 def is_market_holiday(market: str = "KR", dt: Optional[datetime] = None) -> Tuple[bool, str]:
     """
-    지정된 시장('KR' 또는 'US')의 특정 일시(기본값: 현지 시각 기준 오늘)가 휴장일인지 판별합니다.
+    지정된 시장('KR' 또는 'US')의 특정 일시(기본값: 현지 시각 기준 오늘)가 휴장일인지 정밀 판별합니다.
+    - KR: Asia/Seoul 현지 기준
+    - US: America/New_York 현지 기준 (한국 시간 토요일 아침 미국 금요일 종가 수집 누락 방지)
     Returns: (is_closed, reason)
     """
     m = market.upper()
-    if m == "KR":
-        now_dt = dt or datetime.now(ZoneInfo("Asia/Seoul"))
-        d = now_dt.date()
-        if d.weekday() == 5:
-            return True, "토요일 (주말 휴장)"
-        if d.weekday() == 6:
-            return True, "일요일 (주말 휴장)"
-        hols = get_kr_market_holidays(d.year)
-        if d in hols:
-            return True, f"공휴일/휴장일 ({hols[d]})"
-        return False, "정규 영업일"
-        
-    elif m == "US":
-        now_dt = dt or datetime.now(ZoneInfo("America/New_York"))
-        d = now_dt.date()
-        if d.weekday() == 5:
-            return True, "토요일 (미국 주말 휴장)"
-        if d.weekday() == 6:
-            return True, "일요일 (미국 주말 휴장)"
-        hols = get_us_market_holidays(d.year)
-        if d in hols:
-            return True, f"미국 공휴일/휴장일 ({hols[d]})"
-        return False, "미국 정규 영업일"
-        
-    return False, "알 수 없는 시장"
+    tz = ZoneInfo("Asia/Seoul" if m == "KR" else "America/New_York")
+
+    if dt is not None:
+        local_dt = dt if dt.tzinfo else dt.replace(tzinfo=tz)
+        local_dt = local_dt.astimezone(tz)
+    else:
+        local_dt = datetime.now(tz)
+
+    local_date_str = local_dt.strftime("%Y-%m-%d")
+    weekday = local_dt.weekday()
+
+    # 1. 주말 판별
+    if weekday == 5:
+        return True, f"토요일 ({'주말 휴장' if m == 'KR' else '미국 주말 휴장'})"
+    if weekday == 6:
+        return True, f"일요일 ({'주말 휴장' if m == 'KR' else '미국 주말 휴장'})"
+
+    # 2. 거래소 정규 세션(개장일) 확인 (exchange_calendars)
+    try:
+        cal = _get_market_calendar(m)
+        if cal.is_session(local_date_str):
+            return False, "정규 영업일" if m == "KR" else "미국 정규 영업일"
+        return True, f"{'KRX' if m == 'KR' else '미국'} 증시 공식 공휴일/휴장일"
+    except Exception as exc:
+        # 비상시 폴백
+        return False, f"정규 영업일 (캘린더 조회 예외: {exc})"
 
 
 def get_db_id(
@@ -786,6 +638,114 @@ def is_value_different(old_val: Any, new_val: Any, tolerance: float = 1e-4) -> b
     return str(old_val).strip() != str(new_val).strip()
 
 
+def get_diagnostic_color(text: str) -> str:
+    """기호에 따른 노션 텍스트 컬러 반환 (▲: red, ━: green, ▼: blue, 기타: default)"""
+    if not text:
+        return "default"
+    if "▲" in text:
+        return "red"
+    elif "━" in text:
+        return "green"
+    elif "▼" in text:
+        return "blue"
+    return "default"
+
+
+class StockFinancialMetrics(BaseModel):
+    """
+    국내 및 해외 주식 재무비율 및 5대 퀀트 지표를 위한 단일 표준 데이터 모델 (Pydantic v2).
+    - NaN, Inf, 빈 문자열, 비정상 결측치를 자동으로 None으로 정제(Sanitize)합니다.
+    - 배당수익률(0~100% 또는 0.0~1.0)을 노션/SQLite 표준 소수점 비율로 자동 정규화합니다.
+    """
+    ticker: str
+    current_price: Optional[float] = Field(None, description="현재가")
+    per: Optional[float] = Field(None, description="PER")
+    forward_per: Optional[float] = Field(None, description="추정PER")
+    pbr: Optional[float] = Field(None, description="PBR")
+    eps: Optional[float] = Field(None, description="EPS")
+    forward_eps: Optional[float] = Field(None, description="추정EPS")
+    bps: Optional[float] = Field(None, description="BPS")
+    dividend_yield: Optional[float] = Field(None, description="배당수익률")
+    industry_per: Optional[float] = Field(None, description="업종PER")
+    high_52w: Optional[float] = Field(None, description="52주 최고가")
+    low_52w: Optional[float] = Field(None, description="52주 최저가")
+    target_price: Optional[float] = Field(None, description="목표주가")
+    opinion: Optional[str] = Field(None, description="투자의견")
+
+    # 5대 퀀트 및 스윙 지표
+    swing_high: Optional[float] = Field(None, description="직전고점")
+    swing_low: Optional[float] = Field(None, description="직전저점")
+    ma200: Optional[float] = Field(None, description="200일선")
+    ma_supply: Optional[float] = Field(None, description="수급선(50/60일선)")
+    ma50: Optional[float] = Field(None, description="50일선")
+    ma60: Optional[float] = Field(None, description="60일선")
+    trend: Optional[str] = Field(None, description="추세")
+    smart_guide: Optional[str] = Field(None, description="스마트 가이드")
+    mom_diag: Optional[str] = Field(None, description="모멘텀 진단")
+    risk_grade: Optional[str] = Field(None, description="위험도 등급")
+    mom_12m: Optional[float] = Field(None, description="12M 모멘텀")
+    drawdown_52w: Optional[float] = Field(None, description="52주 낙폭")
+    vol_60d: Optional[float] = Field(None, description="60일 변동성")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def sanitize_values(cls, v: Any) -> Any:
+        if v in (None, "", "-", "N/A", "null", "None"):
+            return None
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return None
+        return v
+
+    @field_validator("dividend_yield", mode="after")
+    @classmethod
+    def normalize_dividend_yield(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v > 0.5:
+            return round(v / 100.0, 4)
+        return v
+
+    def to_notion_candidate_data(self) -> Dict[str, Any]:
+        """노션 DB 컬럼명과 1:1 매핑되는 딕셔너리로 변환합니다."""
+        return {
+            "ticker": self.ticker,
+            "현재가": self.current_price,
+            "PER": self.per,
+            "추정PER": self.forward_per,
+            "PBR": self.pbr,
+            "EPS": self.eps,
+            "추정EPS": self.forward_eps,
+            "BPS": self.bps,
+            "배당수익률": self.dividend_yield,
+            "업종PER": self.industry_per,
+            "목표주가": self.target_price,
+            "투자의견": self.opinion,
+            "52주 최고가": self.high_52w,
+            "52주 최저가": self.low_52w,
+            "직전고점": self.swing_high,
+            "직전저점": self.swing_low,
+            "200일선": self.ma200,
+            "50일선": self.ma50 or self.ma_supply,
+            "60일선": self.ma60 or self.ma_supply,
+            "수급선": self.ma_supply or self.ma50 or self.ma60,
+            "추세": self.trend,
+            "스마트 가이드": self.smart_guide,
+            "모멘텀 진단": self.mom_diag,
+            "위험도 등급": self.risk_grade,
+            "12M 모멘텀": self.mom_12m,
+            "52주 낙폭": self.drawdown_52w,
+            "낙폭율": self.drawdown_52w,
+            "60일 변동성": self.vol_60d,
+        }
+
+
+FINANCE_NUMERIC_FIELDS = [
+    "현재가", "PER", "추정PER", "PBR", "EPS", "추정EPS", "BPS", "배당수익률", "업종PER",
+    "목표주가", "52주 최고가", "52주 최저가",
+    "직전고점", "직전저점", "200일선", "50일선", "60일선", "수급선", "12M 모멘텀", "52주 낙폭", "낙폭율", "60일 변동성"
+]
+FINANCE_SELECT_FIELDS = ["추세", "스마트 가이드", "모멘텀 진단", "위험도 등급", "투자의견"]
+PRICE_NUMERIC_FIELDS = ["현재가", "전일 종가"]
+
+
 def build_dirty_payload(
     existing_props: Dict[str, Any],
     candidate_data: Dict[str, Any],
@@ -805,6 +765,8 @@ def build_dirty_payload(
         num_fields = []
     if select_fields is None:
         select_fields = []
+    if diagnostic_color_fn is None:
+        diagnostic_color_fn = get_diagnostic_color
 
     dirty_props: Dict[str, Any] = {}
     has_meaningful_change = False

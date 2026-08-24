@@ -39,7 +39,7 @@ from core.notion_utils import (
     get_prop_value,
     get_page_text,
 )
-from services.ai_service import AIService, YouTubeAnalysisResult
+from jobs.youtube.ai_service import AIService, YouTubeAnalysisResult
 from services.stock_fallback_resolver import (
     resolve_ticker_and_name,
     _get_name_lookup_index,

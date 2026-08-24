@@ -49,7 +49,7 @@ jobs:
           BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_PROD_APP_SECRET }}
-        run: python sync_local_db.py
+        run: python -m jobs.local_db.job_sync_local_db
 
       # 🌟 최신 갱신된 data/*.csv 파일을 GitHub 저장소에 자동 커밋 & 푸시
       - name: Commit & Push Updated Data CSVs

@@ -26,7 +26,9 @@ from core.notion_utils import (
     find_best_bm,
     is_kr_ticker,
 )
-from services.kis_master_loader import (
+from jobs.master.kis_master_loader import (
+    get_kr_master_dataframe,
+    get_us_master_dataframe,
     get_theme_master_dataframe,
 )
 from core.local_db_manager import (

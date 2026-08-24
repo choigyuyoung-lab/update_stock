@@ -38,7 +38,7 @@ from core.notion_utils import (
     build_master_update_payload,
     ensure_database_properties,
 )
-from services.kis_master_loader import get_us_master_dataframe
+from jobs.master.kis_master_loader import get_us_master_dataframe
 from services.stock_fallback_resolver import resolve_stock_fallback
 from core.local_db_manager import (
     load_master_stocks_from_sqlite,

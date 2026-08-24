@@ -51,4 +51,4 @@ jobs:
           UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID }}
           UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python sync_youtube_insights.py
+        run: python -m jobs.youtube.job_sync_youtube_insights

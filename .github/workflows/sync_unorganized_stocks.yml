@@ -36,4 +36,4 @@ jobs:
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
           UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID }}
           UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID }}
-        run: python sync_unorganized_stocks.py
+        run: python -m jobs.local_db.job_sync_unorganized_stocks

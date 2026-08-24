@@ -38,7 +38,7 @@ from core.notion_utils import (
     build_master_update_payload,
     ensure_database_properties,
 )
-from services.kis_master_loader import (
+from jobs.master.kis_master_loader import (
     get_kr_master_dataframe,
     get_theme_master_dataframe,
 )

@@ -50,4 +50,4 @@ jobs:
           ETF_DB_ID: ${{ secrets.ETF_DB_ID || secrets.ETF_DATABASE_ID }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_PROD_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_PROD_APP_SECRET }}
-        run: python sync_etf_holdings.py
+        run: python -m jobs.etf.job_sync_etf_holdings

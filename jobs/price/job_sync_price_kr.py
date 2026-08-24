@@ -38,6 +38,7 @@ from core.notion_utils import (
     batch_update_pages,
     build_dirty_payload,
     ensure_database_properties,
+    PRICE_NUMERIC_FIELDS,
 )
 from core.local_db_manager import upsert_finances_batch, export_all_tables_to_csv
 
@@ -262,7 +263,7 @@ def main() -> None:
         dirty_props = build_dirty_payload(
             existing_props=props,
             candidate_data=p_data,
-            num_fields=["현재가", "전일 종가"],
+            num_fields=PRICE_NUMERIC_FIELDS,
             select_fields=[],
             relation_fields=rel_candidates,
         )

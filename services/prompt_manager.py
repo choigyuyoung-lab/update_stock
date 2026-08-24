@@ -14,22 +14,31 @@ from typing import Dict
 logger = logging.getLogger("PromptManager")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
+PROMPT_SEARCH_DIRS = [
+    os.path.join(BASE_DIR, "prompts"),
+    os.path.join(BASE_DIR, "jobs", "youtube"),
+]
 
 _PROMPT_CACHE: Dict[str, str] = {}
 
 
 def load_prompt_from_md(filename: str, fallback: str = "") -> str:
     """
-    prompts/ 디렉토리 내 마크다운 파일에서 [PROMPT_START] ~ [PROMPT_END] 사이의
+    지정된 디렉토리 내 마크다운 파일에서 [PROMPT_START] ~ [PROMPT_END] 사이의
     순수 영문 프롬프트 본문을 추출하여 캐싱 후 반환합니다.
     """
     if filename in _PROMPT_CACHE:
         return _PROMPT_CACHE[filename]
 
-    filepath = os.path.join(PROMPTS_DIR, filename)
-    if not os.path.exists(filepath):
-        logger.warning(f"⚠️ 프롬프트 파일이 존재하지 않습니다: {filepath}. 기본 폴백 프롬프트를 사용합니다.")
+    filepath = ""
+    for d in PROMPT_SEARCH_DIRS:
+        cand = os.path.join(d, filename)
+        if os.path.exists(cand):
+            filepath = cand
+            break
+
+    if not filepath:
+        logger.warning(f"⚠️ 프롬프트 파일이 존재하지 않습니다: {filename}. 기본 폴백 프롬프트를 사용합니다.")
         return fallback
 
     try:
