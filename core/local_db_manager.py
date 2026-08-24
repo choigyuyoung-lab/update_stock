@@ -9,29 +9,31 @@ import os
 import json
 import sqlite3
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 logger = logging.getLogger("LocalDBManager")
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-DB_PATH = os.path.join(DATA_DIR, "stock_master.db")
-DICTIONARY_CSV_PATH = os.path.join(DATA_DIR, "stock_dictionary.csv")
-STOCKS_CSV_PATH = os.path.join(DATA_DIR, "stock_master.csv")
-BENCHMARKS_CSV_PATH = os.path.join(DATA_DIR, "stock_benchmarks.csv")
+BASE_DIR: Path = Path(__file__).resolve().parent.parent
+DATA_DIR: Path = BASE_DIR / "data"
+DB_PATH: Path = DATA_DIR / "stock_master.db"
+DICTIONARY_CSV_PATH: Path = DATA_DIR / "stock_dictionary.csv"
+STOCKS_CSV_PATH: Path = DATA_DIR / "stock_master.csv"
+BENCHMARKS_CSV_PATH: Path = DATA_DIR / "stock_benchmarks.csv"
+FINANCES_CSV_PATH: Path = DATA_DIR / "stock_finances.csv"
+ETF_HOLDINGS_CSV_PATH: Path = DATA_DIR / "stock_etf_holdings.csv"
 
 
 def ensure_data_dir() -> None:
     """data/ 폴더가 없으면 자동 생성합니다."""
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_db_connection() -> sqlite3.Connection:
     """WAL 모드 및 Row 팩토리가 적용된 SQLite 커넥션을 반환합니다."""
     ensure_data_dir()
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
     conn.row_factory = sqlite3.Row
     # WAL 모드로 동시 읽기/쓰기 성능 극대화
     conn.execute("PRAGMA journal_mode = WAL;")
@@ -501,7 +503,6 @@ def load_master_stocks_from_sqlite() -> Dict[str, Dict[str, Any]]:
 # ==============================================================================
 # 4. tbl_finances 관련 함수
 # ==============================================================================
-FINANCES_CSV_PATH = os.path.join(DATA_DIR, "stock_finances.csv")
 
 
 def upsert_finances_batch(records: List[Dict[str, Any]]) -> int:
@@ -604,7 +605,6 @@ def load_finances_from_sqlite() -> Dict[str, Dict[str, Any]]:
 # ==============================================================================
 # 5. tbl_etf_holdings 관련 함수
 # ==============================================================================
-ETF_HOLDINGS_CSV_PATH = os.path.join(DATA_DIR, "stock_etf_holdings.csv")
 
 
 def upsert_etf_holdings_batch(records: List[Dict[str, Any]]) -> int:

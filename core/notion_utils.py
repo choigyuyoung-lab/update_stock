@@ -16,6 +16,7 @@ import math
 import time
 from functools import lru_cache
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -847,17 +848,15 @@ def _get_token_cache_paths() -> List[str]:
     env_path = os.environ.get("KIS_TOKEN_CACHE_FILE")
     if env_path:
         candidates.append(env_path)
-    candidates.append(os.path.join(os.getcwd(), ".kis_token_cache.json"))
-    try:
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        candidates.append(os.path.join(project_root, ".kis_token_cache.json"))
-    except Exception:
-        pass
-    try:
-        core_dir = os.path.dirname(os.path.abspath(__file__))
-        candidates.append(os.path.join(core_dir, ".kis_token_cache.json"))
-    except Exception:
-        pass
+    core_dir: Path = Path(__file__).resolve().parent
+    project_root: Path = core_dir.parent
+    workspace_root: Path = project_root.parent
+
+    candidates.append(str(Path.cwd() / ".kis_token_cache.json"))
+    candidates.append(str(project_root / ".kis_token_cache.json"))
+    candidates.append(str(core_dir / ".kis_token_cache.json"))
+    candidates.append(str(workspace_root / ".kis_token_cache.json"))
+    candidates.append(str(workspace_root / "k_all_round_portfolio" / ".kis_token_cache.json"))
 
     unique_paths = []
     for p in candidates:
@@ -2148,15 +2147,19 @@ def ensure_database_properties(
 # ==============================================================================
 def get_local_master_db_path() -> Optional[str]:
     """통합 로컬 SQLite DB (stock_master.db) 파일 경로를 탐색하여 반환합니다."""
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "update_stock", "data", "stock_master.db"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "stock_master.db"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "stock_master.db"),
-        "d:/Github IDE/update_stock/data/stock_master.db",
+    core_dir: Path = Path(__file__).resolve().parent
+    project_root: Path = core_dir.parent
+    workspace_root: Path = project_root.parent
+
+    candidates: List[Path] = [
+        project_root / "data" / "stock_master.db",
+        workspace_root / "update_stock" / "data" / "stock_master.db",
+        core_dir / "data" / "stock_master.db",
+        Path("d:/Github IDE/update_stock/data/stock_master.db"),
     ]
     for p in candidates:
-        if os.path.exists(p):
-            return os.path.abspath(p)
+        if p.exists() and p.is_file():
+            return str(p.resolve())
     return None
 
 

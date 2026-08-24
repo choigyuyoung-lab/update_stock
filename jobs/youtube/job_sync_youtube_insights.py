@@ -23,6 +23,7 @@ import logging
 import argparse
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
@@ -75,7 +76,7 @@ UNORGANIZED_DB_ID = get_db_id("UNORGANIZED_DATABASE_ID", ["UNORGANIZED_DB_ID"], 
 MASTER_DB_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID"], required=False)
 INTEREST_DB_ID = get_db_id("DATABASE_ID", ["INTEREST_DATABASE_ID", "INTEREST_DB_ID"], required=False)
 
-PROCESSED_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".processed_youtube_videos.json")
+PROCESSED_CACHE_FILE = Path(__file__).resolve().parent / ".processed_youtube_videos.json"
 
 # 노션 DB 미연동 시 비상용 기본 채널 목록 (채널명 기반)
 DEFAULT_CHANNELS: List[Dict[str, str]] = []
@@ -86,23 +87,24 @@ DEFAULT_CHANNELS: List[Dict[str, str]] = []
 # ==============================================================================
 def load_processed_videos() -> Set[str]:
     """이미 처리된 유튜브 비디오 ID 집합을 로드합니다."""
-    if os.path.exists(PROCESSED_CACHE_FILE):
+    if PROCESSED_CACHE_FILE.exists():
         try:
             with open(PROCESSED_CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 return set(data if isinstance(data, list) else data.keys())
         except Exception as e:
-            logger.warning(f"⚠️ 캐시 파일 읽기 실패: {e}")
+            logger.warning(f"⚠️ 캐시 파일 읽기 실패 ({PROCESSED_CACHE_FILE}): {e}")
     return set()
 
 
 def save_processed_videos(processed_ids: Set[str]) -> None:
     """처리된 비디오 ID 목록을 로컬 캐시에 저장합니다."""
     try:
+        PROCESSED_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(PROCESSED_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(sorted(list(processed_ids)), f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.warning(f"⚠️ 캐시 파일 저장 실패: {e}")
+        logger.warning(f"⚠️ 캐시 파일 저장 실패 ({PROCESSED_CACHE_FILE}): {e}")
 
 
 # ==============================================================================
@@ -607,51 +609,78 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
 def get_video_transcript(video_id: str) -> Optional[str]:
     """
     youtube-transcript-api를 활용하여 타임스탬프([MM:SS])가 보존된 구조화된 자막 텍스트를 추출합니다.
-    (타임라인이 보존되어 AI가 중간 구간을 건너뛰지 않고 전 구간을 균일하게 분석 가능)
+    다중 언어 폴백(ko -> ko-KR -> a.ko -> en -> a.en -> 번역/기타) 구조를 적용하여
+    자막 미제공 오류를 원천 방어합니다.
     """
-    languages = ["ko", "ko-KR", "en", "en-US", "auto"]
+    preferred_languages = ["ko", "ko-KR", "a.ko", "en", "a.en", "en-US"]
+    items = []
+    selected_lang = "unknown"
+
+    # 1. list_transcripts 기반 지능형 다중 언어 폴백
     try:
-        items = []
-        if hasattr(YouTubeTranscriptApi, "fetch"):
-            api = YouTubeTranscriptApi()
-            fetched = api.fetch(video_id, languages=languages)
-            items = getattr(fetched, "snippets", fetched)
-        elif hasattr(YouTubeTranscriptApi, "get_transcript"):
-            items = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-        else:
-            logger.warning("   ⚠️ YouTubeTranscriptApi 호환 메서드를 찾을 수 없습니다.")
-            return None
+        if hasattr(YouTubeTranscriptApi, "list_transcripts"):
+            try:
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                target_transcript = None
 
-        # 약 60초 간격으로 타임스탬프 마커([MM:SS]) 삽입 및 단락 분할
-        formatted_chunks = []
-        last_marker_sec = -999.0
-        current_words = []
+                # 1-1. 선호 언어 목록에서 직접 검색 (수동/자동 자막 포함)
+                try:
+                    target_transcript = transcript_list.find_transcript(preferred_languages)
+                except Exception:
+                    pass
 
-        for item in items:
-            t = getattr(item, "text", "") if hasattr(item, "text") else (item.get("text", "") if isinstance(item, dict) else "")
-            start_sec = getattr(item, "start", 0.0) if hasattr(item, "start") else (item.get("start", 0.0) if isinstance(item, dict) else 0.0)
+                # 1-2. 개별 수동 생성 자막 전수 탐색
+                if not target_transcript:
+                    for t in transcript_list:
+                        if not t.is_generated:
+                            if t.language_code in preferred_languages:
+                                target_transcript = t
+                                break
 
-            t = str(t).strip()
-            if not t:
-                continue
+                # 1-3. 개별 자동 생성 자막 전수 탐색
+                if not target_transcript:
+                    for t in transcript_list:
+                        if t.is_generated:
+                            if t.language_code in preferred_languages:
+                                target_transcript = t
+                                break
 
-            # 60초 경과 시 타임스탬프 마커 삽입
-            if (float(start_sec) - last_marker_sec) >= 60.0:
-                if current_words:
-                    formatted_chunks.append(" ".join(current_words))
-                    current_words = []
-                minutes = int(float(start_sec) // 60)
-                seconds = int(float(start_sec) % 60)
-                formatted_chunks.append(f"\n[{minutes:02d}:{seconds:02d}]")
-                last_marker_sec = float(start_sec)
+                # 1-4. 타 언어 자막 존재 시 한국어 자동 번역 시도
+                if not target_transcript:
+                    for t in transcript_list:
+                        if t.is_translatable:
+                            try:
+                                target_transcript = t.translate("ko")
+                                break
+                            except Exception:
+                                pass
 
-            current_words.append(t)
+                # 1-5. 마지막 보루: 사용 가능한 첫 번째 자막 사용
+                if not target_transcript:
+                    for t in transcript_list:
+                        target_transcript = t
+                        break
 
-        if current_words:
-            formatted_chunks.append(" ".join(current_words))
+                if target_transcript:
+                    selected_lang = getattr(target_transcript, "language_code", "unknown")
+                    items = target_transcript.fetch()
+                    items = getattr(items, "snippets", items)
+            except (TranscriptsDisabled, NoTranscriptFound):
+                logger.info(f"   ℹ️ [자막 없음] Video ID '{video_id}'에 등록된 자막 트랜스크립트가 없습니다.")
+                return None
+            except Exception as ex_list:
+                logger.debug(f"   ⚠️ list_transcripts 탐색 실패, get_transcript로 직접 폴백: {ex_list}")
 
-        full_text = " ".join(formatted_chunks).strip()
-        return full_text if len(full_text) >= 100 else None
+        # 2. get_transcript / fetch 직접 호출 폴백
+        if not items:
+            if hasattr(YouTubeTranscriptApi, "fetch"):
+                api = YouTubeTranscriptApi()
+                fetched = api.fetch(video_id, languages=preferred_languages + ["auto"])
+                items = getattr(fetched, "snippets", fetched)
+                selected_lang = "direct_fetch"
+            elif hasattr(YouTubeTranscriptApi, "get_transcript"):
+                items = YouTubeTranscriptApi.get_transcript(video_id, languages=preferred_languages + ["auto"])
+                selected_lang = "direct_get"
 
     except (TranscriptsDisabled, NoTranscriptFound):
         logger.info(f"   ℹ️ [자막 없음] Video ID '{video_id}'에 사용 가능한 자막이 없습니다.")
@@ -659,6 +688,43 @@ def get_video_transcript(video_id: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"   ⚠️ [자막 추출 오류] Video ID '{video_id}': {e}")
         return None
+
+    if not items:
+        return None
+
+    # 약 60초 간격으로 타임스탬프 마커([MM:SS]) 삽입 및 단락 분할
+    formatted_chunks = []
+    last_marker_sec = -999.0
+    current_words = []
+
+    for item in items:
+        t = getattr(item, "text", "") if hasattr(item, "text") else (item.get("text", "") if isinstance(item, dict) else "")
+        start_sec = getattr(item, "start", 0.0) if hasattr(item, "start") else (item.get("start", 0.0) if isinstance(item, dict) else 0.0)
+
+        t = str(t).strip()
+        if not t:
+            continue
+
+        # 60초 경과 시 타임스탬프 마커 삽입
+        if (float(start_sec) - last_marker_sec) >= 60.0:
+            if current_words:
+                formatted_chunks.append(" ".join(current_words))
+                current_words = []
+            minutes = int(float(start_sec) // 60)
+            seconds = int(float(start_sec) % 60)
+            formatted_chunks.append(f"\n[{minutes:02d}:{seconds:02d}]")
+            last_marker_sec = float(start_sec)
+
+        current_words.append(t)
+
+    if current_words:
+        formatted_chunks.append(" ".join(current_words))
+
+    full_text = " ".join(formatted_chunks).strip()
+    if len(full_text) >= 50:
+        logger.info(f"   ✨ [자막 추출 성공] Video ID '{video_id}' (언어: {selected_lang}, 글자수: {len(full_text):,}자)")
+        return full_text
+    return None
 
 
 def extract_concise_channel_tag(raw_channel: str) -> str:

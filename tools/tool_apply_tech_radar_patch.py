@@ -6,12 +6,12 @@ AI 테크 레이더 스캐너가 발굴한 최신 패키지 버전 승격 및 �
 5대 퀀트 공식 및 노션 정규화 스키마(Guardrails) 검증을 거쳐 안전하게 원클릭 패치하는 에이전틱 도구입니다.
 """
 
-import os
 import sys
 import re
-import math
 import subprocess
-from typing import List, Tuple
+import logging
+from pathlib import Path
+from typing import List
 
 # Windows 콘솔 UTF-8 안전화
 if sys.platform == "win32":
@@ -19,6 +19,9 @@ if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("TechRadarPatcher")
 
 CYAN = "\033[96m"
 GREEN = "\033[92m"
@@ -28,10 +31,10 @@ GRAY = "\033[90m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
-TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(TOOLS_DIR)
-WORKSPACE_ROOT = os.path.dirname(PROJECT_ROOT)
-REPORT_PATH = os.path.join(PROJECT_ROOT, "reports", "tech_radar_latest.md")
+TOOLS_DIR: Path = Path(__file__).resolve().parent
+PROJECT_ROOT: Path = TOOLS_DIR.parent
+WORKSPACE_ROOT: Path = PROJECT_ROOT.parent
+REPORT_PATH: Path = PROJECT_ROOT / "reports" / "tech_radar_latest.md"
 
 
 def run_guardrails_check() -> bool:
@@ -39,7 +42,7 @@ def run_guardrails_check() -> bool:
     print(f"\n{CYAN}🛡️ [Guardrails] 불변 공식 & 스키마 무결성 실시간 검증 중...{RESET}")
     python_exe = sys.executable
     cmd = [python_exe, "-m", "tests.test_guardrails"]
-    res = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
     if res.returncode == 0:
         print(f"   {GREEN}✅ 5대 퀀트 공식 & 노션 스키마 100% 정상 통과!{RESET}")
         return True
@@ -52,9 +55,9 @@ def run_guardrails_check() -> bool:
 def apply_requirements_upgrade() -> bool:
     """2대 프로젝트(update_stock & k_all_round_portfolio)의 requirements.txt를 안전 승격합니다."""
     print(f"\n{YELLOW}📦 [패치 1] requirements.txt 패키지 버전 안전 승격 진행 중...{RESET}")
-    req_files = [
-        os.path.join(WORKSPACE_ROOT, "update_stock", "requirements.txt"),
-        os.path.join(WORKSPACE_ROOT, "k_all_round_portfolio", "requirements.txt"),
+    req_files: List[Path] = [
+        WORKSPACE_ROOT / "update_stock" / "requirements.txt",
+        WORKSPACE_ROOT / "k_all_round_portfolio" / "requirements.txt",
     ]
 
     upgrades = {
@@ -64,28 +67,32 @@ def apply_requirements_upgrade() -> bool:
     }
 
     for req_path in req_files:
-        if not os.path.exists(req_path):
+        if not req_path.exists():
+            logger.warning(f"⚠️ requirements 파일이 존재하지 않습니다: {req_path}")
             continue
-        with open(req_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        try:
+            with open(req_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
 
-        new_lines = []
-        for line in lines:
-            trimmed = line.strip()
-            matched = False
-            for pkg_name, new_spec in upgrades.items():
-                if trimmed.startswith(pkg_name):
-                    new_lines.append(f"{new_spec}\n")
-                    matched = True
-                    break
-            if not matched:
-                new_lines.append(line)
+            new_lines = []
+            for line in lines:
+                trimmed = line.strip()
+                matched = False
+                for pkg_name, new_spec in upgrades.items():
+                    if trimmed.startswith(pkg_name):
+                        new_lines.append(f"{new_spec}\n")
+                        matched = True
+                        break
+                if not matched:
+                    new_lines.append(line)
 
-        with open(req_path, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+            with open(req_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
 
-        rel = os.path.relpath(req_path, WORKSPACE_ROOT)
-        print(f"   {GREEN}✔ {rel} 버전 사양 승격 완료{RESET}")
+            rel = req_path.relative_to(WORKSPACE_ROOT)
+            print(f"   {GREEN}✔ {rel} 버전 사양 승격 완료{RESET}")
+        except Exception as e:
+            logger.error(f"❌ requirements 파일 업데이트 실패 ({req_path}): {e}")
 
     return run_guardrails_check()
 
@@ -118,22 +125,26 @@ def read_stocks_with_polars(db_path: str):
     conn.close()
     return df
 '''
-    paths = [
-        os.path.join(WORKSPACE_ROOT, "k_all_round_portfolio", "core", "polars_helper.py"),
-        os.path.join(WORKSPACE_ROOT, "update_stock", "core", "polars_helper.py"),
+    paths: List[Path] = [
+        WORKSPACE_ROOT / "k_all_round_portfolio" / "core" / "polars_helper.py",
+        WORKSPACE_ROOT / "update_stock" / "core" / "polars_helper.py",
     ]
     for p in paths:
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(helper_code)
-        rel = os.path.relpath(p, WORKSPACE_ROOT)
-        print(f"   {GREEN}✔ {rel} 생성 완료{RESET}")
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(helper_code)
+            rel = p.relative_to(WORKSPACE_ROOT)
+            print(f"   {GREEN}✔ {rel} 생성 완료{RESET}")
+        except Exception as e:
+            logger.error(f"❌ Polars 헬퍼 생성 실패 ({p}): {e}")
 
     return run_guardrails_check()
 
 
 def print_latest_tech_radar_summary() -> None:
     """최신 테크 레이더 리포트 핵심 제안을 요약 출력합니다."""
-    if not os.path.exists(REPORT_PATH):
+    if not REPORT_PATH.exists():
         print(f"{YELLOW}ℹ️ 아직 생성된 테크 레이더 리포트가 없습니다. 먼저 python -m jobs.tech_radar.job_sync_tech_radar 를 실행하세요.{RESET}")
         return
 
@@ -141,26 +152,29 @@ def print_latest_tech_radar_summary() -> None:
     print(f"{CYAN}{BOLD}  📡 [AI 테크 레이더] 최신 생태계 분석 & 추천 제안 브리핑{RESET}")
     print(f"{CYAN}{'='*70}{RESET}")
 
-    with open(REPORT_PATH, "r", encoding="utf-8") as f:
-        content = f.read()
+    try:
+        with open(REPORT_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
 
-    # Section 2 발췌
-    rec_match = re.search(r'## 2\. 💡 AI 추천 신기술.*?\n(.*?)(?=---|\Z)', content, re.DOTALL)
-    if rec_match:
-        recs = [line.strip() for line in rec_match.group(1).splitlines() if line.strip().startswith("- **")]
-        print(f"\n{YELLOW}{BOLD}💡 [신규 발굴 추천 도구]{RESET}")
-        for r in recs[:4]:
-            print(f"   {r}")
+        # Section 2 발췌
+        rec_match = re.search(r'## 2\. 💡 AI 추천 신기술.*?\n(.*?)(?=---|\Z)', content, re.DOTALL)
+        if rec_match:
+            recs = [line.strip() for line in rec_match.group(1).splitlines() if line.strip().startswith("- **")]
+            print(f"\n{YELLOW}{BOLD}💡 [신규 발굴 추천 도구]{RESET}")
+            for r in recs[:4]:
+                print(f"   {r}")
 
-    # Section 5 발췌
-    diff_match = re.search(r'## 5\. 🤖 AI 에이전틱 리팩토링.*?\n(.*?)(?=---|\Z)', content, re.DOTALL)
-    if diff_match:
-        print(f"\n{GREEN}{BOLD}🛠️ [추천 코드 수정안 & 가드레일]{RESET}")
-        for line in diff_match.group(1).splitlines()[:10]:
-            if line.strip():
-                print(f"   {GRAY}{line}{RESET}")
+        # Section 5 발췌
+        diff_match = re.search(r'## 5\. 🤖 AI 에이전틱 리팩토링.*?\n(.*?)(?=---|\Z)', content, re.DOTALL)
+        if diff_match:
+            print(f"\n{GREEN}{BOLD}🛠️ [추천 코드 수정안 & 가드레일]{RESET}")
+            for line in diff_match.group(1).splitlines()[:10]:
+                if line.strip():
+                    print(f"   {GRAY}{line}{RESET}")
 
-    print(f"{CYAN}{'-'*70}{RESET}")
+        print(f"{CYAN}{'-'*70}{RESET}")
+    except Exception as e:
+        logger.error(f"❌ 테크 레이더 요약 읽기 실패 ({REPORT_PATH}): {e}")
 
 
 def interactive_menu():

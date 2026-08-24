@@ -8,13 +8,14 @@ sync_manager.py
 4. 2대 저장소(update_stock & k_all_round_portfolio) 원클릭 양방향 Git 동기화
 """
 
-import os
 import sys
 import json
 import re
 import socket
 import datetime
 import subprocess
+import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # Windows 콘솔 UTF-8 출력 안전화
@@ -25,6 +26,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("SyncManager")
+
 CYAN = "\033[96m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -33,18 +37,18 @@ GRAY = "\033[90m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
-TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(TOOLS_DIR) if os.path.basename(TOOLS_DIR) == "tools" else TOOLS_DIR
-WORKSPACE_ROOT = os.path.dirname(PROJECT_ROOT) if os.path.basename(PROJECT_ROOT) in ["update_stock", "k_all_round_portfolio"] else PROJECT_ROOT
-STATE_FILE = os.path.join(WORKSPACE_ROOT, "update_stock", "data", ".sync_state.json")
+TOOLS_DIR: Path = Path(__file__).resolve().parent
+PROJECT_ROOT: Path = TOOLS_DIR.parent if TOOLS_DIR.name == "tools" else TOOLS_DIR
+WORKSPACE_ROOT: Path = PROJECT_ROOT.parent if PROJECT_ROOT.name in ["update_stock", "k_all_round_portfolio"] else PROJECT_ROOT
+STATE_FILE: Path = WORKSPACE_ROOT / "update_stock" / "data" / ".sync_state.json"
 
 
-def run_cmd(cmd_list: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
+def run_cmd(cmd_list: List[str], cwd: Optional[Path] = None) -> Tuple[int, str, str]:
     """터미널 명령어를 실행하고 리턴코드, stdout, stderr를 반환합니다."""
     try:
         result = subprocess.run(
             cmd_list,
-            cwd=cwd,
+            cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -65,34 +69,34 @@ def get_location() -> str:
         return "🏠 개인 환경"
 
 
-def get_all_target_repos() -> List[Dict[str, str]]:
+def get_all_target_repos() -> List[Dict[str, Any]]:
     """update_stock 및 k_all_round_portfolio 2대 저장소 경로를 정확히 탐색합니다."""
     target_defs = [
         ("update_stock", "update_stock (금융 데이터 허브)"),
         ("k_all_round_portfolio", "k_all_round_portfolio (자산배분 & AI 리포트)")
     ]
 
-    repos = []
+    repos: List[Dict[str, Any]] = []
     for folder_name, display_name in target_defs:
-        repo_path = os.path.join(WORKSPACE_ROOT, folder_name)
-        if os.path.exists(os.path.join(repo_path, ".git")):
+        repo_path: Path = WORKSPACE_ROOT / folder_name
+        if (repo_path / ".git").exists():
             repos.append({"name": display_name, "path": repo_path})
 
     if not repos:
-        repos.append({"name": os.path.basename(PROJECT_ROOT), "path": PROJECT_ROOT})
+        repos.append({"name": PROJECT_ROOT.name, "path": PROJECT_ROOT})
 
     return repos
 
 
 def load_sync_state() -> Dict[str, Any]:
     """주기 체크용 상태 파일을 로드합니다."""
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    if os.path.exists(STATE_FILE):
-        try:
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if STATE_FILE.exists():
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+    except Exception as e:
+        logger.debug(f"동기화 상태 파일 읽기 생략 ({STATE_FILE}): {e}")
     return {
         "last_location": "",
         "last_weekly_check": "",
@@ -104,14 +108,14 @@ def load_sync_state() -> Dict[str, Any]:
 def save_sync_state(state: Dict[str, Any]) -> None:
     """주기 체크용 상태 파일을 저장합니다."""
     try:
-        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"⚠️ 상태 파일 저장 실패 ({STATE_FILE}): {e}")
 
 
-def show_recent_work_summary(repo_path: str, repo_name: str) -> None:
+def show_recent_work_summary(repo_path: Path, repo_name: str) -> None:
     """직전 커밋 이력을 2~3줄로 깔끔하게 요약 출력합니다."""
     code, log_out, _ = run_cmd(
         ["git", "log", "-n", "3", "--pretty=format:%cd | %s", "--date=format:%Y-%m-%d %H:%M"],
@@ -224,7 +228,7 @@ def mode_start() -> None:
             print(f"  {RED}❌ git pull 실패: {stderr}{RESET}")
 
         # .env 존재 점검
-        if not os.path.exists(os.path.join(repo["path"], ".env")):
+        if not (repo["path"] / ".env").exists():
             print(f"  {RED}⚠️ [경고] .env 파일이 없습니다! API 키/토큰을 확인해주세요.{RESET}")
 
     # 2. 직전 작업 이력 요약 브리핑
@@ -232,8 +236,8 @@ def mode_start() -> None:
         show_recent_work_summary(repo["path"], repo["name"].split(" ")[0])
 
     # 3. AI 테크 레이더 최신 제안 브리핑
-    radar_report_path = os.path.join(WORKSPACE_ROOT, "k_all_round_portfolio", "reports", "tech_radar_latest.md")
-    if os.path.exists(radar_report_path):
+    radar_report_path: Path = WORKSPACE_ROOT / "k_all_round_portfolio" / "reports" / "tech_radar_latest.md"
+    if radar_report_path.exists():
         try:
             with open(radar_report_path, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -245,7 +249,7 @@ def mode_start() -> None:
                     print(f"  💡 {BOLD}{name}{RESET} ({domain_link.split('/')[0].strip()}): {GRAY}{clean_summary}{RESET}")
                 print(f"  👉 {YELLOW}원클릭 패치 실행: 4_테크레이더_패치적용.bat (또는 python -m tools.tool_apply_tech_radar_patch){RESET}")
         except Exception as e:
-            print(f"  ⚠️ 테크 레이더 브리핑 읽기 오류: {e}")
+            print(f"  ⚠️ 테크 레이더 브리핑 읽기 오류 ({radar_report_path}): {e}")
 
     # 4. 주기별 전략 고도화 & 코드 수정 영감 체크리스트
     check_periodic_strategy_questions(state)

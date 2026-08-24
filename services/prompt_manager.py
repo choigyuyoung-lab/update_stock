@@ -6,17 +6,20 @@ prompt_manager.py
 중앙 집중형 프롬프트 매니저(Single Source of Truth) 모듈입니다.
 """
 
-import os
 import re
 import logging
-from typing import Dict
+from pathlib import Path
+from typing import Dict, List, Optional
 
 logger = logging.getLogger("PromptManager")
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROMPT_SEARCH_DIRS = [
-    os.path.join(BASE_DIR, "prompts"),
-    os.path.join(BASE_DIR, "jobs", "youtube"),
+BASE_DIR: Path = Path(__file__).resolve().parent.parent
+WORKSPACE_ROOT: Path = BASE_DIR.parent
+
+PROMPT_SEARCH_DIRS: List[Path] = [
+    BASE_DIR / "prompts",
+    BASE_DIR / "jobs" / "youtube",
+    WORKSPACE_ROOT / "k_all_round_portfolio" / "prompts",
 ]
 
 _PROMPT_CACHE: Dict[str, str] = {}
@@ -30,10 +33,10 @@ def load_prompt_from_md(filename: str, fallback: str = "") -> str:
     if filename in _PROMPT_CACHE:
         return _PROMPT_CACHE[filename]
 
-    filepath = ""
+    filepath: Optional[Path] = None
     for d in PROMPT_SEARCH_DIRS:
-        cand = os.path.join(d, filename)
-        if os.path.exists(cand):
+        cand = d / filename
+        if cand.exists() and cand.is_file():
             filepath = cand
             break
 
@@ -53,10 +56,10 @@ def load_prompt_from_md(filename: str, fallback: str = "") -> str:
             prompt_body = parts[0].strip() if parts else content.strip()
 
         _PROMPT_CACHE[filename] = prompt_body
-        logger.debug(f"✅ 프롬프트 파일 로드 성공: {filename}")
+        logger.debug(f"✅ 프롬프트 파일 로드 성공: {filepath}")
         return prompt_body
     except Exception as e:
-        logger.error(f"❌ 프롬프트 파일 읽기 실패 ({filename}): {e}")
+        logger.error(f"❌ 프롬프트 파일 읽기 실패 ({filepath}): {e}")
         return fallback
 
 

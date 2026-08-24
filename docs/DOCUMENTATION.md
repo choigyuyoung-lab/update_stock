@@ -79,15 +79,23 @@ update_stock/
 ├── 📂 core/                       # 🧠 핵심 공통 엔진 (System Core)
 │   ├── __init__.py
 │   ├── notion_utils.py            # 노션 API 통신, Smart Dirty Checking, KST 시간 변환, 지수 백오프 재시도
-│   └── local_db_manager.py        # SQLite DB(WAL 모드) CRUD, 5개 테이블 관리, 1.1s CSV 자가복원(Self-Healing)
+│   ├── local_db_manager.py        # SQLite DB(WAL 모드) CRUD, 5개 테이블 관리, 1.1s CSV 자가복원(Self-Healing)
+│   └── guardrails.py              # 5대 퀀트 공식 및 노션 스키마 불변 가드레일
 │
 ├── 📂 services/                   # 🔌 외부 API 어댑터 & 도메인 서비스
 │   ├── __init__.py
 │   ├── kis_data_service.py        # 한투 밸류에이션 공식 API(FHKST01010100/HHDFS76200200) + yfinance 컨센서스
-│   ├── kis_master_loader.py       # 한투 마스터 ZIP 압축파일 메모리 다운로드 및 전수 파싱 엔진
 │   ├── stock_fallback_resolver.py # 온톨로지 사전 DB(521개) 해석기 & 초고속 정규식 ETF 토크나이저
-│   ├── ai_service.py              # Google Gemini API 기반 Pydantic Structured Outputs 구조화 요약기
 │   └── prompt_manager.py          # 영문 프롬프트(prompts/*.en.md) 마이크로초 단위 중앙 캐시 매니저
+│
+├── 📂 jobs/                       # ⚙️ 도메인별 실행 잡
+│   ├── 📂 price/                  # job_sync_price_kr.py / job_sync_price_us.py
+│   ├── 📂 finance/                # job_sync_finance_kr.py / job_sync_finance_us.py
+│   ├── 📂 master/                 # job_sync_master_kr.py / job_sync_master_us.py / kis_master_loader.py
+│   ├── 📂 etf/                     # job_sync_etf_holdings.py
+│   ├── 📂 macro/                   # job_sync_benchmark.py
+│   ├── 📂 local_db/               # job_sync_local_db.py / job_sync_unorganized_stocks.py
+│   └── 📂 youtube/                # job_sync_youtube_insights.py / ai_service.py / system_fia_youtube.en.md
 │
 ├── 📂 data/                       # 💾 영구 로컬 캐시 및 정규화 데이터 (Primary Key: ticker)
 │   ├── stock_master.db            # 통합 SQLite 데이터베이스 (5개 정규화 테이블)
@@ -100,9 +108,15 @@ update_stock/
 ├── 📂 prompts/                    # 📝 AI 시스템 프롬프트 템플릿
 │   └── system_fia_youtube.en.md   # 유튜브 시황 분석용 FIA (Financial Intelligence Architect) 프롬프트
 │
+├── 📂 tools/                      # 🛠️ 동기화 및 패치 도구
+│   ├── sync_manager.py            # 2대 저장소 양방향 Git 동기화 매니저
+│   └── tool_apply_tech_radar_patch.py # AI 테크 레이더 원클릭 패치 적용기
+│
+├── 📂 tests/                      # 🧪 단위 테스트
+│   └── test_guardrails.py         # 불변 가드레일 무결성 검증
+│
 ├── 1_작업시작_동기화.bat           # 🚀 출근/작업 시작 시 Git Pull 원클릭 동기화
 ├── 3_작업종료_동기화.bat           # 🏁 퇴근/작업 종료 시 Git Status 점검 및 Push 배치
-├── sync_manager.py                # 배치 파일의 백엔드 다중 저장소 Git 동기화 매니저
 ├── requirements.txt               # 의존성 패키지 목록
 └── .env / .env.example            # API 인증 토큰 및 노션 Database ID 설정
 ```
