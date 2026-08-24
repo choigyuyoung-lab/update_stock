@@ -51,7 +51,7 @@ from core.notion_utils import (
     FINANCE_SELECT_FIELDS,
 )
 from core.local_db_manager import upsert_finances_batch, export_all_tables_to_csv
-from services.kis_data_service import fetch_us_quant_yfinance
+from jobs.finance.kis_data_service import fetch_us_quant_yfinance
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("FinanceSyncUS")

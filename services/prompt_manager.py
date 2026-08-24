@@ -2,7 +2,7 @@
 """
 prompt_manager.py
 =================
-영문 원문 및 한국어 주석이 포함된 마크다운 템플릿(prompts/*.en.md)을 중앙에서 로드, 캐싱 및 렌더링하는
+영문 원문 및 한국어 주석이 포함된 마크다운 템플릿(jobs/*/*.en.md)을 중앙에서 로드, 캐싱 및 렌더링하는
 중앙 집중형 프롬프트 매니저(Single Source of Truth) 모듈입니다.
 """
 
@@ -16,10 +16,11 @@ logger = logging.getLogger("PromptManager")
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT: Path = BASE_DIR.parent
 
+# Job-Centric Co-location 경로 우선 탐색
 PROMPT_SEARCH_DIRS: List[Path] = [
-    BASE_DIR / "prompts",
     BASE_DIR / "jobs" / "youtube",
-    WORKSPACE_ROOT / "k_all_round_portfolio" / "prompts",
+    WORKSPACE_ROOT / "k_all_round_portfolio" / "jobs" / "quant_report",
+    WORKSPACE_ROOT / "k_all_round_portfolio" / "jobs" / "tech_radar",
 ]
 
 _PROMPT_CACHE: Dict[str, str] = {}
@@ -27,7 +28,7 @@ _PROMPT_CACHE: Dict[str, str] = {}
 
 def load_prompt_from_md(filename: str, fallback: str = "") -> str:
     """
-    지정된 디렉토리 내 마크다운 파일에서 [PROMPT_START] ~ [PROMPT_END] 사이의
+    각 도메인 Job 디렉토리 내 마크다운 파일에서 [PROMPT_START] ~ [PROMPT_END] 사이의
     순수 영문 프롬프트 본문을 추출하여 캐싱 후 반환합니다.
     """
     if filename in _PROMPT_CACHE:
