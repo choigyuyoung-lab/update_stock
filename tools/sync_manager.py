@@ -163,9 +163,10 @@ def check_periodic_strategy_questions(state: Dict[str, Any]) -> None:
     if show_weekly:
         print(f"\n{CYAN}{BOLD}📅 [주간 전략 점검 (Weekly Checklist)]{RESET}")
         print(f"  🎬 1) {BOLD}[유튜브 인사이트]{RESET} 최근 새로 구독하거나 시황을 추적하고 싶은 신규 유튜브 채널 RSS가 있나요?")
-        print(f"     ➔ {GRAY}수정 위치: update_stock/sync_youtube_insights.py (YOUTUBE_CHANNELS 목록){RESET}")
-        print(f"  🤖 2) {BOLD}[AI 리포트 포맷]{RESET} Gemini AI 리포트의 진단 톤이나 주간 100만원 추천 배분표 서식을 개선할 아이디어가 있나요?")
-        print(f"     ➔ {GRAY}수정 위치: k_all_round_portfolio/prompts/system_portfolio_quant.en.md{RESET}")
+        print(f"     ➔ {GRAY}수정 위치: update_stock/jobs/youtube/job_sync_youtube_insights.py (YOUTUBE_CHANNELS 목록){RESET}")
+        print(f"  🤖 2) {BOLD}[AI 리포트 & 테크 레이더]{RESET} 프롬프트 최적화 또는 테크 레이더 추천 신기술 도입 검토가 필요한가요?")
+        print(f"     ➔ {GRAY}수정 위치: k_all_round_portfolio/jobs/quant_report/system_portfolio_quant.en.md{RESET}")
+        print(f"  🛡️ 3) {BOLD}[불변 가드레일]{RESET} 5대 퀀트 공식 및 노션 정규화 스키마 무결성 검증 (python -m tests.test_guardrails)")
         state["last_weekly_check"] = today_str
 
     if show_monthly:

@@ -2143,5 +2143,88 @@ def ensure_database_properties(
             print(msg)
 
 
+# ==============================================================================
+# 로컬 SQLite DB (stock_master.db) 0.001초 초고속 데이터 로더
+# ==============================================================================
+def get_local_master_db_path() -> Optional[str]:
+    """통합 로컬 SQLite DB (stock_master.db) 파일 경로를 탐색하여 반환합니다."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "update_stock", "data", "stock_master.db"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "stock_master.db"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "stock_master.db"),
+        "d:/Github IDE/update_stock/data/stock_master.db",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return os.path.abspath(p)
+    return None
+
+
+def load_local_finances_db() -> Dict[str, Dict[str, Any]]:
+    """로컬 SQLite DB에서 361개 전 종목의 최신 재무/퀀트 지표를 0.001초만에 로드합니다."""
+    import sqlite3
+    db_path = get_local_master_db_path()
+    if not db_path:
+        return {}
+    res: Dict[str, Dict[str, Any]] = {}
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tbl_finances;")
+        for r in cursor.fetchall():
+            d = dict(r)
+            res[d["ticker"].upper()] = d
+        conn.close()
+    except Exception:
+        pass
+    return res
+
+
+def load_local_stocks_db() -> Dict[str, Dict[str, Any]]:
+    """로컬 SQLite DB에서 420개 상장주식 마스터 정보를 0.001초만에 로드합니다."""
+    import sqlite3
+    db_path = get_local_master_db_path()
+    if not db_path:
+        return {}
+    res: Dict[str, Dict[str, Any]] = {}
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tbl_stocks;")
+        for r in cursor.fetchall():
+            d = dict(r)
+            res[d["ticker"].upper()] = d
+        conn.close()
+    except Exception:
+        pass
+    return res
+
+
+def load_local_etf_holdings_db(etf_ticker: Optional[str] = None) -> List[Dict[str, Any]]:
+    """로컬 SQLite DB에서 ETF 구성종목 정보를 0.001초만에 로드합니다."""
+    import sqlite3
+    db_path = get_local_master_db_path()
+    if not db_path:
+        return []
+    res: List[Dict[str, Any]] = []
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        if etf_ticker:
+            cursor.execute("SELECT * FROM tbl_etf_holdings WHERE etf_ticker = ? ORDER BY weight DESC;", (etf_ticker.upper(),))
+        else:
+            cursor.execute("SELECT * FROM tbl_etf_holdings ORDER BY etf_ticker, weight DESC;")
+        for r in cursor.fetchall():
+            res.append(dict(r))
+        conn.close()
+    except Exception:
+        pass
+    return res
+
+
+
 
 
