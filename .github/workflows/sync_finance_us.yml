@@ -1,4 +1,4 @@
-name: US Finance Update
+name: "[재무] 🇺🇸 해외 재무/밸류에이션 수집"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거

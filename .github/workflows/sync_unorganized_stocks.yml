@@ -1,4 +1,4 @@
-name: Daily Stock Matcher
+name: "[로컬DB] 🔍 미분류 종목 자동 매칭 & 동기화"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거

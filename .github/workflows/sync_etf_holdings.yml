@@ -1,4 +1,4 @@
-name: KR ETF Holdings Sync
+name: "[ETF] 🇰🇷 국내 ETF 구성종목 수집"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거

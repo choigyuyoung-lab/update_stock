@@ -1,4 +1,4 @@
-name: Benchmark DB Sync & Health Check
+name: "[매크로] 🌐 벤치마크 지수 및 환율 동기화"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거

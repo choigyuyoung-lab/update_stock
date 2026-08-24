@@ -1,4 +1,4 @@
-name: YouTube Macro & Stock Auto Sync
+name: "[유튜브] 🎬 유튜브 AI 시황 인텔리전스 동기화"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거

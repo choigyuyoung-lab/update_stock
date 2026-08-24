@@ -1,4 +1,4 @@
-name: KR Master DB Sync
+name: "[마스터] 🇰🇷 국내 주식/ETF 마스터 동기화"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거

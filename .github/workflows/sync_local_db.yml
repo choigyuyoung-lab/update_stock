@@ -1,4 +1,4 @@
-name: Sync Local SQLite DB & Dictionary
+name: "[로컬DB] 💾 로컬 SQLite DB 및 CSV 백업"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거
