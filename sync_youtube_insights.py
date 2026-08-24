@@ -66,23 +66,19 @@ logger = logging.getLogger("SyncYouTubeInsights")
 load_dotenv()
 
 # ==============================================================================
-# 1. 환경 설정 및 상수 정의
+# 1. 환경 설정 및 상수 정의 (보안 조치: 하드코딩 제거 완료)
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-YOUTUBE_DB_ID = get_db_id("YOUTUBE_DATABASE_ID", ["YOUTUBE_DB_ID", "2d0f59dbdb5b804891e4e054ef049d1c"], required=False)
-YOUTUBE_GUIDE_DB_ID = get_db_id("YOUTUBE_GUIDE_DATABASE_ID", ["YOUTUBE_GUIDE_DB_ID", "3c4f59dbdb5b80d49fa9d884e3dc920b"], required=False)
-UNORGANIZED_DB_ID = get_db_id("UNORGANIZED_DATABASE_ID", ["UNORGANIZED_DB_ID", "2d8f59dbdb5b807aac70d3711b5b6e93"], required=False)
-MASTER_DB_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID", "2f0f59dbdb5b80e5bc5fe1ffdd3b941a"], required=False)
-INTEREST_DB_ID = get_db_id("DATABASE_ID", ["INTEREST_DATABASE_ID", "2a9f59dbdb5b80fbab45dea3b3cbe9f4"], required=False)
+YOUTUBE_DB_ID = get_db_id("YOUTUBE_DATABASE_ID", ["YOUTUBE_DB_ID"], required=False)
+YOUTUBE_GUIDE_DB_ID = get_db_id("YOUTUBE_GUIDE_DATABASE_ID", ["YOUTUBE_GUIDE_DB_ID"], required=False)
+UNORGANIZED_DB_ID = get_db_id("UNORGANIZED_DATABASE_ID", ["UNORGANIZED_DB_ID"], required=False)
+MASTER_DB_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID"], required=False)
+INTEREST_DB_ID = get_db_id("DATABASE_ID", ["INTEREST_DATABASE_ID", "INTEREST_DB_ID"], required=False)
 
 PROCESSED_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".processed_youtube_videos.json")
 
-# 노션 DB 미연동 시 비상용 기본 채널 목록
-DEFAULT_CHANNELS = [
-    {"name": "삼프로TV", "channel_id": "UChlv4GSd7OQl3js-jkLOnFA"},
-    {"name": "슈카월드", "channel_id": "UCJo6G1u0e_-wS-JQn3T-zEw"},
-    {"name": "매경 월가월부", "channel_id": "UCIipmgxpUxDmPP-ma3Ahvbw"},
-]
+# 노션 DB 미연동 시 비상용 기본 채널 목록 (채널명 기반)
+DEFAULT_CHANNELS: List[Dict[str, str]] = []
 
 
 # ==============================================================================
@@ -1170,11 +1166,14 @@ def main() -> None:
 
     # 5. 분기 3 (기본 모드): 노션 [Youtube 투자가이드 DB]에서 활성 소스 자동 로드
     else:
-        print(f"\n📖 [노션 DB 모드] 'Youtube 투자가이드' DB({YOUTUBE_GUIDE_DB_ID})에서 활성 목록 조회 중...")
-        active_sources = load_active_sources_from_notion(notion_client, YOUTUBE_GUIDE_DB_ID)
-
-        if not active_sources:
-            logger.info("ℹ️ 노션 DB에 활성화된 채널이 없어 기본 채널(DEFAULT_CHANNELS)로 동작합니다.")
+        if YOUTUBE_GUIDE_DB_ID:
+            print(f"\n📖 [노션 DB 모드] 'Youtube 투자가이드' DB({YOUTUBE_GUIDE_DB_ID})에서 활성 목록 조회 중...")
+            active_sources = load_active_sources_from_notion(notion_client, YOUTUBE_GUIDE_DB_ID)
+            if not active_sources:
+                print("   ℹ️ [Youtube 투자가이드 DB] '활성화' 체크된 채널/영상이 없습니다. 동기화를 정상 종료합니다.")
+                return
+        else:
+            logger.info("ℹ️ YOUTUBE_GUIDE_DATABASE_ID 미설정으로 기본 채널(DEFAULT_CHANNELS)로 동작합니다.")
             active_sources = [
                 {
                     "page_id": "",
@@ -1188,7 +1187,7 @@ def main() -> None:
                 for ch in DEFAULT_CHANNELS
             ]
 
-        print(f"✅ 총 {len(active_sources)}개 활성 소스(채널/영상) 수집 시작")
+        print(f"✅ 총 {len(active_sources)}개 활성 소스(체크박스 활성화됨) 수집 시작")
 
         for src in active_sources:
             src_name: str = str(src.get("name") or "")

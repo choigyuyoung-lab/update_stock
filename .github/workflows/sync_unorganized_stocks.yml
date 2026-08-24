@@ -34,6 +34,6 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-          UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID || '2d8f59dbdb5b807aac70d3711b5b6e93' }}
-          UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID || '2f8f59dbdb5b804e8318e9a3f0efaf9d' }}
+          UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID }}
+          UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID }}
         run: python sync_unorganized_stocks.py

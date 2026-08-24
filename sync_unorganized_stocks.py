@@ -47,13 +47,13 @@ logger = logging.getLogger("LinkMasterDB")
 load_dotenv()
 
 # ==============================================================================
-# 1. 환경 변수 및 DB ID 로드
+# 1. 환경 변수 및 DB ID 로드 (보안 조치: 하드코딩 제거 완료)
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-UNORGANIZED_DB_ID = get_db_id("UNORGANIZED_DATABASE_ID", ["UNORGANIZED_DB_ID", "2d8f59dbdb5b807aac70d3711b5b6e93"], required=True)
-MASTER_DB_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID", "2f0f59dbdb5b80e5bc5fe1ffdd3b941a"], required=True)
-INTEREST_DB_ID = get_db_id("DATABASE_ID", ["INTEREST_DATABASE_ID", "2a9f59dbdb5b80fbab45dea3b3cbe9f4"], required=True)
-UNIFIED_NOTES_DB_ID = get_db_id("UNIFIED_NOTES_DATABASE_ID", ["UNIFIED_NOTES_DB_ID", "2f8f59dbdb5b804e8318e9a3f0efaf9d"], required=True)
+UNORGANIZED_DB_ID = get_db_id("UNORGANIZED_DATABASE_ID", ["UNORGANIZED_DB_ID"], required=True)
+MASTER_DB_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID"], required=True)
+INTEREST_DB_ID = get_db_id("DATABASE_ID", ["INTEREST_DATABASE_ID", "INTEREST_DB_ID"], required=True)
+UNIFIED_NOTES_DB_ID = get_db_id("UNIFIED_NOTES_DATABASE_ID", ["UNIFIED_NOTES_DB_ID"], required=True)
 
 headers = {
     "Authorization": f"Bearer {NOTION_TOKEN}",

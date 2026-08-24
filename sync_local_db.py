@@ -42,8 +42,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("SyncLocalDB")
 
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-MASTER_DATABASE_ID = os.getenv("MASTER_DATABASE_ID") or os.getenv("DATABASE_ID") or "2f0f59dbdb5b800caec0d38bcf577ca7"
-BENCHMARK_DATABASE_ID = os.getenv("BENCHMARK_DATABASE_ID") or "357f59dbdb5b8027a869f64a4f7768ae"
+MASTER_DATABASE_ID = os.getenv("MASTER_DATABASE_ID") or os.getenv("DATABASE_ID") or ""
+BENCHMARK_DATABASE_ID = os.getenv("BENCHMARK_DATABASE_ID") or ""
 
 
 # ==============================================================================

@@ -46,8 +46,9 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
-          YOUTUBE_DATABASE_ID: ${{ secrets.YOUTUBE_DATABASE_ID || '2d0f59dbdb5b804891e4e054ef049d1c' }}
-          UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID || '2d8f59dbdb5b807aac70d3711b5b6e93' }}
-          UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID || '2f8f59dbdb5b804e8318e9a3f0efaf9d' }}
+          YOUTUBE_DATABASE_ID: ${{ secrets.YOUTUBE_DATABASE_ID }}
+          YOUTUBE_GUIDE_DATABASE_ID: ${{ secrets.YOUTUBE_GUIDE_DATABASE_ID }}
+          UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID }}
+          UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python sync_youtube_insights.py
