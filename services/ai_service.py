@@ -55,11 +55,42 @@ class YouTubeAssetItem(BaseModel):
 
 
 class YouTubeAnalysisResult(BaseModel):
-    summarized_title_for_notion: str = Field(description="노션 DB용 간결하고 핵심적인 한 줄 제목 (명사형 종결)")
+    summarized_title_for_notion: str = Field(
+        description="노션 DB용 '[주요테마/섹터] 핵심 시황/방향성 헤드라인' 형식의 한 줄 제목 (명사형 종결, 예: [반도체/AI] HBM 공급망 수혜 및 대형주 상승세 지속 전망)"
+    )
     publish_date: str = Field(description="게시일자 (YYYY-MM-DD 형식)")
-    overall_summary: str = Field(description="영상 전체의 핵심 매크로 시황 및 시장 방향성 요약 (3~5문장, 명사형 종결어미 ~함, ~임 필수)")
-    key_takeaways: List[str] = Field(description="핵심 시장 시사점 목록 (각 문장 명사형 종결어미 필수)")
-    assets: List[YouTubeAssetItem] = Field(default_factory=list, description="영상에서 핵심 투자 논리가 언급된 주요 종목/자산 리스트 (최대 5개)")
+    market_sentiment: str = Field(
+        default="중립",
+        description="시장 심리 및 방향성 진단: '강세' / '중립' / '변동성확대' / '조정' 중 택1"
+    )
+    leading_sectors: List[str] = Field(
+        default_factory=list,
+        description="영상에서 핵심 주도주/수혜 섹터로 언급된 1~3개 섹터/테마명 (예: ['반도체/HBM', '전력인프라'])"
+    )
+    one_line_summary: str = Field(
+        default="",
+        description="노션 프로퍼티용 전체 시황을 관통하는 임팩트 있는 '단 1줄' 요약 (명사형 종결 필수, 1문장)"
+    )
+    key_takeaways: List[str] = Field(
+        description=(
+            "노션 프로퍼티용 3대 표준 축으로 구성된 정확히 '3개'의 간결한 핵심 시사점 목록 (각 항목 1줄, 명사형 종결 필수):\n"
+            "1. [매크로/금리] 거시경제/금리/환율 핵심 시사점\n"
+            "2. [산업/종목] 핵심 산업/수혜 종목 실적 모멘텀 시사점\n"
+            "3. [전략/리스크] 자산배분 대응 전략 또는 모니터링 리스크 시사점"
+        )
+    )
+    overall_summary: str = Field(
+        description=(
+            "노션 본문(Body)용 3대 표준 축으로 구성된 심층 상세 시황 분석 (각 단락 2~3문장, 명사형 종결 필수):\n"
+            "[매크로 & 시장방향] 거시경제, 금리/환율, 통화정책 및 지수 수급 심층 분석 (2~3문장)\n\n"
+            "[주도섹터 & 핵심이슈] 주도 섹터, 기업 실적 모멘텀, 공급망 및 정책 이슈 심층 분석 (2~3문장)\n\n"
+            "[투자전략 & 리스크] 자산배분 관점의 구체적 대응 전략 및 가격 타점/리스크 심층 분석 (2~3문장)"
+        )
+    )
+    assets: List[YouTubeAssetItem] = Field(
+        default_factory=list,
+        description="영상 전체 자막을 전수 스캔하여 실질적 투자 논리, 실적 전망, 매수/매도 타점이 논의된 주요 종목/자산 리스트 (최대 5개, 중요도/비중 순). 구어체 약칭(삼전, 삼전우, 물산, 하이닉스 등)은 반드시 공식 법인명(삼성전자, 삼성전자우, 삼성물산, SK하이닉스 등)으로 정규화하여 name에 기재."
+    )
 
 
 # ==============================================================================
@@ -123,8 +154,8 @@ class AIService:
 - 영상 URL: {video_meta.get('url', '')}
 - 게시일자: {video_meta.get('publish_date', '')}
 
-[자막 스크립트 전문]
-{transcript_text[:12000]}
+[자막 스크립트 전문 (전체 스캔)]
+{transcript_text[:250000]}
 """
 
         models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite"]
@@ -136,7 +167,7 @@ class AIService:
                         system_instruction=fia_system_prompt,
                         response_mime_type="application/json",
                         response_schema=YouTubeAnalysisResult,
-                        temperature=0.1,
+                        temperature=0.0,
                     )
 
                     response = self.client.models.generate_content(

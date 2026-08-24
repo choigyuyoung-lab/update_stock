@@ -1,11 +1,12 @@
 name: Daily Stock Matcher
 
 on:
+  # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
     types: [daily_matcher, sync_unorganized_stocks]
+
+  # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
-  schedule:
-    - cron: '40 9 * * 1-5'  # 월~금 18:40 KST (유튜브 수집 후 실행)
 
 jobs:
   match-stocks:

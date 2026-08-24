@@ -1,11 +1,12 @@
 name: YouTube Macro & Stock Auto Sync
 
 on:
+  # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
     types: [youtube_sync, youtube_collector, sync_youtube_insights]
+
+  # 2. GitHub 웹 UI 수동 실행 트리거
   workflow_dispatch:
-  schedule:
-    - cron: '30 9 * * 1-5'  # 월~금 18:30 KST
 
 jobs:
   youtube-sync:

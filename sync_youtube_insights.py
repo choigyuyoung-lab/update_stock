@@ -608,31 +608,53 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
         return []
 
 
-# ==============================================================================
-# 6. 자막(Transcript) 추출 엔진
-# ==============================================================================
 def get_video_transcript(video_id: str) -> Optional[str]:
     """
-    youtube-transcript-api를 활용하여 한국어/영어 자막 텍스트를 추출합니다.
+    youtube-transcript-api를 활용하여 타임스탬프([MM:SS])가 보존된 구조화된 자막 텍스트를 추출합니다.
+    (타임라인이 보존되어 AI가 중간 구간을 건너뛰지 않고 전 구간을 균일하게 분석 가능)
     """
     languages = ["ko", "ko-KR", "en", "en-US", "auto"]
     try:
+        items = []
         if hasattr(YouTubeTranscriptApi, "fetch"):
             api = YouTubeTranscriptApi()
             fetched = api.fetch(video_id, languages=languages)
-            snippets = getattr(fetched, "snippets", fetched)
-            full_text = " ".join([
-                getattr(item, "text", "") if hasattr(item, "text") else (item.get("text", "") if isinstance(item, dict) else "")
-                for item in snippets
-            ])
+            items = getattr(fetched, "snippets", fetched)
         elif hasattr(YouTubeTranscriptApi, "get_transcript"):
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-            full_text = " ".join([item.get("text", "") for item in transcript_list])
+            items = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
         else:
             logger.warning("   ⚠️ YouTubeTranscriptApi 호환 메서드를 찾을 수 없습니다.")
             return None
 
-        full_text = re.sub(r'\s+', ' ', full_text).strip()
+        # 약 60초 간격으로 타임스탬프 마커([MM:SS]) 삽입 및 단락 분할
+        formatted_chunks = []
+        last_marker_sec = -999.0
+        current_words = []
+
+        for item in items:
+            t = getattr(item, "text", "") if hasattr(item, "text") else (item.get("text", "") if isinstance(item, dict) else "")
+            start_sec = getattr(item, "start", 0.0) if hasattr(item, "start") else (item.get("start", 0.0) if isinstance(item, dict) else 0.0)
+
+            t = str(t).strip()
+            if not t:
+                continue
+
+            # 60초 경과 시 타임스탬프 마커 삽입
+            if (float(start_sec) - last_marker_sec) >= 60.0:
+                if current_words:
+                    formatted_chunks.append(" ".join(current_words))
+                    current_words = []
+                minutes = int(float(start_sec) // 60)
+                seconds = int(float(start_sec) % 60)
+                formatted_chunks.append(f"\n[{minutes:02d}:{seconds:02d}]")
+                last_marker_sec = float(start_sec)
+
+            current_words.append(t)
+
+        if current_words:
+            formatted_chunks.append(" ".join(current_words))
+
+        full_text = " ".join(formatted_chunks).strip()
         return full_text if len(full_text) >= 100 else None
 
     except (TranscriptsDisabled, NoTranscriptFound):
@@ -643,8 +665,38 @@ def get_video_transcript(video_id: str) -> Optional[str]:
         return None
 
 
+def extract_concise_channel_tag(raw_channel: str) -> str:
+    """
+    유튜브 채널명/코너명에서 불필요한 접두사, 특수문자, 긴 수식어를 제거하여
+    노션 [선택] 프로퍼티용 간결하고 일관된 태그(예: 핀플, 클로징벨라이브, 김장열 반도체, 삼프로TV, 슈카월드 등)로 정제합니다.
+    """
+    if not raw_channel:
+        return "기타"
+    tag = raw_channel.strip()
+    tag = re.sub(r'^@', '', tag)
+    tag = re.sub(r'[\(\[\{].*?[\)\]\}]', '', tag)  # 괄호 안 내용 제거
+    # 자주 쓰이는 긴 채널 수식어 간소화
+    tag = re.sub(r'\s*[-_/|].*$', '', tag)  # 구분자 이후 제거
+    lower_tag = tag.lower()
+    # 대표 채널 축약 룰
+    if "삼프로" in tag or "3pro" in lower_tag:
+        return "삼프로TV"
+    if "슈카" in tag or "syuka" in lower_tag:
+        return "슈카월드"
+    if "월가월부" in tag:
+        return "매경 월가월부"
+    if "클로징" in tag or "closing" in lower_tag:
+        return "클로징벨라이브"
+    if "김장열" in tag:
+        return "김장열 반도체"
+    if "핀플" in tag or "finflow" in lower_tag:
+        return "핀플"
+    tag = re.sub(r'\s*(공식채널|Official|경제의신과함께|TV|티비)\b', '', tag, flags=re.IGNORECASE).strip()
+    return tag or raw_channel[:15].strip()
+
+
 # ==============================================================================
-# 7. 노션 적재 엔진
+# 7. 노션 적재 엔진 (100% 정규화 포맷 준수)
 # ==============================================================================
 def create_youtube_summary_notion_page(
     client: Any,
@@ -653,7 +705,8 @@ def create_youtube_summary_notion_page(
     video_meta: Dict[str, Any]
 ) -> Optional[str]:
     """
-    분석된 유튜브 시황 및 추천 자산 테이블을 [투자공부 by Youtube DB]에 적재합니다.
+    분석된 유튜브 시황 및 추천 자산 테이블을 [투자공부 by Youtube DB]에 정규화된 규격으로 적재합니다.
+    (Summary 프로퍼티 1줄, Key Takeaways 3줄, 본문 블록 심층 상세 분석)
     """
     if not db_id:
         return None
@@ -661,49 +714,91 @@ def create_youtube_summary_notion_page(
     title = analyzed.summarized_title_for_notion or video_meta.get("title", "유튜브 시황 분석 리포트")
     url = video_meta.get("url", "")
     pub_date_str = analyzed.publish_date or video_meta.get("publish_date", get_kst_str("%Y-%m-%d"))
-    summary = analyzed.overall_summary or ""
-    takeaways = analyzed.key_takeaways or []
-    assets = analyzed.assets or []
+    pub_time_kst = video_meta.get("publish_time_kst", pub_date_str)
+    
+    # 1. 1줄 요약 (노션 DB 프로퍼티용)
+    one_line = (getattr(analyzed, "one_line_summary", "") or "").strip()
+    if not one_line and analyzed.overall_summary:
+        one_line = analyzed.overall_summary.strip().split("\n")[0].replace("[매크로 & 시장방향]", "").strip()
 
-    takeaways_text = "\n".join([f"• {point}" for point in takeaways]) if takeaways else ""
+    # 2. 3줄 핵심 시사점 (노션 DB 프로퍼티용)
+    takeaways = analyzed.key_takeaways or []
+    takeaways_3 = takeaways[:3]
+    takeaways_text = "\n".join([f"• {pt}" if not pt.strip().startswith("•") else pt.strip() for pt in takeaways_3]) if takeaways_3 else ""
+
+    # 3. 본문용 상세 심층 분석 (3단락)
+    detailed_summary = (analyzed.overall_summary or "").strip()
+    
+    assets = analyzed.assets or []
+    sentiment = (getattr(analyzed, "market_sentiment", "") or "중립").strip()
+    sectors = getattr(analyzed, "leading_sectors", []) or []
+    sectors_str = ", ".join(sectors) if sectors else "전반/혼조"
+
+    channel_tag = extract_concise_channel_tag(video_meta.get("channel_name", "") or video_meta.get("guide_name", ""))
 
     page_props: Dict[str, Any] = {
         "Title": {"title": [{"text": {"content": title}}]},
         "URL": {"url": url},
-        "Summary": {"rich_text": [{"text": {"content": summary[:2000]}}]},
+        "Summary": {"rich_text": [{"text": {"content": one_line[:2000]}}]},
         "Key Takeaways": {"rich_text": [{"text": {"content": takeaways_text[:2000]}}]},
     }
+    if channel_tag:
+        page_props["선택"] = {"select": {"name": channel_tag}}
     if pub_date_str:
         page_props["Date"] = {"date": {"start": pub_date_str}}
 
     blocks: List[Dict[str, Any]] = []
 
-    # 콜아웃: 한 줄 핵심 요약
+    # 1. 콜아웃: 영상 출처 메타정보 & 1줄 핵심 요약
+    callout_content = (
+        f"📺 출처: {video_meta.get('channel_name', 'YouTube')} | 영상: {video_meta.get('title', title)} ({url})\n"
+        f"📅 게시일시: {pub_time_kst} (KST) | 🏷️ 시장 심리: {sentiment}\n\n"
+        f"📌 핵심 요약 (1줄):\n{one_line}"
+    )
     blocks.append({
         "object": "block",
         "type": "callout",
         "callout": {
             "icon": {"type": "emoji", "emoji": "📺"},
             "color": "blue_background",
-            "rich_text": [{"type": "text", "text": {"content": f"출처: {video_meta.get('channel_name', 'YouTube')} ({url})\n{summary}"}}]
+            "rich_text": [{"type": "text", "text": {"content": callout_content[:2000]}}]
         }
     })
 
-    # 핵심 시장 시사점 H2
-    if takeaways:
+    # 2. 종합 시황 & 심층 분석 H2 (본문 상세 분석 블록)
+    if detailed_summary:
+        blocks.append({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"text": {"content": "📋 종합 시황 & 심층 분석 (In-depth Analysis)"}}]}
+        })
+        # 3개 섹션별로 문단 블록 생성
+        summary_paragraphs = [p.strip() for p in detailed_summary.split("\n\n") if p.strip()]
+        if not summary_paragraphs:
+            summary_paragraphs = [detailed_summary]
+        for para in summary_paragraphs:
+            blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": para}}]}
+            })
+
+    # 3. 핵심 시장 시사점 H2 (3줄 표준 불릿)
+    if takeaways_3:
         blocks.append({
             "object": "block",
             "type": "heading_2",
             "heading_2": {"rich_text": [{"text": {"content": "💡 핵심 시장 시사점 (Key Takeaways)"}}]}
         })
-        for point in takeaways:
+        for point in takeaways_3:
+            clean_pt = re.sub(r'^[•\-\d\.]+\s*', '', point).strip()
             blocks.append({
                 "object": "block",
                 "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": [{"text": {"content": point}}]}
+                "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": clean_pt}}]}
             })
 
-    # 자산 및 티커 분석 테이블
+    # 4. 자산 및 티커 분석 테이블 (4열 표준)
     if assets:
         blocks.append({
             "object": "block",
@@ -755,6 +850,29 @@ def create_youtube_summary_notion_page(
             }
         })
 
+    # 5. 주간 리포트 연계 퀀트 인덱스 (Macro Signals)
+    now_kst = get_kst_str("%Y-%m-%d %H:%M")
+    blocks.append({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {"rich_text": [{"text": {"content": "🧭 주간 리포트 연계 퀀트 인덱스 (Macro Signals)"}}]}
+    })
+    blocks.append({
+        "object": "block",
+        "type": "bulleted_list_item",
+        "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"시장 심리 / 방향성: {sentiment}"}, "annotations": {"bold": True}}]}
+    })
+    blocks.append({
+        "object": "block",
+        "type": "bulleted_list_item",
+        "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"주요 주도 섹터: {sectors_str}"}}]}
+    })
+    blocks.append({
+        "object": "block",
+        "type": "bulleted_list_item",
+        "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"분석 및 동기화 일시: {now_kst} (KST)"}}]}
+    })
+
     try:
         new_page = client.pages.create(
             parent={"database_id": db_id},
@@ -766,6 +884,16 @@ def create_youtube_summary_notion_page(
         logger.info(f"   ✅ [Notion 생성 성공] {title} (URL: {page_url})")
         return page_id
     except Exception as e:
+        # 만약 '선택' 속성 이름 불일치로 실패 시, 안전하게 대체 시도
+        if "선택" in page_props and "is not a property that exists" in str(e):
+            logger.warning("   ⚠️ '선택' 속성 미존재 감지 -> 속성 제외 후 재시도")
+            page_props.pop("선택", None)
+            try:
+                new_page = client.pages.create(parent={"database_id": db_id}, properties=page_props, children=blocks)
+                return new_page.get("id")
+            except Exception as e2:
+                logger.error(f"   ❌ [Notion 생성 재시도 실패] {title}: {e2}")
+                return None
         logger.error(f"   ❌ [Notion 생성 실패] {title}: {e}")
         return None
 
