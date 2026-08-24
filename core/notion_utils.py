@@ -865,29 +865,57 @@ def build_dirty_payload(
 
 
 # ==============================================================================
-# 6. 한국투자증권(KIS) API 인증 관리 (지능형 디스크 캐싱)
+# 6. 한국투자증권(KIS) API 인증 관리 (지능형 디스크 캐싱: 하루 1회 재사용 보장)
 # ==============================================================================
-TOKEN_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kis_token_cache.json")
+def _get_token_cache_paths() -> List[str]:
+    """KIS 토큰 캐시 파일이 위치할 수 있는 모든 유효 경로 목록을 반환합니다."""
+    candidates = []
+    env_path = os.environ.get("KIS_TOKEN_CACHE_FILE")
+    if env_path:
+        candidates.append(env_path)
+    candidates.append(os.path.join(os.getcwd(), ".kis_token_cache.json"))
+    try:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates.append(os.path.join(project_root, ".kis_token_cache.json"))
+    except Exception:
+        pass
+    try:
+        core_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates.append(os.path.join(core_dir, ".kis_token_cache.json"))
+    except Exception:
+        pass
+
+    unique_paths = []
+    for p in candidates:
+        norm = os.path.normpath(p)
+        if norm not in unique_paths:
+            unique_paths.append(norm)
+    return unique_paths
 
 
 def _load_token_cache() -> Dict[str, Any]:
-    """로컬에 캐시된 KIS 토큰 파일을 읽어옵니다."""
-    if os.path.exists(TOKEN_CACHE_FILE):
-        try:
-            with open(TOKEN_CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+    """프로젝트 루트 및 core 디렉토리에 캐시된 KIS 토큰 파일을 탐색하여 읽어옵니다."""
+    for path in _get_token_cache_paths():
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and data:
+                        return data
+            except Exception:
+                continue
     return {}
 
 
 def _save_token_cache(cache_data: Dict[str, Any]) -> None:
-    """KIS 토큰 정보를 로컬 캐시 파일에 안전하게 저장합니다."""
-    try:
-        with open(TOKEN_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    """KIS 토큰 정보를 프로젝트 루트 및 core 디렉토리 캐시 파일에 모두 동기화하여 저장합니다."""
+    for path in _get_token_cache_paths():
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
 
 def _request_kis_token(
