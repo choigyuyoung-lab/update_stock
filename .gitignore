@@ -32,3 +32,7 @@ dataSources/
 dataSources.local.xml
 # created by virtualenv automatically ....
 
+# 외부 참조 레포지토리
+open-trading-api/
+
+
