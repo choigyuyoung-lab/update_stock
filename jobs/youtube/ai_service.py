@@ -198,6 +198,13 @@ class AIService:
                         logger.warning("⚠️ [Gemini AI] 쿼터 제한(429) 감지 -> 다음 모델로 전환합니다.")
                         time.sleep(3.0)
                         break
+                    if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str.lower():
+                        logger.warning(f"⚠️ [Gemini AI] 일시적 서비스 과부하(503) 감지 ({model_name}, 시도 {attempt}/{max_retries})")
+                        if attempt < max_retries:
+                            time.sleep(base_delay * attempt)
+                            continue
+                        else:
+                            break
                     if "404" in err_str or "NOT_FOUND" in err_str:
                         break
 
