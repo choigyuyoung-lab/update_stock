@@ -19,19 +19,8 @@ from pydantic import BaseModel, Field
 from pathlib import Path
 from dotenv import load_dotenv
 
-# 다중 경로 .env 안전 로드 (작업 디렉터리 무관)
-_CURRENT_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _CURRENT_DIR.parent.parent
-_WORKSPACE_ROOT = _PROJECT_ROOT.parent
-
-for _env_path in [
-    _PROJECT_ROOT / ".env",
-    _WORKSPACE_ROOT / ".env",
-    _WORKSPACE_ROOT / "update_stock" / ".env",
-    _WORKSPACE_ROOT / "k_all_round_portfolio" / ".env",
-]:
-    if _env_path.exists():
-        load_dotenv(_env_path, override=False)
+# .env 환경변수 로드
+load_dotenv()
 
 # Windows 콘솔 인코딩 안전화
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -50,7 +39,14 @@ except ImportError:
 
 from services.prompt_manager import get_fia_youtube_system_instruction
 
+import warnings
+warnings.filterwarnings("ignore", message=".*automatic function calling.*")
+warnings.filterwarnings("ignore", message=".*Support for Python version.*")
+
 logger = logging.getLogger("AIService")
+logging.getLogger("google").setLevel(logging.ERROR)
+logging.getLogger("google_genai").setLevel(logging.ERROR)
+logging.getLogger("google.genai").setLevel(logging.ERROR)
 
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_BASE_DELAY = 3.0

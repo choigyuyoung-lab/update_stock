@@ -75,19 +75,8 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("SyncYouTubeInsights")
 
-# 다중 경로 .env 안전 로드 (작업 디렉터리 무관)
-_CURRENT_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _CURRENT_DIR.parent.parent
-_WORKSPACE_ROOT = _PROJECT_ROOT.parent
-
-for _env_path in [
-    _PROJECT_ROOT / ".env",
-    _WORKSPACE_ROOT / ".env",
-    _WORKSPACE_ROOT / "update_stock" / ".env",
-    _WORKSPACE_ROOT / "k_all_round_portfolio" / ".env",
-]:
-    if _env_path.exists():
-        load_dotenv(_env_path, override=False)
+# .env 환경변수 로드
+load_dotenv()
 
 # ==============================================================================
 # 1. 환경 설정 및 상수 정의 (보안 조치: 하드코딩 제거 완료)
@@ -283,6 +272,13 @@ def resolve_playlist_info(playlist_input: str) -> Optional[Dict[str, str]]:
     }
 
 
+class _YtDlpSilentLogger:
+    """yt-dlp 내부의 노이즈 및 봇 경고 로그를 정숙화하는 전용 로거"""
+    def debug(self, msg: str) -> None: pass
+    def warning(self, msg: str) -> None: pass
+    def error(self, msg: str) -> None: pass
+
+
 def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
     """
     유튜브 영상 URL 또는 Video ID를 바탕으로 영상 메타데이터(제목, 채널명, 설명란, 챕터)를 수집합니다.
@@ -298,14 +294,23 @@ def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
     description = ""
     publish_date = ""
 
-    # 1. yt-dlp 메타데이터 우선 조회 (설명란, 챕터, 채널명 포함)
+    # 1. yt-dlp 메타데이터 우선 조회 (모바일 클라이언트 스푸핑으로 봇 차단 방지)
     if yt_dlp is not None:
         try:
             ydl_opts = {
                 "skip_download": True,
                 "quiet": True,
                 "no_warnings": True,
+                "ignoreerrors": True,
+                "nocheckcertificate": True,
+                "logger": _YtDlpSilentLogger(),
                 "extract_flat": "in_playlist",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "ios", "mweb"],
+                        "skip": ["dash", "hls"]
+                    }
+                }
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
@@ -708,11 +713,6 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
         return None, "", {}
 
     url = f"https://www.youtube.com/watch?v={video_id}"
-    
-    class _YtDlpSilentLogger:
-        def debug(self, msg: str) -> None: pass
-        def warning(self, msg: str) -> None: pass
-        def error(self, msg: str) -> None: pass
 
     ydl_opts = {
         "skip_download": True,
