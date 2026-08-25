@@ -17,5 +17,6 @@ httpx
 
 # 4. Google GenAI (Gemini) SDK & YouTube Parser
 google-genai>=2.19.0
+yt-dlp>=2025.1.1
 youtube-transcript-api>=1.2.4
 pydantic>=2.10.0

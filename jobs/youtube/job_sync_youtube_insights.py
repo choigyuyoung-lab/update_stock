@@ -29,7 +29,18 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+except ImportError:
+    YouTubeTranscriptApi = None
+    TranscriptsDisabled = Exception
+    NoTranscriptFound = Exception
 
 from core.notion_utils import (
     build_notion_client,
@@ -76,7 +87,9 @@ UNORGANIZED_DB_ID = get_db_id("UNORGANIZED_DATABASE_ID", ["UNORGANIZED_DB_ID"], 
 MASTER_DB_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID"], required=False)
 INTEREST_DB_ID = get_db_id("DATABASE_ID", ["INTEREST_DATABASE_ID", "INTEREST_DB_ID"], required=False)
 
-PROCESSED_CACHE_FILE = Path(__file__).resolve().parent / ".processed_youtube_videos.json"
+# 프로젝트 루트 및 jobs/youtube 디렉터리 양쪽 캐시 경로
+REPO_ROOT_CACHE_FILE = Path(__file__).resolve().parent.parent.parent / ".processed_youtube_videos.json"
+LOCAL_DIR_CACHE_FILE = Path(__file__).resolve().parent / ".processed_youtube_videos.json"
 
 # 노션 DB 미연동 시 비상용 기본 채널 목록 (채널명 기반)
 DEFAULT_CHANNELS: List[Dict[str, str]] = []
@@ -86,25 +99,30 @@ DEFAULT_CHANNELS: List[Dict[str, str]] = []
 # 2. 캐시 관리자 (중복 수집 및 AI 토큰 낭비 방지)
 # ==============================================================================
 def load_processed_videos() -> Set[str]:
-    """이미 처리된 유튜브 비디오 ID 집합을 로드합니다."""
-    if PROCESSED_CACHE_FILE.exists():
-        try:
-            with open(PROCESSED_CACHE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return set(data if isinstance(data, list) else data.keys())
-        except Exception as e:
-            logger.warning(f"⚠️ 캐시 파일 읽기 실패 ({PROCESSED_CACHE_FILE}): {e}")
-    return set()
+    """이미 처리 완료된 유튜브 비디오 ID 집합을 로드합니다."""
+    processed = set()
+    for cache_path in [REPO_ROOT_CACHE_FILE, LOCAL_DIR_CACHE_FILE]:
+        if cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    items = set(data if isinstance(data, list) else data.keys())
+                    processed.update(items)
+            except Exception as e:
+                logger.warning(f"⚠️ 캐시 파일 읽기 실패 ({cache_path}): {e}")
+    return processed
 
 
 def save_processed_videos(processed_ids: Set[str]) -> None:
-    """처리된 비디오 ID 목록을 로컬 캐시에 저장합니다."""
-    try:
-        PROCESSED_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(PROCESSED_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(sorted(list(processed_ids)), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.warning(f"⚠️ 캐시 파일 저장 실패 ({PROCESSED_CACHE_FILE}): {e}")
+    """노션에 성공적으로 적재된 비디오 ID 목록을 프로젝트 루트 및 로컬 캐시에 저장합니다."""
+    sorted_ids = sorted(list(processed_ids))
+    for cache_path in [REPO_ROOT_CACHE_FILE, LOCAL_DIR_CACHE_FILE]:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(sorted_ids, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"⚠️ 캐시 파일 저장 실패 ({cache_path}): {e}")
 
 
 # ==============================================================================
@@ -255,7 +273,7 @@ def resolve_playlist_info(playlist_input: str) -> Optional[Dict[str, str]]:
 
 def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
     """
-    유튜브 영상 URL 또는 Video ID를 바탕으로 영상 메타데이터를 수집합니다.
+    유튜브 영상 URL 또는 Video ID를 바탕으로 영상 메타데이터(제목, 채널명, 설명란, 챕터)를 수집합니다.
     """
     vid = extract_video_id(video_input)
     if not vid:
@@ -265,26 +283,54 @@ def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
     video_url = f"https://www.youtube.com/watch?v={vid}"
     title = f"YouTube Video ({vid})"
     channel_name = "YouTube"
+    description = ""
+    publish_date = ""
 
-    # oEmbed API를 통한 제목 및 채널명 조회 (무료, 쿼터 소모 0)
-    try:
-        oembed_url = f"https://www.youtube.com/oembed?url={video_url}&format=json"
-        res = requests.get(oembed_url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            title = data.get("title", title)
-            channel_name = data.get("author_name", channel_name)
-    except Exception as e:
-        logger.debug(f"oEmbed 메타데이터 조회 생략: {e}")
+    # 1. yt-dlp 메타데이터 우선 조회 (설명란, 챕터, 채널명 포함)
+    if yt_dlp is not None:
+        try:
+            ydl_opts = {
+                "skip_download": True,
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": "in_playlist",
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                if info:
+                    title = info.get("title") or title
+                    channel_name = info.get("channel") or info.get("uploader") or channel_name
+                    description = info.get("description") or ""
+                    upload_date = info.get("upload_date")
+                    if upload_date and len(upload_date) == 8:
+                        publish_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+        except Exception as e:
+            logger.debug(f"yt-dlp 메타데이터 조회 생략 ({vid}): {e}")
+
+    # 2. oEmbed API를 통한 보조 조회
+    if not description or title.startswith("YouTube Video"):
+        try:
+            oembed_url = f"https://www.youtube.com/oembed?url={video_url}&format=json"
+            res = requests.get(oembed_url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                title = data.get("title", title)
+                channel_name = data.get("author_name", channel_name)
+        except Exception as e:
+            logger.debug(f"oEmbed 메타데이터 조회 생략: {e}")
 
     now_kst = get_kst_str("%Y-%m-%d %H:%M")
+    if not publish_date:
+        publish_date = now_kst[:10]
+
     return {
         "video_id": vid,
         "title": title,
         "url": video_url,
-        "publish_date": now_kst[:10],
+        "publish_date": publish_date,
         "publish_time_kst": now_kst,
         "channel_name": channel_name,
+        "description": description,
     }
 
 
@@ -606,93 +652,10 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
         return []
 
 
-def get_video_transcript(video_id: str) -> Optional[str]:
-    """
-    youtube-transcript-api를 활용하여 타임스탬프([MM:SS])가 보존된 구조화된 자막 텍스트를 추출합니다.
-    다중 언어 폴백(ko -> ko-KR -> a.ko -> en -> a.en -> 번역/기타) 구조를 적용하여
-    자막 미제공 오류를 원천 방어합니다.
-    """
-    preferred_languages = ["ko", "ko-KR", "a.ko", "en", "a.en", "en-US"]
-    items = []
-    selected_lang = "unknown"
-
-    # 1. list_transcripts 기반 지능형 다중 언어 폴백
-    try:
-        if hasattr(YouTubeTranscriptApi, "list_transcripts"):
-            try:
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                target_transcript = None
-
-                # 1-1. 선호 언어 목록에서 직접 검색 (수동/자동 자막 포함)
-                try:
-                    target_transcript = transcript_list.find_transcript(preferred_languages)
-                except Exception:
-                    pass
-
-                # 1-2. 개별 수동 생성 자막 전수 탐색
-                if not target_transcript:
-                    for t in transcript_list:
-                        if not t.is_generated:
-                            if t.language_code in preferred_languages:
-                                target_transcript = t
-                                break
-
-                # 1-3. 개별 자동 생성 자막 전수 탐색
-                if not target_transcript:
-                    for t in transcript_list:
-                        if t.is_generated:
-                            if t.language_code in preferred_languages:
-                                target_transcript = t
-                                break
-
-                # 1-4. 타 언어 자막 존재 시 한국어 자동 번역 시도
-                if not target_transcript:
-                    for t in transcript_list:
-                        if t.is_translatable:
-                            try:
-                                target_transcript = t.translate("ko")
-                                break
-                            except Exception:
-                                pass
-
-                # 1-5. 마지막 보루: 사용 가능한 첫 번째 자막 사용
-                if not target_transcript:
-                    for t in transcript_list:
-                        target_transcript = t
-                        break
-
-                if target_transcript:
-                    selected_lang = getattr(target_transcript, "language_code", "unknown")
-                    items = target_transcript.fetch()
-                    items = getattr(items, "snippets", items)
-            except (TranscriptsDisabled, NoTranscriptFound):
-                logger.info(f"   ℹ️ [자막 없음] Video ID '{video_id}'에 등록된 자막 트랜스크립트가 없습니다.")
-                return None
-            except Exception as ex_list:
-                logger.debug(f"   ⚠️ list_transcripts 탐색 실패, get_transcript로 직접 폴백: {ex_list}")
-
-        # 2. get_transcript / fetch 직접 호출 폴백
-        if not items:
-            if hasattr(YouTubeTranscriptApi, "fetch"):
-                api = YouTubeTranscriptApi()
-                fetched = api.fetch(video_id, languages=preferred_languages + ["auto"])
-                items = getattr(fetched, "snippets", fetched)
-                selected_lang = "direct_fetch"
-            elif hasattr(YouTubeTranscriptApi, "get_transcript"):
-                items = YouTubeTranscriptApi.get_transcript(video_id, languages=preferred_languages + ["auto"])
-                selected_lang = "direct_get"
-
-    except (TranscriptsDisabled, NoTranscriptFound):
-        logger.info(f"   ℹ️ [자막 없음] Video ID '{video_id}'에 사용 가능한 자막이 없습니다.")
-        return None
-    except Exception as e:
-        logger.warning(f"   ⚠️ [자막 추출 오류] Video ID '{video_id}': {e}")
-        return None
-
+def format_snippets_to_text(items: List[Any]) -> str:
+    """타임스탬프([MM:SS]) 마커를 약 60초 간격으로 삽입하여 정제된 자막 전문을 생성합니다."""
     if not items:
-        return None
-
-    # 약 60초 간격으로 타임스탬프 마커([MM:SS]) 삽입 및 단락 분할
+        return ""
     formatted_chunks = []
     last_marker_sec = -999.0
     current_words = []
@@ -720,11 +683,181 @@ def get_video_transcript(video_id: str) -> Optional[str]:
     if current_words:
         formatted_chunks.append(" ".join(current_words))
 
-    full_text = " ".join(formatted_chunks).strip()
-    if len(full_text) >= 50:
-        logger.info(f"   ✨ [자막 추출 성공] Video ID '{video_id}' (언어: {selected_lang}, 글자수: {len(full_text):,}자)")
-        return full_text
+    return " ".join(formatted_chunks).strip()
+
+
+def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dict[str, Any]]:
+    """
+    [1순위 (2번)] yt-dlp Android/iOS Innertube 클라이언트 스푸핑 기반 자막 및 메타데이터 추출.
+    클라우드(AWS/Azure/GCP) IP 차단을 안전하게 우회하여 수동/자동생성 자막을 수집합니다.
+    """
+    if yt_dlp is None:
+        logger.debug("yt-dlp 패키지가 설치되지 않았습니다.")
+        return None, "", {}
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["ko", "ko-KR", "ko-orig", "en", "en-US", "auto"],
+        "quiet": True,
+        "no_warnings": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "web"],
+                "skip": ["dash", "hls"]
+            }
+        }
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return None, "", {}
+
+            subtitles = info.get("subtitles", {}) or {}
+            auto_subtitles = info.get("automatic_captions", {}) or {}
+
+            candidate_subs = None
+            selected_lang = "unknown"
+
+            # 1. 수동 등록 자막 우선 탐색
+            for lang in ["ko", "ko-KR", "ko-orig", "en", "en-US"]:
+                if lang in subtitles and subtitles[lang]:
+                    candidate_subs = subtitles[lang]
+                    selected_lang = f"manual-{lang}"
+                    break
+
+            # 2. 자동 생성 자막 탐색
+            if not candidate_subs:
+                for lang in ["ko", "ko-KR", "ko-orig", "en", "en-US"]:
+                    if lang in auto_subtitles and auto_subtitles[lang]:
+                        candidate_subs = auto_subtitles[lang]
+                        selected_lang = f"auto-{lang}"
+                        break
+
+            if candidate_subs:
+                # JSON3 > SRV3 > VTT > TTML 순으로 URL 탐색
+                sub_url = None
+                for fmt in candidate_subs:
+                    if fmt.get("ext") == "json3":
+                        sub_url = fmt.get("url")
+                        break
+                if not sub_url:
+                    for fmt in candidate_subs:
+                        if fmt.get("ext") in ["srv3", "vtt", "ttml"]:
+                            sub_url = fmt.get("url")
+                            break
+                if not sub_url and candidate_subs:
+                    sub_url = candidate_subs[0].get("url")
+
+                if sub_url:
+                    res = requests.get(sub_url, timeout=15)
+                    if res.status_code == 200:
+                        # JSON3 파싱
+                        if "json3" in sub_url or res.headers.get("content-type", "").startswith("application/json"):
+                            try:
+                                data = res.json()
+                                events = data.get("events", [])
+                                snippets = []
+                                for ev in events:
+                                    start_ms = ev.get("tStartMs", 0)
+                                    segs = ev.get("segs", [])
+                                    text = "".join([s.get("utf8", "") for s in segs if "utf8" in s]).strip()
+                                    if text and text != "\n":
+                                        snippets.append({"text": text, "start": start_ms / 1000.0})
+                                formatted = format_snippets_to_text(snippets)
+                                if len(formatted) >= 50:
+                                    logger.info(f"   ✨ [yt-dlp 자막 추출 성공] Video ID '{video_id}' ({selected_lang}, {len(formatted):,}자)")
+                                    return formatted, f"yt-dlp ({selected_lang})", info
+                            except Exception:
+                                pass
+
+                        # VTT / 일반 텍스트 파싱 폴백
+                        lines = [
+                            line.strip() for line in res.text.split("\n")
+                            if line.strip() and "-->" not in line and not line.startswith("WEBVTT") and not line.isdigit()
+                        ]
+                        formatted = " ".join(lines).strip()
+                        if len(formatted) >= 50:
+                            logger.info(f"   ✨ [yt-dlp VTT 자막 추출 성공] Video ID '{video_id}' ({selected_lang}, {len(formatted):,}자)")
+                            return formatted, f"yt-dlp-vtt ({selected_lang})", info
+
+            return None, "", info
+
+    except Exception as e:
+        logger.debug(f"yt-dlp 자막 추출 생략 ({video_id}): {e}")
+        return None, "", {}
+
+
+def extract_transcript_via_youtube_transcript_api(video_id: str) -> Optional[str]:
+    """
+    [4순위 (3번)] youtube-transcript-api 기반 보조 자막 추출 (v1.2+ 및 v0.x 하이브리드 지원).
+    """
+    if YouTubeTranscriptApi is None:
+        return None
+
+    preferred_languages = ["ko", "ko-KR", "a.ko", "en", "a.en", "en-US"]
+    try:
+        yta = YouTubeTranscriptApi()
+        if hasattr(yta, "list"):
+            transcript_list = yta.list(video_id)
+            target_transcript = None
+            try:
+                target_transcript = transcript_list.find_transcript(preferred_languages)
+            except Exception:
+                pass
+            if not target_transcript:
+                for t in transcript_list:
+                    if not getattr(t, "is_generated", False) and getattr(t, "language_code", "") in preferred_languages:
+                        target_transcript = t
+                        break
+            if not target_transcript:
+                for t in transcript_list:
+                    if getattr(t, "is_generated", False) and getattr(t, "language_code", "") in preferred_languages:
+                        target_transcript = t
+                        break
+            if not target_transcript:
+                for t in transcript_list:
+                    if getattr(t, "is_translatable", False):
+                        try:
+                            target_transcript = t.translate("ko")
+                            break
+                        except Exception:
+                            pass
+            if not target_transcript:
+                for t in transcript_list:
+                    target_transcript = t
+                    break
+            if target_transcript:
+                items = target_transcript.fetch()
+                items = getattr(items, "snippets", items)
+                text = format_snippets_to_text(items)
+                if len(text) >= 50:
+                    return text
+        elif hasattr(YouTubeTranscriptApi, "list_transcripts"):
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            target_transcript = transcript_list.find_transcript(preferred_languages)
+            items = target_transcript.fetch()
+            text = format_snippets_to_text(items)
+            if len(text) >= 50:
+                return text
+    except Exception as e:
+        logger.debug(f"youtube-transcript-api 시도 실패 ({video_id}): {e}")
     return None
+
+
+def get_video_transcript(video_id: str) -> Optional[str]:
+    """
+    자막 추출 통합 인터페이스: yt-dlp 우선 시도 후 youtube-transcript-api로 폴백합니다.
+    """
+    t_ytdlp, _, _ = extract_transcript_via_ytdlp(video_id)
+    if t_ytdlp:
+        return t_ytdlp
+
+    return extract_transcript_via_youtube_transcript_api(video_id)
 
 
 def extract_concise_channel_tag(raw_channel: str) -> str:
@@ -1027,7 +1160,9 @@ def process_single_video_item(
     force: bool = False
 ) -> bool:
     """
-    단일 유튜브 영상 메타데이터를 기반으로 자막 추출 -> AI 분석 -> 노션 적재를 수행합니다.
+    단일 유튜브 영상 메타데이터를 기반으로
+    다계층 파이프라인(2번 yt-dlp ➔ 4번 설명란/챕터 ➔ 1번 Gemini 비디오 URL ➔ 3번 레거시 자막)을 실행하고
+    노션에 최종 적재가 성공했을 때만 완료 캐시에 등록합니다.
     """
     vid = v["video_id"]
     vtitle = v.get("title", "")
@@ -1038,20 +1173,55 @@ def process_single_video_item(
         return False
 
     print(f"\n🎬 [영상 분석 시작] '{vtitle}' ({pub_date})")
-    print("   ⏳ 자막 스크립트 추출 중...")
-    transcript = get_video_transcript(vid)
 
-    if not transcript:
-        print("   ⚠️ 자막이 제공되지 않아 처리를 건너뜁니다.")
-        processed_ids.add(vid)
-        save_processed_videos(processed_ids)
-        return False
+    analyzed: Optional[YouTubeAnalysisResult] = None
+    rich_meta: Dict[str, Any] = {}
 
-    print(f"   🧠 자막 추출 완료 ({len(transcript):,} 글자). Gemini AI Pydantic 구조화 분석 중...")
-    analyzed: Optional[YouTubeAnalysisResult] = ai_service.analyze_youtube_transcript(transcript, v)
+    # [1단계 / 사용자 제안 2번] yt-dlp 기반 자막 추출 (가장 빠름 & 최소 토큰)
+    print("   ⏳ [1단계: yt-dlp] 자막 트랜스크립트 추출 중...")
+    transcript, sub_source, rich_meta = extract_transcript_via_ytdlp(vid)
+    if rich_meta:
+        if rich_meta.get("title") and (not v.get("title") or v.get("title").startswith("YouTube Video")):
+            v["title"] = rich_meta["title"]
+        if rich_meta.get("channel") and (not v.get("channel_name") or v.get("channel_name") == "YouTube"):
+            v["channel_name"] = rich_meta["channel"]
+        if rich_meta.get("description"):
+            v["description"] = rich_meta["description"]
+
+    if transcript and len(transcript) >= 50:
+        print(f"   🧠 [yt-dlp 자막 추출 성공] ({len(transcript):,} 글자, 소스: {sub_source}). Gemini AI 구조화 분석 중...")
+        analyzed = ai_service.analyze_youtube_transcript(transcript, v)
+
+    # [2단계 / 사용자 제안 4번] 영상 상세 설명란(Description) & 챕터 타임라인 기반 분석
+    if not analyzed:
+        desc = v.get("description") or (rich_meta.get("description") if rich_meta else "")
+        if desc and len(desc.strip()) >= 50:
+            print(f"   📋 [2단계: 설명란/챕터] 자막 미제공 -> 영상 상세 설명란({len(desc):,}자) 기반 AI 분석 진행 중...")
+            formatted_desc = (
+                f"[동영상 메타데이터 & 상세 챕터 타임라인 (자막 대체 폴백)]\n"
+                f"- 영상 제목: {v.get('title')}\n"
+                f"- 채널명: {v.get('channel_name')}\n"
+                f"- 게시일자: {v.get('publish_date')}\n\n"
+                f"[상세 설명 및 타임라인 전문]\n{desc[:30000]}"
+            )
+            analyzed = ai_service.analyze_youtube_transcript(formatted_desc, v)
+
+    # [3단계 / 사용자 제안 1번] Gemini 네이티브 YouTube URL 직접 멀티모달 분석 (음성/화면 차트 시청)
+    if not analyzed:
+        video_url = v.get("url") or f"https://www.youtube.com/watch?v={vid}"
+        print(f"   👑 [3단계: Gemini Video URL] 네이티브 멀티모달 분석 시도 중 ({video_url})...")
+        analyzed = ai_service.analyze_youtube_video(video_url, v)
+
+    # [4단계 / 사용자 제안 3번] youtube-transcript-api 레거시 보조 시도
+    if not analyzed:
+        print("   🔍 [4단계: youtube-transcript-api] 레거시 자막 추출 보조 시도 중...")
+        legacy_sub = extract_transcript_via_youtube_transcript_api(vid)
+        if legacy_sub and len(legacy_sub) >= 50:
+            print(f"   🧠 [레거시 자막 취득 성공] ({len(legacy_sub):,} 글자). Gemini AI 분석 중...")
+            analyzed = ai_service.analyze_youtube_transcript(legacy_sub, v)
 
     if not analyzed:
-        print("   ❌ AI 분석 실패.")
+        print(f"   ❌ [분석 실패] 영상 '{vtitle}'에 대한 AI 분석에 최종 실패하였습니다. (재시도를 위해 캐시에 등록하지 않습니다)")
         return False
 
     # 🛡️ 공식 마스터 DB & 온톨로지 사전 기반 티커 2차 정밀 교차 검증 및 보정 (하드코딩 0%)
@@ -1092,10 +1262,12 @@ def process_single_video_item(
             study_page_id=page_id
         )
 
+    # 💾 노션 생성 성공 시에만 캐시에 등록 (영구 패싱 방지)
     if page_id:
         processed_ids.add(vid)
         save_processed_videos(processed_ids)
-        time.sleep(1.0)
+        print(f"   💾 [완료 캐시 등록] Video ID '{vid}' 저장 완료")
+        time.sleep(2.0)
         return True
 
     return False
