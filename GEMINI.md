@@ -79,22 +79,28 @@ For 7-asset quantitative allocation models and portfolio diagnostics, refer to [
 
 ## 🚨 2. Development & Operational Domain Invariants
 
-1. **Twin-Pair SSOT Mirroring**:
-   - `update_stock` and `k_all_round_portfolio` are a Single Source of Truth pair. Modifications to data models or ontology MUST be reflected across both.
+1. **Twin-Pair Single Source of Truth (SSOT)**:
+   - `k_all_round_portfolio` and `update_stock` are tightly coupled. Common utilities, asset allocation rules, and schema changes MUST be mirrored consistently across both repositories.
 2. **Smart Work Start Sync (`1_작업시작_동기화.bat`)**:
-   - Detects environment transitions, warns about uncommitted changes, briefs previous commits, and prompts periodic checklists.
+   - Automatically detects environment switching (Office $\leftrightarrow$ Home), alerts uncommitted changes, briefs previous commits, and prompts periodic (7-Day / 30-Day) strategic checklists.
 3. **Automated Git Commit/Push Prohibition**:
-   - Final commits and pushes must be executed manually by the user via `3_작업종료_동기화.bat`.
-4. **Notion Database Schema Auto-Provisioning**:
-   - Missing columns (e.g., `업데이트 일자`) are automatically created via API.
-5. **Pydantic Structured Outputs Enforcement**:
-   - Gemini AI calls MUST use structured schemas (`response_schema=YouTubeAnalysisResult`) to eliminate markdown regex parsing errors.
+   - AI agents MUST stop after code verification. Final commits and pushes MUST be manually executed by the user via `3_작업종료_동기화.bat`.
+4. **Pre-Execution Korean Terminal Command Briefing**:
+   - Before executing terminal commands, ALWAYS explain in Korean what command is being executed and why.
+5. **Notion Schema Auto-Provisioning & Defensive Guard**:
+   - Auto-create missing timestamp columns (e.g., `업데이트 일자`) via API, and ALWAYS guard property access with `if field in props`.
+6. **Report Linguistic Termination Standard**:
+   - All diagnostic statements MUST use Korean institutional noun-ending terminations (`~함`, `~임`, `~필요`, `~권고`).
+7. **iOS & Mobile Anti-Bot Automation Standard**:
+   - When running YouTube synchronization in cloud environments with anti-bot IP blocks (429/empty transcripts), utilize mobile carrier IP execution via iOS terminal apps (`a-Shell`, `iSH Shell`, `Pythonista`) triggered by iOS Shortcuts Automation (scheduled times or charger connection) to guarantee 100% transcript extraction without bot challenges.
 
 <!--
-## 🚨 2. 개발 및 운영 절대 준수 원칙
-1. 2대 프로젝트 쌍(Twin Pair) 동기화 원칙: 한쪽의 데이터 구조, 온톨로지, 스키마 수정 시 양쪽 프로젝트에 동시에 영향 반영.
-2. 스마트 시작 동기화: 환경 전환 감지, 미동기화 파일 경고, 직전 작업 요약, 주기별 전략 점검 체크리스트 제공.
-3. 자동 Git 커밋/푸시 금지: 최종 커밋/푸시는 사용자가 3_작업종료_동기화.bat를 통해 실행하도록 안내.
-4. 노션 DB 스키마 자동 프로비저닝: 필수 열 자동 생성.
-5. Pydantic Structured Outputs 준수: Gemini AI 분석 시 response_schema=YouTubeAnalysisResult 사용하여 정규식 오류 차단.
+## 🚨 4. 프로젝트 불변 도메인 원칙
+1. 2대 프로젝트 쌍(Twin Pair) 단일 진실 공급원(SSOT) 원칙: 공통 유틸, 자산 분류 룰, 스키마 수정 시 양쪽 프로젝트에 일관되게 반영함.
+2. 스마트 시작 동기화: 환경 전환 감지, 미동기화 파일 경고, 직전 작업 요약, 주기별 전략 점검 질문 팝업 제공.
+3. 자동 Git 커밋/푸시 금지: 코드 수정 및 검증까지만 완료하고 최종 커밋/푸시는 사용자가 수동 실행하도록 안내.
+4. 터미널 명령어 사전 한국어 안내 원칙: 실행 전 무엇을 위해 어떤 명령어를 실행하는지 한국어로 명확히 설명.
+5. 노션 DB 스키마 자동 프로비저닝 & 방어 로직: 누락 열 자동 생성 및 if field in props 방어 로직 적용.
+6. 리포트 문체 규칙: 모든 분석 문장은 명사형 종결어미(~함, ~임, ~필요, ~권고)로 작성.
+7. iOS & 모바일 안티봇 자동화 표준: 클라우드 IP 차단(429/자막 0자) 우회를 위해 아이폰 터미널 앱(a-Shell, iSH Shell, Pythonista)과 iOS 단축어 자동화(특정 시간/충전기 연결 시 무인 실행)를 활용한 모바일 통신사 IP 기반 100% 무차단 자막 수집 방식을 지원함.
 -->

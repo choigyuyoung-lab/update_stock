@@ -730,9 +730,21 @@ def prepare_video_payload_for_queue(v: Dict[str, Any], guide_page_id: Optional[s
         if r_meta.get("description"):
             v["description"] = r_meta["description"]
 
+    # 자막이 없거나 상세 설명란이 비어있는 경우 영상 메타데이터(설명란/챕터) 자동 Fallback 확보
+    if not v.get("description"):
+        full_info = resolve_video_info(vid)
+        if full_info:
+            if full_info.get("description"):
+                v["description"] = full_info["description"]
+            if full_info.get("title") and (not v.get("title") or v.get("title").startswith("YouTube Video")):
+                v["title"] = full_info["title"]
+            if full_info.get("channel_name") and (not v.get("channel_name") or v.get("channel_name") == "YouTube"):
+                v["channel_name"] = full_info["channel_name"]
+
     v["transcript"] = t_text or ""
     v["sub_source"] = sub_src or ""
     return v
+
 
 
 # ==============================================================================

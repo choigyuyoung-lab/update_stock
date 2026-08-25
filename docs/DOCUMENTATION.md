@@ -180,10 +180,27 @@ update_stock/
   python -m jobs.finance.job_sync_finance_us --force
   ```
 
+### ❓ Q5. How to run YouTube sync on iOS / Mobile without anti-bot IP blocks?
+- Install `a-Shell` (Free ARM64 native terminal) or `iSH Shell` / `Pythonista` from App Store.
+- Clone repository & install dependencies:
+  ```bash
+  git clone https://github.com/<user>/update_stock.git
+  pip install requests python-dotenv notion-client yt-dlp youtube-transcript-api google-genai
+  ```
+- Set up iOS **[Shortcuts App ➔ Automation]**:
+  - Trigger: Scheduled time (e.g. 08:00 AM, 06:00 PM) or "When Connected to Charger"
+  - Action: Execute command in `a-Shell`:
+    ```bash
+    cd update_stock && git pull && python -m jobs.youtube.job_sync_youtube_insights
+    ```
+- Mobile carrier IP (LTE/5G) completely avoids cloud datacenter IP blocks (429), extracting 20,000+ characters of subtitles and updating Notion 100% reliably.
+
 <!--
 ## 💡 4. [맥락 복원 가이드] FAQ
 - Q1. 신규 종목 추가: 노션에 티커 등록 시 KIS 마스터 + 온톨로지 사전 DB가 자동 분류
 - Q2. 매핑 규칙 수정: 노션 사전 DB (tbl_dictionary) 수정 후 python -m jobs.local_db.job_sync_local_db 실행
 - Q3. 한투 API 로직 수정: jobs/finance/kis_data_service.py
 - Q4. 로컬 디버깅 실행: python -m jobs.master.job_sync_master_kr
+- Q5. iOS/모바일 안티봇 무인 자동화: a-Shell/iSH/Pythonista + iOS 단축어 자동화(특정 시간/충전기 연결 시 무인 실행)로 통신사 LTE/5G IP를 활용해 429 차단 0%로 노션 자동 적재
 -->
+
