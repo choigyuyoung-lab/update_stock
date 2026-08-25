@@ -423,6 +423,8 @@ def _format_notion_error(error: Exception) -> str:
 def safe_databases_query(
     client: Any,
     database_id: str,
+    filter: Optional[Dict[str, Any]] = None,
+    sorts: Optional[List[Dict[str, Any]]] = None,
     start_cursor: Optional[str] = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     max_retries: int = 3,
@@ -432,7 +434,11 @@ def safe_databases_query(
     attempt = 1
     while True:
         try:
-            params = {"database_id": database_id, "page_size": page_size}
+            params: Dict[str, Any] = {"database_id": database_id, "page_size": page_size}
+            if filter:
+                params["filter"] = filter
+            if sorts:
+                params["sorts"] = sorts
             if start_cursor:
                 params["start_cursor"] = start_cursor
             if hasattr(client, "databases") and hasattr(client.databases, "query"):
@@ -441,7 +447,11 @@ def safe_databases_query(
                 db_info = client.databases.retrieve(database_id=database_id)
                 data_sources = db_info.get("data_sources", [])
                 ds_id = data_sources[0]["id"] if data_sources else database_id
-                ds_params = {"data_source_id": ds_id, "page_size": page_size}
+                ds_params: Dict[str, Any] = {"data_source_id": ds_id, "page_size": page_size}
+                if filter:
+                    ds_params["filter"] = filter
+                if sorts:
+                    ds_params["sorts"] = sorts
                 if start_cursor:
                     ds_params["start_cursor"] = start_cursor
                 return cast(Dict[str, Any], client.data_sources.query(**ds_params))
