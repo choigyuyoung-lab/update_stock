@@ -598,12 +598,119 @@ def append_video_history_to_guide_page(
 
 
 # ==============================================================================
-# 5. 유튜브 RSS 피드 파서 (API 쿼터 0 소모 & KST 시간 기준 정렬)
+# 5. 유튜브 RSS 피드 파서 및 yt-dlp 폴백 엔진 (무장애 수집 보장)
 # ==============================================================================
+def fetch_recent_videos_via_ytdlp(
+    channel_or_playlist_id: str,
+    channel_name: str = "",
+    max_videos: int = 5,
+    is_playlist: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    [2차 폴백] yt-dlp flat extraction을 이용하여 채널 또는 재생목록의 최신 영상 목록을 안전하게 수집합니다.
+    (YouTube RSS 피드 404 또는 네트워크 장애 발생 시 자동 호출)
+    """
+    if yt_dlp is None:
+        logger.warning(f"⚠️ [{channel_name}] yt-dlp 모듈이 설치되어 있지 않아 폴백 수집을 수행할 수 없습니다.")
+        return []
+
+    is_pl = (
+        is_playlist
+        or channel_or_playlist_id.startswith("PL")
+        or channel_or_playlist_id.startswith("UU")
+        or channel_or_playlist_id.startswith("FL")
+        or channel_or_playlist_id.startswith("RD")
+        or channel_or_playlist_id.startswith("OLAK5uy_")
+    )
+    if is_pl:
+        target_url = f"https://www.youtube.com/playlist?list={channel_or_playlist_id}"
+    elif channel_or_playlist_id.startswith("http"):
+        target_url = channel_or_playlist_id
+    elif channel_or_playlist_id.startswith("@"):
+        target_url = f"https://www.youtube.com/{channel_or_playlist_id}/videos"
+    else:
+        target_url = f"https://www.youtube.com/channel/{channel_or_playlist_id}/videos"
+
+    ydl_opts = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        "nocheckcertificate": True,
+        "extract_flat": "in_playlist",
+        "playlistend": max(max_videos * 2, 10),
+        "logger": _YtDlpSilentLogger(),
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "mweb"],
+                "skip": ["dash", "hls"]
+            }
+        }
+    }
+
+    videos: List[Dict[str, Any]] = []
+    seen_vids = set()
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target_url, download=False)
+            if not info:
+                return []
+            entries = info.get("entries") or []
+            now_kst = get_kst_str("%Y-%m-%d %H:%M")
+            now_date = now_kst[:10]
+
+            for e in entries:
+                if not e:
+                    continue
+                raw_id = e.get("id") or ""
+                vid = raw_id if len(raw_id) == 11 else (extract_video_id(e.get("url", "")) or raw_id)
+                if not vid or vid in seen_vids:
+                    continue
+
+                seen_vids.add(vid)
+                vtitle = (e.get("title") or "").strip()
+                if not vtitle:
+                    continue
+
+                vurl = e.get("url")
+                if not vurl or not vurl.startswith("http"):
+                    vurl = f"https://www.youtube.com/watch?v={vid}"
+
+                upload_date = e.get("upload_date")
+                if upload_date and len(str(upload_date)) == 8:
+                    s_ud = str(upload_date)
+                    pub_date = f"{s_ud[:4]}-{s_ud[4:6]}-{s_ud[6:8]}"
+                else:
+                    pub_date = now_date
+
+                pub_time_kst = f"{pub_date} 00:00"
+
+                videos.append({
+                    "video_id": vid,
+                    "title": vtitle,
+                    "url": vurl,
+                    "publish_date": pub_date,
+                    "publish_time_kst": pub_time_kst,
+                    "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
+                    "channel_name": e.get("channel") or e.get("uploader") or channel_name or channel_or_playlist_id,
+                })
+
+                if len(videos) >= max_videos:
+                    break
+
+        if videos:
+            logger.info(f"   ✨ [yt-dlp 폴백 성공] [{channel_name}] {len(videos)}개 최신 영상 확보 완료")
+        return videos
+
+    except Exception as e:
+        logger.warning(f"   ⚠️ [{channel_name}] yt-dlp 폴백 수집 중 예외 발생: {e}")
+        return []
+
+
 def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False) -> List[Dict[str, Any]]:
     """
     유튜브 채널 또는 재생목록 RSS 피드를 파싱하여 한국 시간(KST) 기준 최신 업로드 비디오 목록을 반환합니다.
-    (YouTube Data API 쿼터를 전혀 소모하지 않음)
+    (1차: API 쿼터 0 소모 RSS -> 404/장애 시 2차: yt-dlp 자동 폴백)
     """
     if is_playlist or channel_id.startswith("PL") or channel_id.startswith("UU") or channel_id.startswith("FL") or channel_id.startswith("RD") or channel_id.startswith("OLAK5uy_"):
         rss_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={channel_id}"
@@ -616,8 +723,8 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
     try:
         res = requests.get(rss_url, headers=headers, timeout=10)
         if res.status_code != 200:
-            logger.warning(f"⚠️ [{channel_name}] RSS 피드 수신 실패 (Status {res.status_code})")
-            return []
+            logger.warning(f"⚠️ [{channel_name}] RSS 피드 수신 실패 (Status {res.status_code}) -> yt-dlp 2차 폴백 전환")
+            return fetch_recent_videos_via_ytdlp(channel_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
 
         root = ET.fromstring(res.content)
         ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
@@ -659,14 +766,18 @@ def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_vi
                     "channel_name": channel_name or channel_id,
                 })
 
+        if not videos:
+            logger.info(f"   ℹ️ [{channel_name}] RSS 엔트리 없음 -> yt-dlp 2차 폴백 확인")
+            return fetch_recent_videos_via_ytdlp(channel_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
+
         # 한국 시간(KST) 기준 최신 발행일시 역순(최신순) 엄격 정렬
         videos.sort(key=lambda x: x["publish_dt"], reverse=True)
 
         return videos[:max_videos]
 
     except Exception as e:
-        logger.error(f"❌ [{channel_name}] RSS 파싱 에러: {e}")
-        return []
+        logger.warning(f"⚠️ [{channel_name}] RSS 파싱 예외 발생 ({e}) -> yt-dlp 2차 폴백 전환")
+        return fetch_recent_videos_via_ytdlp(channel_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
 
 
 def format_snippets_to_text(items: List[Any]) -> str:
