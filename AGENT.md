@@ -193,3 +193,32 @@ When concluding architectural changes or code refactoring, append this handoff p
 - **데이터와 로직의 분리 (Proactive Decoupling)**: 정적 룰셋, 사전 테이블, 도메인 분류 기준은 파이썬 코드 내 하드코딩을 지양하고 data/*.json 또는 data/*.csv로 분리하여 파이썬 코드는 순수 로직만 유지함.
 - **중복 방지 우선 원칙 (Deduplication First)**: 노션 및 로컬 DB에 데이터를 생성/등록하는 모든 로직은 반드시 인메모리 3중 교차 검증(0.001s)을 선행하여 기존 레코드 재사용을 원천 강제함.
 -->
+
+---
+
+## 9. ✂️ Anti-Bloat & Code Dieting Standards
+
+- **Common Infrastructure Delegation (No Local Redundancies)**:
+  - Never reimplement custom ticker normalizers, manual SQLite query blocks, or ad-hoc Notion pagination loops in job scripts. ALWAYS delegate to `core.stock_registry.StockRegistryGateway` and `core.notion_utils`.
+- **In-Memory Resolvers over Heavy Network Scraping**:
+  - Prohibit live HTML scraping (`requests.get`) for identifier resolution when targets (URLs, channel IDs, playlist IDs) can be classified via pure in-memory regex heuristics (0.001s).
+- **Data-Driven Payload & Block Construction**:
+  - Replace verbose procedural dictionary appending (hundreds of lines of manual block setup) with concise list comprehensions and structured generator dictionaries.
+- **Consolidated Cache & File I/O Paths**:
+  - Unify multi-location cache lookups (`PROJECT_ROOT` and `LOCAL_DIR`) into clean list-driven iteration rather than duplicating try-except blocks across functions.
+- **Entrypoint Path Safety (`sys.path` Root Injection)**:
+  - All executable job scripts under `jobs/` MUST ensure `PROJECT_ROOT` is registered in `sys.path` at startup to guarantee flawless standalone CLI execution (`python jobs/.../job_*.py`) and module invocation.
+
+<!--
+## 9. ✂️ 코드 다이어트 & 안티 블로트 표준 (Anti-Bloat Standards)
+- **공통 인프라 위임 최우선 (중복 함수 박멸)**:
+  - Job 스크립트 내에 자체 티커 정규화 함수, 수동 SQLite 쿼리, 노션 DB 수동 페이지네이션 루프를 중복 구현하지 않고, 반드시 `core.stock_registry.StockRegistryGateway` 및 `core.notion_utils` 표준 함수로 일원화함.
+- **무거운 웹 스크래핑 대신 인메모리 정규식 해석기 우선**:
+  - URL, 채널 ID, 재생목록 ID 등 정규식으로 식별 가능한 대상에 대해 무거운 라이브 HTML 스크래핑(`requests.get`)을 금지하고, 0.001초 순수 인메모리 정규식 파이프라인으로 처리함.
+- **데이터 주도형 페이로드 & 블록 생성**:
+  - 수백 줄에 달하는 절차형 딕셔너리 append 블록을 지양하고, List Comprehension과 데이터 주도형 빌더 함수를 사용하여 코드를 50% 이상 슬림화함.
+- **통합 캐시 경로 I/O 단일화**:
+  - 프로젝트 루트 및 로컬 디렉터리 등 다중 경로 캐시 탐색 시, 중복 try-except 대신 통합 경로 리스트 순회 헬퍼로 간결하게 처리함.
+- **진입점 경로 안전성 (`sys.path` 선제 등록)**:
+  - `jobs/` 하위의 모든 실행 스크립트는 최상단에 `PROJECT_ROOT`를 `sys.path`에 선제 등록하여, 단독 CLI 실행(`python jobs/.../job_*.py`) 시에도 `ModuleNotFoundError` 없이 완벽히 동작하도록 보장함.
+-->

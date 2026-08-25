@@ -32,11 +32,13 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # 🌟 처리된 영상 중복 방지 캐시 복원/저장
-      - name: Restore / Save YouTube Video Cache
+      # 🌟 처리된 영상 캐시 및 미처리 대기열(Queue) 복원/저장
+      - name: Restore / Save YouTube Video Cache & Queue
         uses: actions/cache@v4
         with:
-          path: .processed_youtube_videos.json
+          path: |
+            .processed_youtube_videos.json
+            .youtube_pending_queue.json
           key: yt-processed-cache-${{ github.run_id }}
           restore-keys: |
             yt-processed-cache-

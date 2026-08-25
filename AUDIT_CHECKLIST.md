@@ -1,14 +1,14 @@
 <!--
-시스템 수석 감사관(Principal QA Architect) 관점에서 @[d:\Github IDE\AUDIT_CHECKLIST.md] 의 5대 영역 검수 기준을 바탕으로 현재 워크스페이스(k_all_round_portfolio 및 update_stock) 전체를 전수 감사하고 종합 감사 보고서를 제출해줘.
+시스템 수석 감사관(Principal QA Architect) 관점에서 @[d:\Github IDE\AUDIT_CHECKLIST.md] 의 6대 영역 검수 기준을 바탕으로 현재 워크스페이스(k_all_round_portfolio 및 update_stock) 전체를 전수 감사하고 종합 감사 보고서를 제출해줘.
 -->
 
-# 🛡️ [K-All-Round Master] 5대 영역 시스템 종합 품질 검수 계획서 (AUDIT_CHECKLIST.md)
+# 🛡️ [K-All-Round Master] 6대 영역 시스템 종합 품질 검수 계획서 (AUDIT_CHECKLIST.md)
 
 <!--
-# 🛡️ [K-올라운드 마스터] 5대 영역 시스템 종합 품질 검수 계획서 (AUDIT_CHECKLIST.md)
+# 🛡️ [K-올라운드 마스터] 6대 영역 시스템 종합 품질 검수 계획서 (AUDIT_CHECKLIST.md)
 -->
 
-> **목적**: 금융 데이터 수집/가공 ETL 허브(`update_stock`) 및 7대 자산배분 퀀트 리포트 엔진(`k_all_round_portfolio`)의 무결성, 안정성, 단일 진실 공급원(SSOT), 코드 품질을 전수 검사하기 위한 최고 수준의 엔터프라이즈 감사 표준 명세서입니다.
+> **목적**: 금융 데이터 수집/가공 ETL 허브(`update_stock`) 및 7대 자산배분 퀀트 리포트 엔진(`k_all_round_portfolio`)의 무결성, 안정성, 단일 진실 공급원(SSOT), 코드 슬림화 및 품질을 전수 검사하기 위한 최고 수준의 엔터프라이즈 감사 표준 명세서입니다.
 
 ---
 
@@ -64,3 +64,18 @@
   - GitHub Actions 러너 환경에서 Git으로 추적 중인 `data/*.csv` 파일들로부터 SQLite DB(`stock_master.db`)가 0.01초 만에 자동 복원(`auto_restore_from_csv_if_needed`)되는가?
 - [ ] **5.3. 자동 Git 커밋/푸시 금지 및 안전 종료**:
   - AI 에이전트가 `git commit/push`를 자동 실행하지 않고 `3_작업종료_동기화.bat`를 통해 사용자가 최종 점검 후 수동 커밋하도록 안내하는가?
+
+---
+
+## 6️⃣ [영역 6: 코드 슬림화 및 안티 블로트 검수 (Code Diet & Anti-Bloat)]
+
+- [ ] **6.1. 공통 인프라 위임 및 중복 로직 박멸 (Infrastructure Delegation)**:
+  - 자체 티커 정규화(`normalize_ticker`), 수동 마스터 DB 쿼리 루프, 하드코딩된 DB ID가 제거되고 `StockRegistryGateway` 및 `core/` 표준 모듈에 100% 위임되었는가?
+- [ ] **6.2. 무거운 웹 스크래핑 배제 및 인메모리 해석기 우선 (In-Memory Pure Resolver)**:
+  - 불필요한 HTML 네트워크 스크래핑 없이 정규식 및 인메모리 파이프라인으로 채널/재생목록/영상을 0.001초 만에 자동 분류하는가?
+- [ ] **6.3. 노션 블록 및 페이로드 데이터 주도형 생성 (Data-Driven Payload)**:
+  - 수백 줄에 달하던 절차형 딕셔너리 `append` 코드가 List Comprehension 및 간결한 데이터 주도형 딕셔너리 빌더로 슬림화(50% 이상 압축)되었는가?
+- [ ] **6.4. 통합 캐시/대기열 I/O 단일화 (Consolidated Cache I/O)**:
+  - 프로젝트 루트 및 로컬 디렉터리 캐시 탐색 시 중복 `try-except` 블록 없이 통합 경로 리스트 순회로 일원화되었는가?
+- [ ] **6.5. 독립 실행 모듈 경로 선제 보장 (`sys.path` Root Injection)**:
+  - `jobs/` 하위 스크립트가 단독 CLI 실행(`python jobs/.../job_*.py`) 시에도 `ModuleNotFoundError` 없이 완벽히 동작하도록 `PROJECT_ROOT`가 `sys.path`에 선제 등록되었는가?

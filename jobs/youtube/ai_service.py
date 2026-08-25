@@ -167,7 +167,7 @@ class AIService:
 {transcript_text[:250000]}
 """
 
-        models_to_try = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-pro"]
+        models_to_try = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
 
         for model_name in models_to_try:
             for attempt in range(1, max_retries + 1):
@@ -222,94 +222,4 @@ class AIService:
                         time.sleep(base_delay * attempt)
 
         logger.error("❌ YouTube 자막 Structured Output 분석에 최종 실패하였습니다.")
-        return None
-
-    def analyze_youtube_video(
-        self,
-        video_url: str,
-        video_meta: Dict[str, Any],
-        max_retries: int = DEFAULT_MAX_RETRIES,
-        base_delay: float = DEFAULT_BASE_DELAY
-    ) -> Optional[YouTubeAnalysisResult]:
-        """
-        Gemini 네이티브 멀티모달 기능(Part.from_uri)을 활용하여
-        유튜브 영상 URL을 직접 입력받아 자막/음성/화면 차트를 통합 분석하고
-        Pydantic YouTubeAnalysisResult 스키마를 강제한 Structured Outputs를 생성합니다.
-        (스크래핑/자막 추출 불필요, IP 차단 0%)
-        """
-        if not self.is_available():
-            logger.error("❌ Gemini API 클라이언트를 사용할 수 없습니다. GEMINI_API_KEY를 확인하세요.")
-            return None
-
-        fia_system_prompt = get_fia_youtube_system_instruction()
-
-        prompt_text = f"""[영상 메타데이터]
-- 채널명: {video_meta.get('channel_name', '')}
-- 영상 원제목: {video_meta.get('title', '')}
-- 영상 URL: {video_url}
-- 게시일자: {video_meta.get('publish_date', '')}
-
-이 영상의 전체 음성 및 화면(슬라이드, 차트, 종목 타점)을 종합 분석하여 구조화된 JSON 스키마 규격으로 심층 리포트를 작성해줘."""
-
-        models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash-lite"]
-
-        for model_name in models_to_try:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    config = types.GenerateContentConfig(
-                        system_instruction=fia_system_prompt,
-                        response_mime_type="application/json",
-                        response_schema=YouTubeAnalysisResult,
-                        temperature=0.1,
-                    )
-
-                    response = self.client.models.generate_content(
-                        model=model_name,
-                        contents=[
-                            types.Part.from_uri(
-                                file_uri=video_url,
-                                mime_type="video/mp4"
-                            ),
-                            prompt_text
-                        ],
-                        config=config,
-                    )
-
-                    if response and response.text:
-                        parsed_result = YouTubeAnalysisResult.model_validate_json(response.text.strip())
-                        if not parsed_result.publish_date or parsed_result.publish_date.lower() == "null":
-                            parsed_result.publish_date = str(video_meta.get("publish_date", ""))
-
-                        # 티커 기본 정규화 (대문자 및 6자리 zfill)
-                        for item in (parsed_result.assets or []):
-                            t_clean = (item.ticker or "").strip().upper()
-                            if t_clean.isdigit() and 1 <= len(t_clean) <= 6:
-                                item.ticker = t_clean.zfill(6)
-                            else:
-                                item.ticker = t_clean
-
-                        logger.info(f"✅ [Gemini AI Native Video] 멀티모달 Structured Output 파싱 성공 (모델: {model_name})")
-                        return parsed_result
-
-                except Exception as exc:
-                    err_str = str(exc)
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        logger.warning(f"⚠️ [Gemini AI Video] 쿼터 제한(429) 감지 ({model_name}) -> 대기 후 다음 모델 전환")
-                        time.sleep(4.0)
-                        break
-                    if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str.lower():
-                        logger.warning(f"⚠️ [Gemini AI Video] 일시적 과부하(503) 감지 ({model_name}, 시도 {attempt}/{max_retries})")
-                        if attempt < max_retries:
-                            time.sleep(base_delay * attempt)
-                            continue
-                        else:
-                            break
-                    if "404" in err_str or "NOT_FOUND" in err_str:
-                        break
-
-                    logger.warning(f"⚠️ [Gemini AI Video] 호출 오류 ({model_name}, 시도 {attempt}/{max_retries}): {err_str}")
-                    if attempt < max_retries:
-                        time.sleep(base_delay * attempt)
-
-        logger.error("❌ Gemini Native YouTube Video 분석에 최종 실패하였습니다.")
         return None
