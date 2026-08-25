@@ -75,7 +75,19 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("SyncYouTubeInsights")
 
-load_dotenv()
+# 다중 경로 .env 안전 로드 (작업 디렉터리 무관)
+_CURRENT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _CURRENT_DIR.parent.parent
+_WORKSPACE_ROOT = _PROJECT_ROOT.parent
+
+for _env_path in [
+    _PROJECT_ROOT / ".env",
+    _WORKSPACE_ROOT / ".env",
+    _WORKSPACE_ROOT / "update_stock" / ".env",
+    _WORKSPACE_ROOT / "k_all_round_portfolio" / ".env",
+]:
+    if _env_path.exists():
+        load_dotenv(_env_path, override=False)
 
 # ==============================================================================
 # 1. 환경 설정 및 상수 정의 (보안 조치: 하드코딩 제거 완료)
@@ -696,6 +708,12 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
         return None, "", {}
 
     url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    class _YtDlpSilentLogger:
+        def debug(self, msg: str) -> None: pass
+        def warning(self, msg: str) -> None: pass
+        def error(self, msg: str) -> None: pass
+
     ydl_opts = {
         "skip_download": True,
         "writesubtitles": True,
@@ -703,9 +721,12 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
         "subtitleslangs": ["ko", "ko-KR", "ko-orig", "en", "en-US", "auto"],
         "quiet": True,
         "no_warnings": True,
+        "ignoreerrors": True,
+        "nocheckcertificate": True,
+        "logger": _YtDlpSilentLogger(),
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "web"],
+                "player_client": ["android", "ios", "mweb"],
                 "skip": ["dash", "hls"]
             }
         }
