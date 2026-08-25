@@ -12,8 +12,6 @@ __pycache__/
 .kis_token_cache.json
 .kis_cache.json
 *.cache.json
-.processed_*.json
-.youtube_pending_queue.json
 .pending_*.json
 
 # 백업 및 임시 아카이브 디렉토리

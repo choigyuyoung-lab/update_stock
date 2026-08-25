@@ -124,13 +124,20 @@ def load_pending_queue() -> List[Dict[str, Any]]:
     return []
 
 
+def _json_serial_default(obj: Any) -> Any:
+    """JSON 직렬화 불가능한 객체(datetime 등)를 안전하게 변환합니다."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return str(obj)
+
+
 def save_pending_queue(queue_items: List[Dict[str, Any]]) -> None:
     """잔여 대기열 목록을 저장합니다."""
     for qp in QUEUE_PATHS:
         try:
             qp.parent.mkdir(parents=True, exist_ok=True)
             with open(qp, "w", encoding="utf-8") as f:
-                json.dump(queue_items, f, ensure_ascii=False, indent=2)
+                json.dump(queue_items, f, ensure_ascii=False, indent=2, default=_json_serial_default)
         except Exception as e:
             logger.warning(f"⚠️ 대기열 저장 실패 ({qp}): {e}")
 
@@ -156,6 +163,21 @@ def extract_playlist_id(playlist_input: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def extract_channel_id(channel_input: str) -> str:
+    """유튜브 URL 또는 텍스트에서 채널 ID(UC...) 또는 핸들(@...)을 정제 추출합니다."""
+    s = (channel_input or "").strip()
+    clean_s = s.split("?")[0].rstrip("/")
+    m_uc = re.search(r'(UC[A-Za-z0-9_-]{20,24})', s)
+    if m_uc:
+        return m_uc.group(1)
+    m_handle = re.search(r'(@[A-Za-z0-9_.-]+)', s)
+    if m_handle:
+        return m_handle.group(1)
+    if re.match(r'^UC[A-Za-z0-9_-]{20,24}$', clean_s):
+        return clean_s
+    return clean_s
+
+
 def resolve_channel_target(channel_input: str, max_videos: int = 3) -> Dict[str, Any]:
     """CLI 또는 입력값(채널 ID, 재생목록 ID, URL, @핸들)을 표준 소스 규격으로 변환합니다."""
     s = (channel_input or "").strip()
@@ -166,12 +188,14 @@ def resolve_channel_target(channel_input: str, max_videos: int = 3) -> Dict[str,
         return {"page_id": "", "name": s, "type": "재생목록", "url": f"https://www.youtube.com/playlist?list={pl_id}", "channel_id": pl_id, "max_videos": max_videos}
     if v_id:
         return {"page_id": "", "name": s, "type": "단일영상", "url": f"https://www.youtube.com/watch?v={v_id}", "channel_id": v_id, "max_videos": max_videos}
+
+    clean_ch = extract_channel_id(s)
     return {
         "page_id": "",
         "name": s,
         "type": "채널",
-        "url": s if s.startswith("http") else (f"https://www.youtube.com/{s}" if s.startswith("@") else f"https://www.youtube.com/channel/{s}"),
-        "channel_id": s,
+        "url": s if s.startswith("http") else (f"https://www.youtube.com/{clean_ch}" if clean_ch.startswith("@") else f"https://www.youtube.com/channel/{clean_ch}"),
+        "channel_id": clean_ch,
         "max_videos": max_videos,
     }
 
@@ -263,8 +287,9 @@ def load_active_sources_from_notion(client: Any, guide_db_id: str) -> List[Dict[
             elif v_id:
                 src_type, target_id, target_url = "단일영상", v_id, url_val or f"https://www.youtube.com/watch?v={v_id}"
             else:
-                src_type, target_id = "채널", raw_target
-                target_url = url_val or (f"https://www.youtube.com/{raw_target}" if raw_target.startswith("@") else f"https://www.youtube.com/channel/{raw_target}")
+                src_type = "채널"
+                target_id = extract_channel_id(raw_target)
+                target_url = url_val or (f"https://www.youtube.com/{target_id}" if target_id.startswith("@") else f"https://www.youtube.com/channel/{target_id}")
 
             sources.append({
                 "page_id": page.get("id", ""),
@@ -359,18 +384,94 @@ def append_video_history_to_guide_page(
 
 
 # ==============================================================================
-# 5. 유튜브 최신 영상 및 자막 추출 엔진 (yt-dlp 고속 메인 엔진)
+# 5. 유튜브 최신 영상 및 자막 추출 엔진 (yt-dlp 고속 메인 + YouTube RSS 2중 Fallback)
 # ==============================================================================
-def fetch_recent_videos(channel_or_playlist_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False) -> List[Dict[str, Any]]:
-    """yt-dlp flat extraction을 기반으로 최신 영상 목록을 고속으로 수집합니다."""
-    if not channel_or_playlist_id or not yt_dlp:
+def fetch_videos_via_rss(channel_or_playlist_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False) -> List[Dict[str, Any]]:
+    """YouTube 공식 RSS 피드를 통해 외부 의존성 없이 최신 영상 목록을 고속 수집합니다."""
+    clean_id = (channel_or_playlist_id or "").strip()
+    if not clean_id:
         return []
+
+    is_pl = is_playlist or any(clean_id.startswith(p) for p in ["PL", "UU", "FL", "RD", "OLAK5uy_"])
+    if is_pl:
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={clean_id}"
+    elif clean_id.startswith("UC"):
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={clean_id}"
+    else:
+        # URL 또는 @핸들 형태 시 channel_id 정제 시도
+        extracted = extract_channel_id(clean_id)
+        if extracted.startswith("UC"):
+            rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={extracted}"
+        else:
+            return []
+
+    try:
+        res = requests.get(rss_url, timeout=10)
+        if res.status_code != 200:
+            return []
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(res.text)
+        ns = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "yt": "http://www.youtube.com/xml/schemas/2015",
+            "media": "http://search.yahoo.com/mrss/"
+        }
+
+        videos = []
+        now_kst = get_kst_str("%Y-%m-%d %H:%M")
+        now_date = now_kst[:10]
+
+        for entry in root.findall("atom:entry", ns):
+            vid_elem = entry.find("yt:videoId", ns)
+            title_elem = entry.find("atom:title", ns)
+            pub_elem = entry.find("atom:published", ns)
+            author_elem = entry.find("atom:author/atom:name", ns)
+
+            vid = vid_elem.text.strip() if vid_elem is not None and vid_elem.text else ""
+            vtitle = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
+            pub_str = (pub_elem.text[:10] if pub_elem is not None and pub_elem.text else now_date)
+            ch_name = author_elem.text.strip() if author_elem is not None and author_elem.text else (channel_name or "YouTube")
+
+            if vid and vtitle:
+                videos.append({
+                    "video_id": vid,
+                    "title": vtitle,
+                    "url": f"https://www.youtube.com/watch?v={vid}",
+                    "publish_date": pub_str,
+                    "publish_time_kst": f"{pub_str} 00:00",
+                    "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
+                    "channel_name": ch_name,
+                    "guide_name": channel_name or ch_name,
+                })
+                if len(videos) >= max_videos:
+                    break
+
+        if videos:
+            logger.info(f"   ✨ [RSS 피드 수집] [{channel_name or clean_id}] 최신 영상 {len(videos)}개 수집 성공")
+        return videos
+    except Exception as e:
+        logger.debug(f"RSS 피드 수집 실패 ({clean_id}): {e}")
+        return []
+
+
+def fetch_recent_videos(channel_or_playlist_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False) -> List[Dict[str, Any]]:
+    """yt-dlp 및 YouTube RSS 피드 2중 엔진을 통해 최신 영상 목록을 고속으로 수집합니다."""
+    if not channel_or_playlist_id:
+        return []
+
+    # 1. yt-dlp 패키지 미설치 시 즉시 RSS 피드 Fallback 실행
+    if not yt_dlp:
+        logger.warning(f"⚠️ [yt-dlp 미설치] [{channel_name}] YouTube RSS 피드로 대체 수집합니다.")
+        return fetch_videos_via_rss(channel_or_playlist_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
 
     is_pl = is_playlist or any(channel_or_playlist_id.startswith(p) for p in ["PL", "UU", "FL", "RD", "OLAK5uy_"])
     if is_pl:
         target_url = f"https://www.youtube.com/playlist?list={channel_or_playlist_id}"
     elif channel_or_playlist_id.startswith("http"):
-        target_url = channel_or_playlist_id
+        target_url = channel_or_playlist_id.split("?")[0]
+        if not target_url.endswith("/videos") and not is_pl:
+            target_url = f"{target_url.rstrip('/')}/videos"
     elif channel_or_playlist_id.startswith("@"):
         target_url = f"https://www.youtube.com/{channel_or_playlist_id}/videos"
     else:
@@ -420,16 +521,23 @@ def fetch_recent_videos(channel_or_playlist_id: str, channel_name: str = "", max
                     "publish_time_kst": f"{pub_date} 00:00",
                     "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
                     "channel_name": e.get("channel") or e.get("uploader") or channel_name or channel_or_playlist_id,
+                    "guide_name": channel_name or channel_or_playlist_id,
                 })
                 if len(videos) >= max_videos:
                     break
 
         if videos:
             logger.info(f"   ✨ [{channel_name}] 최신 영상 {len(videos)}개 수집 완료")
-        return videos
+            return videos
     except Exception as e:
-        logger.warning(f"   ⚠️ [{channel_name}] 영상 수집 중 예외: {e}")
-        return []
+        logger.warning(f"   ⚠️ [{channel_name}] yt-dlp 영상 수집 중 예외: {e}")
+
+    # 2. yt-dlp 수집 실패/0건 시 2차 RSS 피드 자동 Fallback
+    rss_videos = fetch_videos_via_rss(channel_or_playlist_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
+    if rss_videos:
+        return rss_videos
+
+    return []
 
 
 def format_snippets_to_text(items: List[Any]) -> str:
@@ -587,7 +695,9 @@ def create_youtube_summary_notion_page(client: Any, db_id: str, analyzed: YouTub
     detailed_summary = (analyzed.overall_summary or "").strip()
     sentiment = (getattr(analyzed, "market_sentiment", "") or "중립").strip()
     sectors_str = ", ".join(getattr(analyzed, "leading_sectors", []) or []) or "전반/혼조"
-    channel_tag = clean_channel_name(video_meta.get("channel_name", "") or video_meta.get("guide_name", ""))
+    guide_title = (video_meta.get("guide_name") or "").strip()
+    channel_name = (video_meta.get("channel_name") or "").strip()
+    channel_tag = clean_channel_name(guide_title or channel_name)
 
     page_props: Dict[str, Any] = {
         "Title": {"title": [{"text": {"content": title}}]},
@@ -605,7 +715,7 @@ def create_youtube_summary_notion_page(client: Any, db_id: str, analyzed: YouTub
             "object": "block", "type": "callout",
             "callout": {
                 "icon": {"type": "emoji", "emoji": "📺"}, "color": "blue_background",
-                "rich_text": [{"type": "text", "text": {"content": f"📺 출처: {video_meta.get('channel_name', 'YouTube')} | 영상: {video_meta.get('title', title)} ({url})\n📅 게시일시: {pub_time_kst} (KST) | 🏷️ 시장 심리: {sentiment}\n\n📌 핵심 요약 (1줄):\n{one_line}"[:2000]}}]
+                "rich_text": [{"type": "text", "text": {"content": f"📺 출처: {guide_title or channel_name or 'YouTube'} | 영상: {video_meta.get('title', title)} ({url})\n📅 게시일시: {pub_time_kst} (KST) | 🏷️ 시장 심리: {sentiment}\n\n📌 핵심 요약 (1줄):\n{one_line}"[:2000]}}]
             }
         }
     ]
@@ -712,10 +822,14 @@ def create_unorganized_stock_items(
     return count
 
 
-def prepare_video_payload_for_queue(v: Dict[str, Any], guide_page_id: Optional[str] = None) -> Dict[str, Any]:
+def prepare_video_payload_for_queue(v: Dict[str, Any], guide_page_id: Optional[str] = None, guide_name: Optional[str] = None) -> Dict[str, Any]:
     """신규 동영상 메타데이터와 자막 전문을 수집 단계에서 추출하여 대기열(Queue) Payload로 패키징합니다."""
     vid = v.get("video_id") or extract_video_id(v.get("url", "")) or ""
     v["video_id"], v["guide_page_id"] = vid, guide_page_id
+    if guide_name:
+        v["guide_name"] = guide_name
+    elif not v.get("guide_name"):
+        v["guide_name"] = v.get("channel_name", "")
 
     t_text, sub_src, r_meta = extract_transcript_via_ytdlp(vid)
     if not t_text:
@@ -789,21 +903,12 @@ def process_single_video_item(
         if rich_meta.get("description"):
             v["description"] = rich_meta["description"]
 
-    # 1. 자막 기반 Gemini AI 초고속 분석 (3~5초)
+    # 1. 자막(수동/자동생성) 전문 기반 Gemini AI 초고속 분석 (필수)
     if transcript and len(transcript) >= 50:
         print(f"   🧠 [자막 분석] {len(transcript):,}자 스크립트 기반 AI 분석 (소스: {sub_source})...")
         analyzed = ai_service.analyze_youtube_transcript(transcript, v)
-
-    # 2. 자막 부재 시: 영상 상세 설명란/챕터 기반 분석
-    if not analyzed:
-        desc = v.get("description") or (rich_meta.get("description") if rich_meta else "")
-        if desc and len(desc.strip()) >= 50:
-            print(f"   📋 [설명란 분석] 자막 미제공 -> 상세 설명란({len(desc):,}자) 기반 AI 분석 진행 중...")
-            formatted_desc = f"[동영상 메타데이터 & 상세 챕터 타임라인]\n- 영상 제목: {v.get('title')}\n- 채널명: {v.get('channel_name')}\n- 게시일자: {v.get('publish_date')}\n\n[상세 설명 전문]\n{desc[:30000]}"
-            analyzed = ai_service.analyze_youtube_transcript(formatted_desc, v)
-
-    if not analyzed:
-        print(f"   ❌ [분석 실패] 영상 '{vtitle}'에 대한 자막/설명란을 확보하지 못해 건너뜁니다.")
+    else:
+        print(f"   ❌ [자막 미확보 건너뜀] 영상 '{vtitle}'의 실제 자막(스크립트)이 없어 분석을 건너뜁니다 (쇼핑/광고 설명란 분석 원천 차단).")
         return False
 
     # 마스터 DB & 온톨로지 사전 기반 티커 보정
@@ -906,11 +1011,15 @@ def main() -> None:
                 if vid and (vid not in processed_ids or args.force) and vid not in queued_vids:
                     v_meta = resolve_video_info(src_url)
                     if v_meta:
-                        payload = prepare_video_payload_for_queue(v_meta, guide_page_id=guide_page_id)
-                        pending_queue.append(payload)
-                        queued_vids.add(vid)
-                        newly_enqueued_count += 1
-                        logger.info(f"   📥 [대기열 등록] 단일영상 '{payload.get('title', vid)}' (자막: {len(payload.get('transcript', '')):,}자)")
+                        payload = prepare_video_payload_for_queue(v_meta, guide_page_id=guide_page_id, guide_name=src_name)
+                        t_len = len(payload.get("transcript", "") or "")
+                        if t_len >= 50:
+                            pending_queue.append(payload)
+                            queued_vids.add(vid)
+                            newly_enqueued_count += 1
+                            logger.info(f"   📥 [대기열 등록] 단일영상 '{payload.get('title', vid)}' (자막: {t_len:,}자)")
+                        else:
+                            logger.warning(f"   ⚠️ [자막 미확보 스킵] 단일영상 '{payload.get('title', vid)}' - 자막(스크립트) 미제공으로 대기열 제외")
                 if guide_page_id:
                     update_guide_last_scanned(notion_client, guide_page_id)
 
@@ -923,11 +1032,15 @@ def main() -> None:
                 for v in fetch_recent_videos(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl):
                     vid = v.get("video_id")
                     if vid and (vid not in processed_ids or args.force) and vid not in queued_vids:
-                        payload = prepare_video_payload_for_queue(v, guide_page_id=guide_page_id)
-                        pending_queue.append(payload)
-                        queued_vids.add(vid)
-                        newly_enqueued_count += 1
-                        logger.info(f"   📥 [대기열 등록] [{src_name}] '{payload.get('title', vid)}' (자막: {len(payload.get('transcript', '')):,}자)")
+                        payload = prepare_video_payload_for_queue(v, guide_page_id=guide_page_id, guide_name=src_name)
+                        t_len = len(payload.get("transcript", "") or "")
+                        if t_len >= 50:
+                            pending_queue.append(payload)
+                            queued_vids.add(vid)
+                            newly_enqueued_count += 1
+                            logger.info(f"   📥 [대기열 등록] [{src_name}] '{payload.get('title', vid)}' (자막: {t_len:,}자)")
+                        else:
+                            logger.warning(f"   ⚠️ [자막 미확보 스킵] [{src_name}] '{payload.get('title', vid)}' - 자막(스크립트) 미제공으로 대기열 제외")
                 if guide_page_id:
                     update_guide_last_scanned(notion_client, guide_page_id)
 
