@@ -367,7 +367,7 @@ def search_foreign_ticker(name: str) -> Optional[Tuple[str, str]]:
             if not quotes:
                 continue
 
-            us_pick, jp_pick, other_pick = None, None, None
+            us_major_pick, jp_pick, us_otc_pick, other_pick = None, None, None, None
             for item in quotes:
                 sym = str(item.get("symbol") or "").strip().upper()
                 typ = item.get("quoteType", "")
@@ -377,19 +377,26 @@ def search_foreign_ticker(name: str) -> Optional[Tuple[str, str]]:
                 if typ not in ["EQUITY", "ETF"] or sym.endswith("-USD"):
                     continue
 
-                # 1. 미국 메이저 거래소 상장주 및 ADR / OTC (점 없는 티커 최우선)
-                if ("." not in sym) and any(m in exch for m in ["NY", "NASD", "NMS", "BATS", "NGM", "NCM", "PNK", "OTC"]):
-                    if not us_pick:
-                        us_pick = (sym, short_brand or sname)
-                # 2. 일본 도쿄 증시 (.T)
-                elif sym.endswith(".T") or "TOKYO" in exch or "JPX" in exch:
+                is_otc = any(m in exch for m in ["PNK", "OTC", "OOTC", "PINK", "GREY"]) or (len(sym) == 5 and sym.endswith("F") and "." not in sym)
+
+                # 1. 미국 정규 메이저 거래소 상장주 (NYSE, NASDAQ, BATS)
+                if ("." not in sym) and not is_otc and any(m in exch for m in ["NY", "NASD", "NMS", "BATS", "NGM", "NCM"]):
+                    if not us_major_pick:
+                        us_major_pick = (sym, short_brand or sname)
+                # 2. 일본 도쿄 증시 (.T / JPX / TSE)
+                elif sym.endswith(".T") or "TOKYO" in exch or "JPX" in exch or "TSE" in exch:
                     if not jp_pick:
-                        jp_pick = (sym if sym.endswith(".T") else f"{sym}.T", short_brand or sname)
-                # 3. 기타 해외 증시
+                        t_sym = sym if sym.endswith(".T") else f"{sym}.T"
+                        jp_pick = (t_sym, short_brand or sname)
+                # 3. 미국 장외시장 / ADR / OTC (PNK, OTC)
+                elif is_otc and not sym.endswith(".T"):
+                    if not us_otc_pick:
+                        us_otc_pick = (sym, short_brand or sname)
+                # 4. 기타 해외 증시 (유럽, 홍콩, 대만 등)
                 elif not other_pick:
                     other_pick = (sym, short_brand or sname)
 
-            best = us_pick or jp_pick or other_pick
+            best = us_major_pick or jp_pick or us_otc_pick or other_pick
             if best:
                 return best
 
@@ -532,31 +539,19 @@ def safe_page_create(
     client: Any,
     database_id: str,
     properties: Dict[str, Any],
+    children: Optional[List[Dict[str, Any]]] = None,
     max_retries: int = 3,
     retry_delay: float = 2.0,
 ) -> Optional[Dict[str, Any]]:
-    """재시도 로직이 포함된 안전한 노션 신규 페이지(레코드) 생성 함수"""
-    if not properties:
-        return None
-
-    attempt = 1
-    while True:
-        try:
-            res = cast(Dict[str, Any], client.pages.create(parent={"database_id": database_id}, properties=properties))
-            return res
-        except HTTPResponseError as error:
-            status = getattr(error, "status", None)
-            if status in RETRY_STATUS_CODES and attempt < max_retries:
-                time.sleep(retry_delay * attempt)
-                attempt += 1
-                continue
-            return None
-        except Exception:
-            if attempt < max_retries:
-                time.sleep(retry_delay * attempt)
-                attempt += 1
-                continue
-            return None
+    """재시도 로직 및 자식 블록 지원이 포함된 안전한 노션 신규 페이지 생성 함수"""
+    return safe_create_page(
+        client=client,
+        database_id=database_id,
+        properties=properties,
+        children=children,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )
 
 
 def get_page_text(props: Dict[str, Any], names: List[str]) -> str:
@@ -2175,68 +2170,21 @@ def get_local_master_db_path() -> Optional[str]:
 
 
 def load_local_finances_db() -> Dict[str, Dict[str, Any]]:
-    """로컬 SQLite DB에서 361개 전 종목의 최신 재무/퀀트 지표를 0.001초만에 로드합니다."""
-    import sqlite3
-    db_path = get_local_master_db_path()
-    if not db_path:
-        return {}
-    res: Dict[str, Dict[str, Any]] = {}
-    try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tbl_finances;")
-        for r in cursor.fetchall():
-            d = dict(r)
-            res[d["ticker"].upper()] = d
-        conn.close()
-    except Exception:
-        pass
-    return res
+    """로컬 SQLite DB에서 전 종목의 최신 재무/퀀트 지표를 0.001초만에 로드합니다."""
+    from core.local_db_manager import load_finances_from_sqlite
+    return load_finances_from_sqlite()
 
 
 def load_local_stocks_db() -> Dict[str, Dict[str, Any]]:
-    """로컬 SQLite DB에서 420개 상장주식 마스터 정보를 0.001초만에 로드합니다."""
-    import sqlite3
-    db_path = get_local_master_db_path()
-    if not db_path:
-        return {}
-    res: Dict[str, Dict[str, Any]] = {}
-    try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tbl_stocks;")
-        for r in cursor.fetchall():
-            d = dict(r)
-            res[d["ticker"].upper()] = d
-        conn.close()
-    except Exception:
-        pass
-    return res
+    """로컬 SQLite DB에서 상장주식 마스터 정보를 0.001초만에 로드합니다."""
+    from core.local_db_manager import load_master_stocks_from_sqlite
+    return load_master_stocks_from_sqlite()
 
 
 def load_local_etf_holdings_db(etf_ticker: Optional[str] = None) -> List[Dict[str, Any]]:
     """로컬 SQLite DB에서 ETF 구성종목 정보를 0.001초만에 로드합니다."""
-    import sqlite3
-    db_path = get_local_master_db_path()
-    if not db_path:
-        return []
-    res: List[Dict[str, Any]] = []
-    try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        if etf_ticker:
-            cursor.execute("SELECT * FROM tbl_etf_holdings WHERE etf_ticker = ? ORDER BY weight DESC;", (etf_ticker.upper(),))
-        else:
-            cursor.execute("SELECT * FROM tbl_etf_holdings ORDER BY etf_ticker, weight DESC;")
-        for r in cursor.fetchall():
-            res.append(dict(r))
-        conn.close()
-    except Exception:
-        pass
-    return res
+    from core.local_db_manager import load_etf_holdings_from_sqlite
+    return load_etf_holdings_from_sqlite(etf_ticker)
 
 
 

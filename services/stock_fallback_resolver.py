@@ -20,6 +20,10 @@ from core.notion_utils import (
     resolve_stock_taxonomy,
     is_kr_ticker,
 )
+from core.stock_registry import (
+    clean_ticker_key,
+    clean_name_key,
+)
 from core.local_db_manager import (
     load_dictionary_index_from_sqlite,
     load_master_stocks_from_sqlite,
@@ -353,7 +357,7 @@ def _get_name_lookup_index() -> Dict[str, Tuple[str, str]]:
         for t, s in stocks.items():
             name = str(s.get("name", "")).strip()
             if name:
-                clean_n = re.sub(r'[\s\(\)\-_/]', '', name).upper()
+                clean_n = clean_name_key(name)
                 if clean_n and clean_n not in idx:
                     idx[clean_n] = (t, name)
                 if name.upper() not in idx:
@@ -372,13 +376,13 @@ def _get_name_lookup_index() -> Dict[str, Tuple[str, str]]:
 
             target_name = official_name or kw
             if target_name and t:
-                clean_n = re.sub(r'[\s\(\)\-_/]', '', target_name).upper()
+                clean_n = clean_name_key(target_name)
                 if clean_n and clean_n not in idx:
                     idx[clean_n] = (t, target_name)
                 if target_name.upper() not in idx:
                     idx[target_name.upper()] = (t, target_name)
                 # 키워드 자체도 인덱싱 (예: "엔비디아", "TSMC", "ASML", "팔란티어")
-                clean_kw = re.sub(r'[\s\(\)\-_/]', '', kw).upper()
+                clean_kw = clean_name_key(kw)
                 if clean_kw and clean_kw not in idx:
                     idx[clean_kw] = (t, target_name)
     except Exception as e:
@@ -392,7 +396,7 @@ def _get_name_lookup_index() -> Dict[str, Tuple[str, str]]:
                 code_str = str(code).zfill(6)
                 krx_name = str(row.get("Name", "")).strip()
                 if krx_name:
-                    clean_n = re.sub(r'[\s\(\)\-_/]', '', krx_name).upper()
+                    clean_n = clean_name_key(krx_name)
                     if clean_n not in idx:
                         idx[clean_n] = (code_str, krx_name)
     except Exception as e:
@@ -408,7 +412,7 @@ def resolve_ticker_and_name(raw_ticker: str, stock_name: str) -> Tuple[str, str]
     제미나이 AI 등 외부에서 추출된 티커와 종목명을 공식 로컬 마스터 DB 및 KRX/GICS 인덱스와 대조하여
     정확한 6자리 국내 종목코드 또는 미국/해외 표준 티커로 자동 해결합니다. (하드코딩 0%)
     """
-    clean_t = re.sub(r'[^0-9A-Z]', '', (raw_ticker or "").strip().upper())
+    clean_t = clean_ticker_key(raw_ticker)
     clean_n = (stock_name or "").strip()
     norm_n = re.sub(r'[\s\(\)\-_/]', '', clean_n).upper()
 

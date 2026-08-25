@@ -147,212 +147,13 @@ def get_etf_composition_wisereport(clean_ticker: str) -> List[Dict[str, Any]]:
     return holdings
 
 
-# ==============================================================================
-# 4. 로컬 DB(0.001s) & 온톨로지 사전 기반 종목 매칭 엔진
-# ==============================================================================
-class StockMatchEngine:
-    """
-    로컬 SQLite DB(tbl_stocks, tbl_dictionary) 및 노션 인메모리 다차원 캐시 기반 고속 종목 매칭 엔진
-    """
-
-    def __init__(self, client: Any):
-        self.client = client
-        self.inv_ticker_to_page: Dict[str, Dict[str, str]] = {}
-        self.inv_name_to_page: Dict[str, Dict[str, str]] = {}
-        self.inv_id_to_page: Dict[str, Dict[str, str]] = {}
-        self.dict_alias_to_info: Dict[str, Dict[str, str]] = {}
-        self.online_search_cache: Dict[str, Optional[Tuple[str, str]]] = {}
-        self._load_cache()
-
-    def _load_cache(self) -> None:
-        """로컬 SQLite DB(1차) 및 노션 투자주 DB(2차)에서 인메모리 색인 구축 (0.001s 로딩)"""
-        init_database()
-        # 1-1. 로컬 SQLite DB tbl_stocks에서 상장주식 마스터 색인
-        try:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT ticker, name, notion_page_id FROM tbl_stocks WHERE notion_page_id != '';")
-                for r in cursor.fetchall():
-                    pid = r["notion_page_id"]
-                    t = (r["ticker"] or "").strip().upper()
-                    n = (r["name"] or "").strip()
-                    info = {"id": pid, "ticker": t, "name": n}
-                    self.inv_id_to_page[pid] = info
-                    if t:
-                        self.inv_ticker_to_page[t.split(".")[0].strip().upper()] = info
-                        self.inv_ticker_to_page[t] = info
-                    if n:
-                        self.inv_name_to_page[n] = info
-                        self.inv_name_to_page[n.replace(" ", "")] = info
-                        self.inv_name_to_page[n.upper()] = info
-
-                # 1-2. tbl_dictionary에서 별칭/원시 사명 매핑 색인
-                cursor.execute("SELECT keyword, official_name, yahoo_ticker FROM tbl_dictionary;")
-                for r in cursor.fetchall():
-                    kw = (r["keyword"] or "").strip()
-                    off_name = (r["official_name"] or "").strip()
-                    y_ticker = (r["yahoo_ticker"] or "").strip().upper()
-                    if kw and (y_ticker or off_name):
-                        alias_info = {"ticker": y_ticker, "name": off_name or kw}
-                        self.dict_alias_to_info[kw.upper()] = alias_info
-                        self.dict_alias_to_info[kw.replace(" ", "").upper()] = alias_info
-        except Exception as e:
-            logger.warning(f"⚠️ 로컬 SQLite DB 캐시 로드 중 예외: {e}")
-
-        # 2. 노션 투자주 DB 실시간 최신 목록 동기화
-        count_inv = 0
-        for page in paginate_database(self.client, INVESTMENT_DB_ID, page_size=100):
-            pid = page["id"]
-            props = page.get("properties", {})
-            t_prop = props.get("티커", {}).get("title", [])
-            ticker = t_prop[0]["plain_text"].strip().upper() if t_prop else ""
-
-            name = ""
-            for k in ["종목명", "이름", "Name"]:
-                if k in props:
-                    val = props[k]
-                    if val.get("type") == "formula":
-                        name = str(val.get("formula", {}).get("string") or "").strip()
-                    elif val.get("type") in ["rich_text", "title"] and val.get(val["type"]):
-                        name = val[val["type"]][0]["plain_text"].strip()
-
-            item_info = {"id": pid, "ticker": ticker, "name": name}
-            self.inv_id_to_page[pid] = item_info
-            if ticker:
-                self.inv_ticker_to_page[ticker.split(".")[0].strip().upper()] = item_info
-                self.inv_ticker_to_page[ticker] = item_info
-            if name:
-                self.inv_name_to_page[name] = item_info
-                self.inv_name_to_page[name.replace(" ", "")] = item_info
-                self.inv_name_to_page[name.upper()] = item_info
-            count_inv += 1
-
-        logger.info(f"✅ [초고속 종목 캐시] 로컬 DB & 투자주 DB 종목 {count_inv}개 인메모리 색인 구축 완료")
-
-    def _create_investment_page(self, ticker: str, name: str) -> Optional[str]:
-        """투자주 DB에 신규 페이지 생성 후 인메모리 캐시 즉시 갱신"""
-        if not ticker:
-            return None
-        try:
-            props = {
-                "티커": {"title": [{"text": {"content": ticker}}]},
-                "종목명": {"rich_text": [{"text": {"content": name}}]} if name else {},
-            }
-            props = {k: v for k, v in props.items() if v}
-            new_page = self.client.pages.create(parent={"database_id": INVESTMENT_DB_ID}, properties=props)
-            new_id = new_page["id"]
-
-            item_info = {"id": new_id, "ticker": ticker, "name": name}
-            self.inv_id_to_page[new_id] = item_info
-            self.inv_ticker_to_page[ticker.split(".")[0].strip().upper()] = item_info
-            self.inv_ticker_to_page[ticker] = item_info
-            if name:
-                self.inv_name_to_page[name] = item_info
-                self.inv_name_to_page[name.replace(" ", "")] = item_info
-                self.inv_name_to_page[name.upper()] = item_info
-
-            logger.info(f"   ✨ [투자주 DB 신규 등록] {name}({ticker}) 완료")
-            time.sleep(0.02)
-            return new_id
-        except Exception as exc:
-            logger.warning(f"   ⚠️ [투자주 DB 등록 실패] {name}({ticker}): {exc}")
-            return None
-
-    def _search_foreign_ticker(self, name: str) -> Optional[Tuple[str, str]]:
-        """DB에 없는 미등록 해외 종목 1회성 온라인 탐색 (Yahoo Finance)"""
-        if not name or len(name) < 2:
-            return None
-        if name in self.online_search_cache:
-            return self.online_search_cache[name]
-
-        best = search_foreign_ticker(name)
-        if best:
-            self.online_search_cache[name] = best
-            logger.info(f"   🔍 [신규 발굴] '{name}' ➔ 공식 티커: {best[0]} ({best[1]})")
-            return best
-
-        self.online_search_cache[name] = None
-        return None
-
-    def match(self, raw_ticker: str, name: str) -> Tuple[Optional[str], str, str]:
-        """
-        원시 사명/티커 ➔ (투자주ID, 확정티커, 짧고간결한브랜드명) 0.001초 반환
-        1. 로컬 SQLite DB & 투자주 DB 인메모리 색인 최우선 조회
-        2. 온톨로지 사전(tbl_dictionary) 별칭 매핑 조회
-        3. 완전 신규 종목 시 1회성 온라인 탐색 후 자동 등록
-        """
-        t = raw_ticker.strip().upper()
-        n = name.strip()
-        is_kr_code = is_kr_ticker(t)
-
-        # CASE A: 한국 주식 (KRX 6자리 코드 및 .KS/.KQ)
-        if is_kr_code:
-            clean_t = t.split(".")[0].strip().upper()
-            if clean_t in self.inv_ticker_to_page:
-                info = self.inv_ticker_to_page[clean_t]
-                return info["id"], clean_t, info["name"] or n
-            if n in self.inv_name_to_page:
-                info = self.inv_name_to_page[n]
-                return info["id"], info["ticker"] or clean_t, info["name"] or n
-
-            new_id = self._create_investment_page(clean_t, n)
-            return new_id, clean_t, n
-
-        # CASE B: DB 인메모리 색인에서 티커/종목명 직접 매칭 (0.001s)
-        if t and t in self.inv_ticker_to_page:
-            info = self.inv_ticker_to_page[t]
-            return info["id"], info["ticker"], extract_short_brand_name(info["name"] or n)
-        if n and n in self.inv_name_to_page:
-            info = self.inv_name_to_page[n]
-            return info["id"], info["ticker"], extract_short_brand_name(info["name"] or n)
-        if n and n.upper() in self.inv_name_to_page:
-            info = self.inv_name_to_page[n.upper()]
-            return info["id"], info["ticker"], extract_short_brand_name(info["name"] or n)
-
-        # CASE C: 사전 DB(tbl_dictionary) 별칭 매핑 조회 (0.001s)
-        n_up = n.upper()
-        n_clean = n.replace(" ", "").upper()
-        dict_match = self.dict_alias_to_info.get(n_up) or self.dict_alias_to_info.get(n_clean)
-        if dict_match and dict_match["ticker"]:
-            dticker = dict_match["ticker"].split(".")[0].strip().upper()
-            dname = extract_short_brand_name(dict_match["name"] or n)
-            if dticker in self.inv_ticker_to_page:
-                return self.inv_ticker_to_page[dticker]["id"], dticker, dname
-            inv_id = self._create_investment_page(dticker, dname)
-            return inv_id, dticker, dname
-
-        # CASE D: DB에 없는 완전 신규 해외 종목 1회성 온라인 검색
-        matched_ticker = ""
-        matched_name = ""
-        if n:
-            search_res = self._search_foreign_ticker(n)
-            if search_res:
-                matched_ticker, matched_name = search_res
-
-        if matched_ticker:
-            clean_brand = extract_short_brand_name(matched_name or n)
-            clean_t = matched_ticker.split(".")[0].strip().upper()
-
-            if clean_t in self.inv_ticker_to_page:
-                inv_id = self.inv_ticker_to_page[clean_t]["id"]
-            elif matched_ticker in self.inv_ticker_to_page:
-                inv_id = self.inv_ticker_to_page[matched_ticker]["id"]
-            elif matched_name and matched_name in self.inv_name_to_page:
-                inv_id = self.inv_name_to_page[matched_name]["id"]
-            else:
-                inv_id = self._create_investment_page(matched_ticker, clean_brand)
-
-            return inv_id, matched_ticker, clean_brand
-
-        short_brand = extract_short_brand_name(n)
-        fallback_t = t if (re.match(r'^[A-Z0-9.\-_]{1,10}$', t) and not t.isdigit()) else ""
-        return None, fallback_t, short_brand
+from core.stock_registry import StockRegistryGateway, clean_ticker_key
 
 
 # ==============================================================================
 # 5. 대상 ETF 식별 및 증분 Upsert 동기화
 # ==============================================================================
-def get_target_etfs(client: Any, db_cache: StockMatchEngine) -> List[Dict[str, str]]:
+def get_target_etfs(client: Any, db_cache: StockRegistryGateway) -> List[Dict[str, str]]:
     """ETF 구성종목 DB에 등록된 부모 ETF만 정확히 식별 (지표 DB 전체 스캔 배제)"""
     logger.info(f"📋 ETF DB({ETF_DB_ID})에서 등록된 부모 ETF를 스캔합니다...")
     target_etfs: List[Dict[str, str]] = []
@@ -548,7 +349,7 @@ def sync_etf_holdings_upsert(
                 update_props["상태"] = {"select": {"name": "편입(보유)"}}
                 need_update = True
                 if "편출일" in page_props and matched_info.get("out_date"):
-                    update_props["편출일"] = None
+                    update_props["편출일"] = {"date": None}
                     need_update = True
 
             if "편입일" in page_props and not page_props.get("편입일", {}).get("date"):
@@ -628,8 +429,8 @@ def main() -> None:
     notion = build_notion_client(NOTION_TOKEN)
     ensure_database_properties(notion, ETF_DB_ID, ETF_SCHEMA)
 
-    db_cache = StockMatchEngine(notion)
-    target_etfs = get_target_etfs(notion, db_cache)
+    gateway = StockRegistryGateway(notion)
+    target_etfs = get_target_etfs(notion, gateway)
     if not target_etfs:
         logger.info("ℹ️ 갱신 대상 ETF가 없습니다. 작업을 종료합니다.")
         return
@@ -654,7 +455,7 @@ def main() -> None:
         seen_keys: set = set()
 
         for h in raw_holdings:
-            stock_id, matched_ticker, short_brand = db_cache.match(h["raw_ticker"], h["name"])
+            stock_id, matched_ticker, short_brand = gateway.match_and_resolve(h["raw_ticker"], h["name"])
             dedup_key = matched_ticker.split(".")[0].strip().upper() if matched_ticker else short_brand.replace(" ", "").upper()
 
             if dedup_key in seen_keys:

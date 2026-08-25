@@ -241,138 +241,84 @@ def compile_official_dictionary(benchmarks: List[Dict[str, Any]]) -> List[Dict[s
     except Exception as e:
         logger.warning(f"⚠️ KRX-DESC 파싱 중 예외: {e}")
 
-    # 3) GICS 글로벌 표준 섹터/산업 (FDR S&P500 & yfinance GICS)
-    GICS_OFFICIAL_TABLE = [
-        ("Information Technology", "IT", "전자기술소프트웨어", "IT", "XLK", "QQQ"),
-        ("Semiconductors", "IT", "AI반도체", "IT / AI반도체", "SOXX", "QQQ"),
-        ("Semiconductor Equipment & Materials", "IT", "반도체소부장", "IT / 반도체소부장", "SOXX", "QQQ"),
-        ("Semiconductors & Semiconductor Equipment", "IT", "반도체소부장", "IT / 반도체소부장", "SOXX", "QQQ"),
-        ("Software—Infrastructure", "IT", "클라우드소프트웨어", "IT / 클라우드소프트웨어", "IGV", "QQQ"),
-        ("Software—Application", "IT", "응용소프트웨어", "IT / 응용소프트웨어", "IGV", "QQQ"),
-        ("Software - Infrastructure", "IT", "클라우드소프트웨어", "IT / 클라우드소프트웨어", "IGV", "QQQ"),
-        ("Software - Application", "IT", "응용소프트웨어", "IT / 응용소프트웨어", "IGV", "QQQ"),
-        ("Technology Hardware, Storage & Peripherals", "IT", "빅테크하드웨어", "IT / 빅테크하드웨어", "XLK", "QQQ"),
-        ("Consumer Electronics", "IT", "빅테크디바이스", "IT / 빅테크디바이스", "XLK", "QQQ"),
-        ("Electronic Components", "IT", "전자부품·소재", "IT / 전자부품·소재", "XLK", "QQQ"),
-        ("Internet Content & Information", "통신미디어", "인터넷플랫폼", "통신미디어 / 인터넷플랫폼", "XLC", "QQQ"),
-        ("Biotechnology", "제약바이오", "바이오텍", "제약바이오 / 바이오텍", "XBI", "SPY"),
-        ("Drug Manufacturers—General", "제약바이오", "글로벌제약", "제약바이오 / 글로벌제약", "XLV", "SPY"),
-        ("Pharmaceuticals", "제약바이오", "글로벌제약", "제약바이오 / 글로벌제약", "XLV", "SPY"),
-        ("Health Care", "제약바이오", "글로벌헬스케어", "제약바이오 / 글로벌헬스케어", "XLV", "SPY"),
-        ("Automobile Manufacturers", "자유소비재", "전기차완성차", "자유소비재 / 전기차완성차", "XLY", "QQQ"),
-        ("Auto Manufacturers", "자유소비재", "전기차완성차", "자유소비재 / 전기차완성차", "XLY", "QQQ"),
-        ("Aerospace & Defense", "산업재", "우주항공방산", "산업재 / 우주항공방산", "XAR", "SPY"),
-        ("Specialty Industrial Machinery", "산업재", "로봇·자동화", "산업재 / 로봇·자동화", "BOTZ", "SPY"),
-        ("Electrical Equipment & Parts", "산업재", "전력기기·자동화", "산업재 / 전력기기·자동화", "XLI", "SPY"),
-        ("Banks—Diversified", "금융", "글로벌은행", "금융 / 글로벌은행", "XLF", "SPY"),
-        ("Oil & Gas Integrated", "에너지", "정유에너지", "에너지 / 정유에너지", "XLE", "SPY"),
-    ]
-    for eng_k, cat, sub, sec, ind_bm, m_bm in GICS_OFFICIAL_TABLE:
-        records.append({
-            "keyword": eng_k,
-            "dict_type": "4.GICS산업",
-            "category": cat,
-            "subcategory": sub,
-            "standard_sector": sec,
-            "product_type": "개별기업주식",
-            "asset_class": "글로벌성장주",
-            "market": "NASDAQ",
-            "country": "미국",
-            "currency": "USD",
-            "ind_bm": ind_bm,
-            "market_bm": m_bm,
-            "priority": 50,
-            "note": f"GICS 공식 글로벌 분류 ({eng_k})",
-        })
+    # 3) seed_dictionary.json 기반 글로벌 GICS, ETF 및 해외 종목 룰셋 로드
+    seed_json_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "seed_dictionary.json")
+    if os.path.exists(seed_json_path):
+        try:
+            import json
+            with open(seed_json_path, "r", encoding="utf-8") as f:
+                seed_data = json.load(f)
 
-    # 4) 글로벌 ETF 표준 3D 분류 및 테마
-    ETF_THEMES = [
-        ("SPY", "S&P500", "지수추종패시", "글로벌성장주", "SPY", "SPY"),
-        ("QQQ", "나스닥100", "지수추종패시", "글로벌성장주", "QQQ", "QQQ"),
-        ("DIA", "다우존스30", "지수추종패시", "글로벌성장주", "DIA", "DIA"),
-        ("SOXX", "미국반도체", "섹터테마알파", "글로벌성장주", "SOXX", "QQQ"),
-        ("XLK", "미국테크", "섹터테마알파", "글로벌성장주", "XLK", "QQQ"),
-        ("XLF", "미국금융", "섹터테마알파", "글로벌성장주", "XLF", "SPY"),
-        ("XLE", "미국에너지", "섹터테마알파", "글로벌성장주", "XLE", "SPY"),
-        ("XLV", "미국헬스케어", "섹터테마알파", "글로벌성장주", "XLV", "SPY"),
-        ("XLI", "미국산업재", "섹터테마알파", "글로벌성장주", "XLI", "SPY"),
-        ("SCHD", "미국배당다우존스", "배당인컴상품", "한미배당성장", "SCHD", "SPY"),
-        ("TLT", "미국장기국채20년", "채권금리상품", "미국장기국채", "TLT", "SPY"),
-        ("BOTZ", "글로벌로봇AI", "섹터테마알파", "글로벌성장주", "BOTZ", "QQQ"),
-        ("LIT", "글로벌2차전지", "섹터테마알파", "글로벌성장주", "LIT", "SPY"),
-        ("069500", "KOSPI 200", "지수추종패시", "국내주식밸류", "069500", "069500"),
-        ("229200", "KOSDAQ 150", "지수추종패시", "국내주식밸류", "229200", "229200"),
-        ("091160", "KODEX 반도체", "섹터테마알파", "국내주식밸류", "091160", "069500"),
-        ("091170", "KODEX 은행", "섹터테마알파", "국내주식밸류", "091170", "069500"),
-        ("091180", "KODEX 자동차", "섹터테마알파", "국내주식밸류", "091180", "069500"),
-    ]
-    for ticker, theme_nm, pt, ac, ind_bm, m_bm in ETF_THEMES:
-        cnt = "한국" if is_kr_ticker(ticker) else "미국"
-        mkt = "ETF(KR)" if cnt == "한국" else "ETF(US)"
-        curr = "KRW" if cnt == "한국" else "USD"
-        records.append({
-            "keyword": ticker,
-            "dict_type": "5.글로벌ETF",
-            "category": "ETF",
-            "subcategory": theme_nm,
-            "standard_sector": f"ETF / {theme_nm}",
-            "product_type": pt,
-            "asset_class": ac,
-            "market": mkt,
-            "country": cnt,
-            "currency": curr,
-            "ind_bm": ind_bm,
-            "market_bm": m_bm,
-            "priority": 80,
-            "note": f"글로벌 대표 ETF ({theme_nm})",
-        })
+            # 3-1) GICS 글로벌 표준 섹터/산업
+            for item in seed_data.get("gics_rules", []):
+                records.append({
+                    "keyword": item["keyword"],
+                    "dict_type": "4.GICS산업",
+                    "category": item["category"],
+                    "subcategory": item["subcategory"],
+                    "standard_sector": item["standard_sector"],
+                    "product_type": "개별기업주식",
+                    "asset_class": "글로벌성장주",
+                    "market": "NASDAQ",
+                    "country": "미국",
+                    "currency": "USD",
+                    "ind_bm": item.get("ind_bm", "SOXX"),
+                    "market_bm": item.get("market_bm", "QQQ"),
+                    "priority": 50,
+                    "note": f"GICS 공식 글로벌 분류 ({item['keyword']})",
+                })
 
-    # 5) 글로벌 ADR 및 해외 특수 종목
-    GLOBAL_ADR_SPECIALS = [
-        ("TSM", "TSMC(ADR)", "대만", "GLOBAL", "IT / AI반도체", "SOXX", "QQQ", "2330.TW"),
-        ("ASML", "ASML 홀딩(ADR)", "유럽", "GLOBAL", "IT / 반도체소부장", "SOXX", "QQQ", "ASML.AS"),
-        ("ARM", "Arm 홀딩스(ADR)", "영국", "NASDAQ", "IT / AI반도체", "SOXX", "QQQ", "ARM.L"),
-        ("NXPI", "NXP 세미컨덕터스", "유럽", "GLOBAL", "IT / AI반도체", "SOXX", "QQQ", "NXPI"),
-        ("STM", "ST 마이크로일렉트로닉스(ADR)", "유럽", "GLOBAL", "IT / AI반도체", "SOXX", "QQQ", "STM.PA"),
-        ("SAP", "SAP SE(ADR)", "유럽", "GLOBAL", "IT / 클라우드소프트웨어", "IGV", "SPY", "SAP.DE"),
-        ("BABA", "알리바바 그룹(ADR)", "중국", "NYSE", "통신미디어 / 이커머스플랫폼", "XLC", "SPY", "9988.HK"),
-        ("PDD", "핀둬둬(PDD Holdings)", "중국", "NASDAQ", "통신미디어 / 이커머스플랫폼", "XLC", "QQQ", "PDD"),
-        ("SE", "Sea Limited(ADR)", "싱가포르", "NYSE", "통신미디어 / 이커머스플랫폼", "XLC", "SPY", "SE"),
-        ("MBGYY", "메르세데스-벤츠 그룹 ADR", "유럽", "GLOBAL", "자유소비재 / 전기차완성차", "XLY", "SPY", "MBG.DE"),
-        ("SIEGY", "지멘스 AG ADR", "유럽", "GLOBAL", "산업재 / 로봇·자동화", "BOTZ", "SPY", "SIE.DE"),
-        ("SBGSY", "슈나이더 일렉트릭 ADR", "유럽", "GLOBAL", "산업재 / 로봇·자동화", "BOTZ", "SPY", "SU.PA"),
-        ("ABBNY", "ABB Ltd ADR", "유럽", "GLOBAL", "산업재 / 전력기기·자동화", "XLI", "SPY", "ABBN.SW"),
-        ("2454", "대만 미디어텍(MediaTek)", "글로벌", "GLOBAL", "전기전자 / AI반도체", "SOXX", "QQQ", "2454.TW"),
-        ("6525.T", "고쿠사이일렉트릭", "일본", "TSE", "IT / 반도체소부장", "SOXX", "QQQ", "6525.T"),
-        ("6758.T", "소니", "일본", "TSE", "IT / 빅테크디바이스", "XLK", "QQQ", "6758.T"),
-        ("6954.T", "화낙", "일본", "TSE", "산업재 / 로봇·자동화", "BOTZ", "QQQ", "6954.T"),
-        ("6871.T", "일본마이크로닉스", "일본", "TSE", "IT / 반도체소부장", "SOXX", "QQQ", "6871.T"),
-        ("6656.T", "인스펙", "일본", "TSE", "IT / 반도체소부장", "SOXX", "QQQ", "6656.T"),
-        ("6981.T", "무라타 제작", "일본", "TSE", "IT / 전자부품·소재", "XLK", "QQQ", "6981.T"),
-        ("7203.T", "토요타 자동차", "일본", "TSE", "자유소비재 / 전기차완성차", "XLY", "SPY", "7203.T"),
-    ]
-    for ticker, nm, cnt, mkt, sec, ind_bm, m_bm, yf_t in GLOBAL_ADR_SPECIALS:
-        parts = sec.split(" / ")
-        cat = parts[0]
-        sub = parts[1] if len(parts) > 1 else parts[0]
-        records.append({
-            "keyword": ticker,
-            "dict_type": "6.해외주식지정",
-            "category": cat,
-            "subcategory": sub,
-            "standard_sector": sec,
-            "official_name": nm,
-            "product_type": "개별기업주식",
-            "asset_class": "글로벌성장주",
-            "market": mkt,
-            "country": cnt,
-            "currency": "USD" if cnt == "미국" else ("JPY" if cnt == "일본" else "USD"),
-            "yahoo_ticker": yf_t,
-            "ind_bm": ind_bm,
-            "market_bm": m_bm,
-            "priority": 100,
-            "note": f"글로벌 대표 ADR/해외주식 ({nm})",
-        })
+            # 3-2) 글로벌 ETF 표준 3D 분류 및 테마
+            for item in seed_data.get("etf_rules", []):
+                ticker = item["ticker"]
+                theme_nm = item["theme_name"]
+                cnt = "한국" if is_kr_ticker(ticker) else "미국"
+                mkt = "ETF(KR)" if cnt == "한국" else "ETF(US)"
+                curr = "KRW" if cnt == "한국" else "USD"
+                records.append({
+                    "keyword": ticker,
+                    "dict_type": "5.글로벌ETF",
+                    "category": "ETF",
+                    "subcategory": theme_nm,
+                    "standard_sector": f"ETF / {theme_nm}",
+                    "product_type": item.get("product_type", "지수추종패시"),
+                    "asset_class": item.get("asset_class", "글로벌성장주"),
+                    "market": mkt,
+                    "country": cnt,
+                    "currency": curr,
+                    "ind_bm": item.get("ind_bm", ticker),
+                    "market_bm": item.get("market_bm", "SPY"),
+                    "priority": 80,
+                    "note": f"글로벌 대표 ETF ({theme_nm})",
+                })
+
+            # 3-3) 글로벌 ADR 및 해외 특수 종목
+            for item in seed_data.get("global_special_stocks", []):
+                sec = item["sector"]
+                parts = sec.split(" / ")
+                cat = parts[0]
+                sub = parts[1] if len(parts) > 1 else parts[0]
+                cnt = item["country"]
+                records.append({
+                    "keyword": item["ticker"],
+                    "dict_type": "6.해외주식지정",
+                    "category": cat,
+                    "subcategory": sub,
+                    "standard_sector": sec,
+                    "official_name": item["name"],
+                    "product_type": "개별기업주식",
+                    "asset_class": "글로벌성장주",
+                    "market": item.get("market", "GLOBAL"),
+                    "country": cnt,
+                    "currency": "USD" if cnt == "미국" else ("JPY" if cnt == "일본" else "USD"),
+                    "yahoo_ticker": item.get("yahoo_ticker", item["ticker"]),
+                    "ind_bm": item.get("ind_bm", "SOXX"),
+                    "market_bm": item.get("market_bm", "QQQ"),
+                    "priority": 100,
+                    "note": f"글로벌 대표 ADR/해외주식 ({item['name']})",
+                })
+        except Exception as e:
+            logger.warning(f"⚠️ seed_dictionary.json 로드 중 예외: {e}")
 
     upsert_dictionary_batch(records)
     logger.info(f"   ✅ 공식 온톨로지 사전 {len(records)}건 SQLite (tbl_dictionary) 저장 완료")

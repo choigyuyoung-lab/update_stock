@@ -25,6 +25,16 @@ FINANCES_CSV_PATH: Path = DATA_DIR / "stock_finances.csv"
 ETF_HOLDINGS_CSV_PATH: Path = DATA_DIR / "stock_etf_holdings.csv"
 
 
+def get_actual_db_path() -> Path:
+    """Twin-Pair 구조(k_all_round_portfolio / update_stock)를 지원하는 실제 DB 경로 반환"""
+    if DB_PATH.exists():
+        return DB_PATH
+    workspace_twin = BASE_DIR.parent / "update_stock" / "data" / "stock_master.db"
+    if workspace_twin.exists():
+        return workspace_twin
+    return DB_PATH
+
+
 def ensure_data_dir() -> None:
     """data/ 폴더가 없으면 자동 생성합니다."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -33,7 +43,8 @@ def ensure_data_dir() -> None:
 def get_db_connection() -> sqlite3.Connection:
     """WAL 모드 및 Row 팩토리가 적용된 SQLite 커넥션을 반환합니다."""
     ensure_data_dir()
-    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+    actual_db = get_actual_db_path()
+    conn = sqlite3.connect(str(actual_db), timeout=30.0)
     conn.row_factory = sqlite3.Row
     # WAL 모드로 동시 읽기/쓰기 성능 극대화
     conn.execute("PRAGMA journal_mode = WAL;")

@@ -178,3 +178,18 @@ When concluding architectural changes or code refactoring, append this handoff p
 ## 📋 7. LLM 인계 프로토콜 (작업 지시 프롬프트 표준 양식)
 주요 설계 변경 및 코드 리팩토링 완료 시 다음 세션 또는 IDE 에이전트 연동을 위해 답변 하단에 표준 작업 지시서 형식을 첨부함.
 -->
+
+---
+
+## 8. 🔍 Architectural Proactivity & System Audit Protocol
+
+- **Zero-Patchwork Rule**: When the user reports an anomaly, bug, or requests a feature, AI agents MUST NOT apply superficial patches. Agents MUST inspect the root architectural cause, check for potential code fragmentation across both repositories, and enforce Single Source of Truth (SSOT).
+- **Proactive Decoupling**: Static rule tables, dictionaries, and domain constants MUST be decoupled into structured files (`data/*.json` or `data/*.csv`), keeping Python scripts dedicated to pure ETL/analytical logic.
+- **Deduplication First**: Any operation writing to Notion or SQLite MUST verify existing records across normalized in-memory indexes (0.001s) before issuing create commands.
+
+<!--
+## 8. 🔍 아키텍처 감사 및 선제적 리팩토링 수칙 (System Audit Protocol)
+- **임시 땜질식 코딩 금지 (Zero-Patchwork Rule)**: 사용자가 오류를 제보하거나 수정을 요청할 때, 단순 증상 치료형 땜질을 금지하고 근본적인 아키텍처 원인, 양대 저장소 간 코드 파편화 여부 및 단일 진실 공급원(SSOT) 위반 여부를 선제적으로 전수 감사하여 제안함.
+- **데이터와 로직의 분리 (Proactive Decoupling)**: 정적 룰셋, 사전 테이블, 도메인 분류 기준은 파이썬 코드 내 하드코딩을 지양하고 data/*.json 또는 data/*.csv로 분리하여 파이썬 코드는 순수 로직만 유지함.
+- **중복 방지 우선 원칙 (Deduplication First)**: 노션 및 로컬 DB에 데이터를 생성/등록하는 모든 로직은 반드시 인메모리 3중 교차 검증(0.001s)을 선행하여 기존 레코드 재사용을 원천 강제함.
+-->

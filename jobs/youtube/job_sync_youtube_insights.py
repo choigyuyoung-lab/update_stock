@@ -59,10 +59,10 @@ from services.stock_fallback_resolver import (
 
 
 def normalize_ticker(ticker: str) -> str:
-    """티커 문자열에서 특수문자를 제거하고 대문자 표준 포맷으로 정규화합니다."""
+    """티커 문자열에서 마켓 식별자(.T, .KS 등)를 보존하고 대문자 표준 포맷으로 정규화합니다."""
     if not ticker:
         return ""
-    return re.sub(r'[^0-9A-Z]', '', ticker.strip().upper())
+    return str(ticker).strip().upper().replace(" ", "")
 
 
 # Windows 콘솔 UTF-8 출력 안전화
@@ -1357,14 +1357,30 @@ def main() -> None:
     # 0. 공식 SQLite 마스터 DB 및 온톨로지 사전 색인 프리로딩 (하드코딩 0%)
     _get_name_lookup_index()
 
-    # 1. 상장주식 Master DB 색인 로드
+    # 1. 상장주식 Master DB 색인 로드 (로컬 SQLite 0.001s + 노션 동기화)
     master_map: Dict[str, str] = {}
+    try:
+        from core.local_db_manager import get_db_connection
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT ticker, notion_page_id FROM tbl_stocks WHERE notion_page_id != '';")
+            for r in cursor.fetchall():
+                t = normalize_ticker(r["ticker"])
+                pid = r["notion_page_id"]
+                master_map[t] = pid
+                master_map[t.split(".")[0]] = pid
+    except Exception as e:
+        logger.warning(f"⚠️ 로컬 DB 색인 로드 예외: {e}")
+
     if MASTER_DB_ID:
         try:
             for p in paginate_database(notion_client, MASTER_DB_ID, page_size=100):
                 t_val = get_prop_value(p.get("properties", {}), ["티커", "Ticker"])
                 if t_val:
-                    master_map[normalize_ticker(str(t_val))] = p.get("id", "")
+                    t = normalize_ticker(str(t_val))
+                    pid = p.get("id", "")
+                    master_map[t] = pid
+                    master_map[t.split(".")[0]] = pid
             logger.info(f"📋 Master DB {len(master_map)}개 티커 색인 완료")
         except Exception as e:
             logger.warning(f"⚠️ Master DB 인덱싱 실패: {e}")
