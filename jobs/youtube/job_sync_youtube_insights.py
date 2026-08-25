@@ -598,20 +598,23 @@ def append_video_history_to_guide_page(
 
 
 # ==============================================================================
-# 5. 유튜브 RSS 피드 파서 및 yt-dlp 폴백 엔진 (무장애 수집 보장)
+# 5. 유튜브 최신 영상 수집 엔진 (yt-dlp 고속 메인 엔진 - API 쿼터 0 소모)
 # ==============================================================================
-def fetch_recent_videos_via_ytdlp(
+def fetch_recent_videos(
     channel_or_playlist_id: str,
     channel_name: str = "",
     max_videos: int = 5,
     is_playlist: bool = False
 ) -> List[Dict[str, Any]]:
     """
-    [2차 폴백] yt-dlp flat extraction을 이용하여 채널 또는 재생목록의 최신 영상 목록을 안전하게 수집합니다.
-    (YouTube RSS 피드 404 또는 네트워크 장애 발생 시 자동 호출)
+    yt-dlp flat extraction을 기반으로 채널 또는 재생목록의 최신 영상 목록을 고속으로 수집합니다.
+    (비공식 RSS 404 장애를 원천 차단하고 YouTube Data API 쿼터 0 소모 보장)
     """
+    if not channel_or_playlist_id:
+        return []
+
     if yt_dlp is None:
-        logger.warning(f"⚠️ [{channel_name}] yt-dlp 모듈이 설치되어 있지 않아 폴백 수집을 수행할 수 없습니다.")
+        logger.warning(f"⚠️ [{channel_name}] yt-dlp 모듈이 설치되어 있지 않아 영상을 수집할 수 없습니다.")
         return []
 
     is_pl = (
@@ -638,7 +641,7 @@ def fetch_recent_videos_via_ytdlp(
         "ignoreerrors": True,
         "nocheckcertificate": True,
         "extract_flat": "in_playlist",
-        "playlistend": max(max_videos * 2, 10),
+        "playlistend": max(max_videos, 1),
         "logger": _YtDlpSilentLogger(),
         "extractor_args": {
             "youtube": {
@@ -699,85 +702,17 @@ def fetch_recent_videos_via_ytdlp(
                     break
 
         if videos:
-            logger.info(f"   ✨ [yt-dlp 폴백 성공] [{channel_name}] {len(videos)}개 최신 영상 확보 완료")
+            logger.info(f"   ✨ [{channel_name}] 최신 영상 {len(videos)}개 수집 완료")
         return videos
 
     except Exception as e:
-        logger.warning(f"   ⚠️ [{channel_name}] yt-dlp 폴백 수집 중 예외 발생: {e}")
+        logger.warning(f"   ⚠️ [{channel_name}] 영상 수집 중 예외 발생: {e}")
         return []
 
 
-def fetch_recent_videos_from_rss(channel_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False) -> List[Dict[str, Any]]:
-    """
-    유튜브 채널 또는 재생목록 RSS 피드를 파싱하여 한국 시간(KST) 기준 최신 업로드 비디오 목록을 반환합니다.
-    (1차: API 쿼터 0 소모 RSS -> 404/장애 시 2차: yt-dlp 자동 폴백)
-    """
-    if is_playlist or channel_id.startswith("PL") or channel_id.startswith("UU") or channel_id.startswith("FL") or channel_id.startswith("RD") or channel_id.startswith("OLAK5uy_"):
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={channel_id}"
-    else:
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    videos = []
-
-    try:
-        res = requests.get(rss_url, headers=headers, timeout=10)
-        if res.status_code != 200:
-            logger.warning(f"⚠️ [{channel_name}] RSS 피드 수신 실패 (Status {res.status_code}) -> yt-dlp 2차 폴백 전환")
-            return fetch_recent_videos_via_ytdlp(channel_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
-
-        root = ET.fromstring(res.content)
-        ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
-
-        entries = root.findall("atom:entry", ns)
-        for entry in entries:
-            video_id_elem = entry.find("yt:videoId", ns)
-            title_elem = entry.find("atom:title", ns)
-            published_elem = entry.find("atom:published", ns)
-            link_elem = entry.find("atom:link", ns)
-
-            if video_id_elem is not None and title_elem is not None:
-                vid = (video_id_elem.text or "").strip()
-                vtitle = (title_elem.text or "").strip()
-                vpub = (published_elem.text or "").strip() if published_elem is not None else ""
-                vurl = link_elem.attrib.get("href", f"https://www.youtube.com/watch?v={vid}") if link_elem is not None else f"https://www.youtube.com/watch?v={vid}"
-
-                pub_dt = None
-                pub_date = ""
-                pub_time_kst = ""
-                if vpub:
-                    try:
-                        # UTC/ISO 날짜를 한국 표준시(KST, Asia/Seoul)로 변환
-                        utc_dt = datetime.fromisoformat(vpub.replace("Z", "+00:00"))
-                        pub_dt = utc_dt.astimezone(ZoneInfo("Asia/Seoul"))
-                        pub_date = pub_dt.strftime("%Y-%m-%d")
-                        pub_time_kst = pub_dt.strftime("%Y-%m-%d %H:%M")
-                    except Exception:
-                        pub_date = vpub[:10]
-                        pub_time_kst = vpub[:16]
-
-                videos.append({
-                    "video_id": vid,
-                    "title": vtitle,
-                    "url": vurl,
-                    "publish_date": pub_date,
-                    "publish_time_kst": pub_time_kst,
-                    "publish_dt": pub_dt or datetime.min.replace(tzinfo=ZoneInfo("Asia/Seoul")),
-                    "channel_name": channel_name or channel_id,
-                })
-
-        if not videos:
-            logger.info(f"   ℹ️ [{channel_name}] RSS 엔트리 없음 -> yt-dlp 2차 폴백 확인")
-            return fetch_recent_videos_via_ytdlp(channel_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
-
-        # 한국 시간(KST) 기준 최신 발행일시 역순(최신순) 엄격 정렬
-        videos.sort(key=lambda x: x["publish_dt"], reverse=True)
-
-        return videos[:max_videos]
-
-    except Exception as e:
-        logger.warning(f"⚠️ [{channel_name}] RSS 파싱 예외 발생 ({e}) -> yt-dlp 2차 폴백 전환")
-        return fetch_recent_videos_via_ytdlp(channel_id, channel_name=channel_name, max_videos=max_videos, is_playlist=is_playlist)
+# 하위 호환성을 위한 별칭 제공
+fetch_recent_videos_from_rss = fetch_recent_videos
+fetch_recent_videos_via_ytdlp = fetch_recent_videos
 
 
 def format_snippets_to_text(items: List[Any]) -> str:
@@ -1536,8 +1471,8 @@ def main() -> None:
         for ch in resolved_channels:
             ch_name = ch["name"]
             ch_id = ch["channel_id"]
-            print(f"\n📡 [{ch_name}] 신규 업로드 영상 RSS 스캔 중 (ID: {ch_id})...")
-            recent_videos = fetch_recent_videos_from_rss(ch_id, channel_name=ch_name, max_videos=args.max_videos)
+            print(f"\n📡 [{ch_name}] 신규 업로드 영상 스캔 중 (ID: {ch_id})...")
+            recent_videos = fetch_recent_videos(ch_id, channel_name=ch_name, max_videos=args.max_videos)
             for v in recent_videos:
                 success = process_single_video_item(
                     v=v,
@@ -1613,11 +1548,11 @@ def main() -> None:
                     continue
 
                 is_pl = (src_type == "재생목록") or src_ch_id.startswith("PL") or src_ch_id.startswith("UU") or src_ch_id.startswith("FL")
-                label = "재생목록 RSS" if is_pl else "채널 RSS"
+                label = "재생목록" if is_pl else "채널"
                 icon = "📑" if is_pl else "📡"
 
                 print(f"\n{icon} [{label}] '{src_name}' 스캔 중 (최대 {src_max_v}개 영상, ID: {src_ch_id})...")
-                recent_videos = fetch_recent_videos_from_rss(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl)
+                recent_videos = fetch_recent_videos(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl)
 
                 if not recent_videos:
                     print("   ℹ️ 최근 게시된 영상을 찾을 수 없습니다.")
