@@ -12,6 +12,8 @@
 > 한국/미국 주식 시세, 밸류에이션 재무제표, 5대 퀀트 팩터, ETF 구성종목(PDF), 거시 지표지수(54종), 유튜브 AI 시황을 자동 수집하여 노션(Notion) 데이터베이스 및 로컬 SQLite DB(0.001s 캐시)와 100% 동기화하는 자동화 엔진입니다.
 -->
 
+> 🗺️ **전체 시스템 아키텍처 맵 & 초보자 가이드**: [SYSTEM_MAP.md](file:///d:/Github%20IDE/update_stock/docs/SYSTEM_MAP.md)를 참조하십시오.
+
 ---
 
 ## 🏛️ 1. System Architecture & Data Flow
