@@ -201,6 +201,7 @@ def get_all_portfolio_db_ids() -> Dict[str, str]:
         "trade_log_db_id": get_db_id("TRADE_LOG_DB_ID", ["TRADE_LOG_DATABASE_ID"]),
         "cash_flow_db_id": get_db_id("CASH_FLOW_DB_ID", ["CASH_FLOW_DATABASE_ID"]),
         "notion_report_db_id": get_db_id("NOTION_REPORT_DB_ID", ["REPORT_DATABASE_ID", "REPORT_DB_ID"]),
+        "youtube_db_id": get_db_id("YOUTUBE_DATABASE_ID", ["YOUTUBE_DB_ID"], required=False),
     }
 
 
