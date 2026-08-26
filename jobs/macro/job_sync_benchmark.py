@@ -61,6 +61,7 @@ from core.local_db_manager import (
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
 MASTER_DATABASE_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID", "DATABASE_ID"], required=True)
 BENCHMARK_DATABASE_ID = get_db_id("BENCHMARK_DATABASE_ID", ["BENCHMARK_DB_ID"], required=True)
+INVESTMENT_DATABASE_ID = get_db_id("DATABASE_ID", ["INVESTMENT_DB_ID", "INVESTMENT_DATABASE_ID"], default="", required=False)
 
 BENCHMARK_SCHEMA: Dict[str, Dict[str, Any]] = {
     "업데이트 일자": {"date": {}},
