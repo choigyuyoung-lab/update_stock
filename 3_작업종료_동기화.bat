@@ -1,7 +1,16 @@
 @echo off
 chcp 65001 > nul
-title [update_stock] 작업 종료 및 자동 백업 동기화
+title [K-All-Round] Finish Sync
 cd /d "%~dp0"
-python "%~dp0tools\sync_manager.py" finish
-echo.
-pause
+
+if "%1"=="auto" (
+    echo ============================================================================== >> "%~dp0data\sync_finish.log"
+    echo   [Auto Sync] %date% %time% >> "%~dp0data\sync_finish.log"
+    echo ============================================================================== >> "%~dp0data\sync_finish.log"
+    python "%~dp0tools\sync_manager.py" finish >> "%~dp0data\sync_finish.log" 2>&1
+    echo. >> "%~dp0data\sync_finish.log"
+) else (
+    python "%~dp0tools\sync_manager.py" finish
+    echo.
+    pause
+)
