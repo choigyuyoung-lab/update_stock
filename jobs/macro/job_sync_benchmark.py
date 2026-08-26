@@ -15,6 +15,13 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Set
 
+from pathlib import Path
+
+# 프로젝트 루트 디렉토리를 sys.path 최상단에 선제 등록 (독립 실행 및 모듈 실행 안전 보장)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 # Windows 콘솔 인코딩 안전화
 if sys.platform == "win32":
     try:
