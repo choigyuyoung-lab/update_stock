@@ -1,0 +1,2 @@
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "cmd.exe /c python ""D:\Github IDE\k_all_round_portfolio\tools\sync_manager.py"" finish >> ""D:\Github IDE\update_stock\data\sync_finish.log"" 2>&1", 0, True
