@@ -2125,6 +2125,17 @@ def ensure_database_properties(
     try:
         db = client.databases.retrieve(database_id=clean_id)
         existing_props = db.get("properties", {})
+        
+        # 최신 노션 API(Data Sources 구조)에서 DB retrieve의 properties가 비어있는 경우 샘플 페이지로 기존 속성 교차 확인
+        if not existing_props:
+            try:
+                sample_query = safe_databases_query(client, clean_id, page_size=1)
+                results = sample_query.get("results", [])
+                if results and isinstance(results[0], dict):
+                    existing_props = results[0].get("properties", {})
+            except Exception:
+                pass
+
         missing_props = {}
         for prop_name, prop_def in properties_schema.items():
             if prop_name not in existing_props:
