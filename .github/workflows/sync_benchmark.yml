@@ -37,4 +37,5 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           MASTER_DATABASE_ID: ${{ secrets.MASTER_DATABASE_ID }}
           BENCHMARK_DATABASE_ID: ${{ secrets.BENCHMARK_DATABASE_ID }}
+          DATABASE_ID: ${{ secrets.DATABASE_ID }}
         run: python -m jobs.macro.job_sync_benchmark

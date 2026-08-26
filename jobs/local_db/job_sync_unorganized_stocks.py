@@ -112,7 +112,79 @@ from core.stock_registry import (
 
 
 # ==============================================================================
-# 4. 미정리 종목 개별 처리기 (3대 분기 원스톱 자동화)
+# 2. 환율 수집 및 노션 헬퍼 함수
+# ==============================================================================
+def get_exchange_rates() -> Dict[str, float]:
+    """yfinance를 활용하여 주요 통화 실시간 환율을 조회합니다."""
+    rates: Dict[str, float] = {}
+    direct_tickers = {
+        "USDKRW": "USDKRW=X",
+        "JPYKRW": "JPYKRW=X",
+        "EURKRW": "EURKRW=X",
+        "TWDKRW": "TWDKRW=X",
+        "CNYKRW": "CNYKRW=X",
+    }
+    for notion_ticker, yf_ticker in direct_tickers.items():
+        try:
+            hist = yf.Ticker(yf_ticker).history(period="5d")
+            if not hist.empty:
+                rate = float(hist['Close'].iloc[-1])
+                if notion_ticker == "JPYKRW":
+                    rate *= 100
+                rates[notion_ticker] = round(rate, 2)
+        except Exception as e:
+            logger.warning(f"⚠️ 환율 {notion_ticker} 수집 실패: {e}")
+    try:
+        usd_krw = rates.get("USDKRW")
+        hist_ils = yf.Ticker("ILS=X").history(period="5d")
+        if usd_krw and not hist_ils.empty:
+            rates["ILSKRW"] = round(usd_krw / float(hist_ils['Close'].iloc[-1]), 2)
+    except Exception as e:
+        logger.warning(f"⚠️ 환율 ILSKRW 계산 실패: {e}")
+    return rates
+
+
+def update_notion_rate(page_id: str, rate: float) -> None:
+    """노션 페이지의 현재가(Number) 및 업데이트 일자 속성을 업데이트합니다."""
+    try:
+        session.patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            json={
+                "properties": {
+                    "현재가": {"number": rate},
+                    "업데이트 일자": {"date": {"start": kst_isoformat()}}
+                }
+            }
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ 노션 환율 업데이트 실패 ({page_id}): {e}")
+
+
+def get_prop(props: Dict[str, Any], key: str) -> Any:
+    """노션 프로퍼티 값을 안전하게 추출합니다."""
+    p = props.get(key)
+    if not p:
+        return None
+    dtype = p.get('type')
+    if dtype == "title":
+        return p.get("title", [])[0].get("plain_text", "") if p.get("title") else ""
+    elif dtype == "rich_text":
+        return p.get("rich_text", [])[0].get("plain_text", "") if p.get("rich_text") else ""
+    elif dtype == "checkbox":
+        return p.get("checkbox", False)
+    elif dtype == "date":
+        return p.get("date", {}).get("start") if p.get("date") else None
+    elif dtype == "number":
+        return p.get("number")
+    elif dtype == "select":
+        return p.get("select", {}).get("name") if p.get("select") else None
+    elif dtype == "multi_select":
+        return [opt.get("name", "") for opt in p.get("multi_select", []) if opt.get("name")]
+    return None
+
+
+# ==============================================================================
+# 3. 미정리 종목 개별 처리기 (3대 분기 원스톱 자동화)
 # ==============================================================================
 def process_unorganized_page(
     p: Dict[str, Any],

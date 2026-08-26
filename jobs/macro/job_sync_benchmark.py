@@ -32,6 +32,7 @@ if sys.platform == "win32":
 from core.notion_utils import (
     build_notion_client,
     get_env_var,
+    get_db_id,
     paginate_database,
     safe_page_update,
     make_rich_text,
@@ -58,23 +59,8 @@ from core.local_db_manager import (
 # 1. 환경 변수, 스키마 및 로거 설정
 # ==============================================================================
 NOTION_TOKEN = get_env_var("NOTION_TOKEN")
-MASTER_DATABASE_ID = (
-    os.environ.get("MASTER_DATABASE_ID")
-    or os.environ.get("MASTER_DB_ID")
-    or os.environ.get("DATABASE_ID")
-    or get_env_var("MASTER_DATABASE_ID")
-)
-BENCHMARK_DATABASE_ID = (
-    os.environ.get("BENCHMARK_DATABASE_ID")
-    or os.environ.get("BENCHMARK_DB_ID")
-    or get_env_var("BENCHMARK_DATABASE_ID")
-)
-INVESTMENT_DATABASE_ID = (
-    os.environ.get("DATABASE_ID")
-    or os.environ.get("INVESTMENT_DB_ID")
-    or os.environ.get("INVESTMENT_DATABASE_ID")
-    or get_env_var("DATABASE_ID")
-)
+MASTER_DATABASE_ID = get_db_id("MASTER_DATABASE_ID", ["MASTER_DB_ID", "DATABASE_ID"], required=True)
+BENCHMARK_DATABASE_ID = get_db_id("BENCHMARK_DATABASE_ID", ["BENCHMARK_DB_ID"], required=True)
 
 BENCHMARK_SCHEMA: Dict[str, Dict[str, Any]] = {
     "업데이트 일자": {"date": {}},
