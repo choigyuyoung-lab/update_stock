@@ -5,7 +5,7 @@
 -->
 
 > **"A beginner-friendly yet technically rigorous master guide to the 24/7 autonomous financial data ETL hub and AI quant portfolio CIO system."**  
-> This specification synthesizes [`GEMINI.md`](file:///d:/Github%20IDE/GEMINI.md) (Domain Rules), [`AGENT.md`](file:///d:/Github%20IDE/AGENT.md) (Engineering Standards), [`DOCUMENTATION.md`](file:///d:/Github%20IDE/update_stock/docs/DOCUMENTATION.md) (Operations), and the self-evolving AI Tech Radar pipeline into a single source of truth.
+> This specification synthesizes [`GEMINI.md`](file:///d:/Github%20IDE/GEMINI.md) (Domain Rules), [`AGENT.md`](file:///d:/Github%20IDE/AGENT.md) (Engineering Standards), [`DOCUMENTATION.md`](file:///d:/Github%20IDE/k_all_round_portfolio/docs/DOCUMENTATION.md) (Operations), and the self-evolving AI Tech Radar pipeline into a single source of truth.
 
 <!--
 > **"초보자도 5분 만에 이해하고 실전 유지보수에 즉시 활용하는 24시간 자율 금융 데이터 수집 & AI 퀀트 CIO 시스템"**  
@@ -46,7 +46,7 @@
 │   • 5대 퀀트 팩터 & 1-Week 95% VaR (Value at Risk) 산출 & 환율 60영업일 롤링 퀀타일 밴드 스위칭  │
 │   • 스마트 밸류 에버리징(SVA): 목표 비중(±3.0%p) 및 추세/낙폭 가중 100만원 추천 매수 배분표    │
 │   • Google Gemini AI (Search Grounding & GeekNews 팩트체크) ➔ 노션 네이티브 블록 리포트 자동 발행│
-│   • 모바일/웹 세션 프롬프트 생성 ➔ 스마트폰 Gemini 앱 1:1 전속 CIO 상담 & GDrive 동기화           │
+│   • 모바일/아이패드 세션 프롬프트 생성 ➔ 스마트폰 Gemini 앱 1:1 전속 CIO 상담 & GDrive 동기화     │
 └────────────────────────────────────────────────┬────────────────────────────────────────────────┘
                                                  │ 최종 산출물 전달
                                                  ▼
@@ -77,7 +77,7 @@ flowchart TD
     subgraph S3["3단계: AI 팩트체크 & 자동 발행"]
         P3 --> A1["Google Gemini AI\n(Search Grounding & GeekNews 결합)"]
         A1 --> A2["노션 주간 리포트 자동 적재\n(260823/자산리포트 등 네이티브 블록)"]
-        A1 --> A3["모바일/웹 세션 프롬프트 생성\n(클립보드 복사 & GDrive 65개 파일 동기화)"]
+        A1 --> A3["모바일/아이패드 세션 프롬프트 생성\n(클립보드 복사 & GDrive 65개 파일 동기화)"]
         A1 --> A4["로컬 reports/*.md 영구 백업"]
     end
 
@@ -120,7 +120,7 @@ flowchart TD
 | **신규 종목 테마/섹터 매핑 규칙 추가** | 노션 **사전 DB (`tbl_dictionary`)** 웹에서 행 추가 | `python -m jobs.local_db.job_sync_local_db` |
 | **한투(KIS) 시세/재무 API 로직 수정** | [`update_stock/jobs/finance/kis_data_service.py`](file:///d:/Github%20IDE/update_stock/jobs/finance/kis_data_service.py) | `python -m jobs.finance.job_sync_finance_kr` |
 | **포트폴리오 리포트 로컬 즉시 발행** | 터미널 또는 배치 파일 | `python -m jobs.quant_report.job_generate_portfolio_report` |
-| **스마트폰 Gemini 상담용 프롬프트 생성** | **`2_Gemini_프롬프트_생성.bat`** 더블클릭 | 클립보드 자동 복사 & GDrive 동기화 |
+| **스마트 작업종료 & 모바일 GDrive 동기화** | **`3_작업종료_동기화.bat`** 더블클릭 | 당일 수정본 문법검증 + Git Push + 모바일 GDrive 동기화 + 클립보드 복사 |
 | **AI 테크레이더 제안 패치 원클릭 적용** | **`4_테크레이더_패치적용.bat`** 더블클릭 | 의존성 승격 + 헬퍼 주입 + 가드레일 검증 |
 
 ---
@@ -139,7 +139,7 @@ flowchart TD
 │    진단 리포트           │ • system_portfolio_quant│ 📱 [스마트폰 노션 앱으로 주간 열람]│
 │                         │ • user_portfolio_template│ 💾 [로컬 reports/*.md 영구 백업]   │
 ├─────────────────────────┼─────────────────────────┼────────────────────────────────────┤
-│ 2. 모바일/웹 1:1 전속    │ • tool_generate_gemini  │ 📋 [2_Gemini_프롬프트_생성.bat]    │
+│ 2. 모바일/아이패드 1:1   │ • tool_generate_gemini  │ 🏁 [3_작업종료_동기화.bat]         │
 │    개인 CIO 실시간 상담 │ • gemini_mobile_session │ 📱 [스마트폰 Gemini 앱에 1초 주입] │
 │                         │ • prompt_manager.py     │ ☁️ [Google Drive 65개 코어 동기화] │
 ├─────────────────────────┼─────────────────────────┼────────────────────────────────────┤
@@ -155,8 +155,8 @@ flowchart TD
 
 1. **주간 퀀트 자산배분 진단 (`quant_report`)**:
    - 매주 일요일 밤, 6대 계좌 잔고를 통합 진단하여 노션에 리포트 발행. 사용자는 월요일 출근길에 1분간 열어보고 **100만원 추천 배분표**대로 매수 주문만 실행.
-2. **모바일/웹 1:1 개인 CIO 세션 (`tools`)**:
-   - `2_Gemini_프롬프트_생성.bat` 더블클릭 ➔ 클립보드 복사 ➔ 스마트폰 Gemini 앱에 붙여넣어 *"나 오늘 삼성전자 더 사도 돼?"* 같은 실시간 1:1 문답 진행.
+2. **모바일/아이패드 1:1 개인 CIO 세션 (`tools`)**:
+   - `3_작업종료_동기화.bat` 실행 시 최신 프롬프트 클립보드 복사 & Google Drive 자동 동기화 ➔ 퇴근길이나 집에서 핸드폰/아이패드로 실시간 1:1 문답 진행.
 3. **데일리 유튜브 AI 시황 (`youtube`)**:
    - 1~2시간짜리 경제 영상을 다 볼 필요 없이, 노션 유튜브 DB에 적재된 3줄 핵심 요약과 종목별 시사점만 퇴근길에 1분 만에 훑어봄.
 4. **AI 테크 레이더 & 자율 진화 (`tech_radar`)**:
@@ -181,15 +181,10 @@ flowchart TD
                                            │
                                            ▼
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ 📱 3. 원클릭 클립보드 복사 & Google Drive 자동 전파 (실시간 동기화)                      │
-│    - [2_Gemini_프롬프트_생성.bat] 더블클릭!                                              │
-│    - 최신 프롬프트가 클립보드에 복사되고 GDrive update_stock_core/에 자동 업로드        │
-└──────────────────────────────────────────┬─────────────────────────────────────────────┘
-                                           │
-                                           ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ 🚀 4. 클라우드 자동 배포 (인간 승인 기반 Git Push)                                     │
-│    - [3_작업종료_동기화.bat] 실행 ➔ GitHub Actions 11개 스케줄러에 최신 프롬프트 영구 반영 │
+│ 🚀 3. 스마트 작업종료 통합 파이프라인 (Git Push & 모바일 GDrive 자동 전파)             │
+│    - [3_작업종료_동기화.bat] 원클릭 실행!                                              │
+│    - ① 당일 수정본 문법검증 ➔ ② Git Push ➔ ③ GDrive update_stock_core/ 자동 동기화   │
+│    - 최신 프롬프트가 클립보드에 자동 복사되어 스마트폰/아이패드로 즉시 상담 가능       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -221,7 +216,7 @@ flowchart TD
 1. **관심사의 명확한 분리 (Single Source of Truth)**:
    - **[`GEMINI.md`](file:///d:/Github%20IDE/GEMINI.md)**: 5대 퀀트 팩터 수학 공식, 95% 1-Week VaR, 스마트 밸류 에버리징, 6대 노션 DB 스키마 (WHAT).
    - **[`AGENT.md`](file:///d:/Github%20IDE/AGENT.md)**: 조기 반환(Early Return), 매직 넘버 박멸, TDD 절차, Git 7대 커밋 규칙, 자동 커밋 금지 (HOW).
-   - **[`DOCUMENTATION.md`](file:///d:/Github%20IDE/update_stock/docs/DOCUMENTATION.md)**: 설치 가이드, 파이프라인 매핑, SOP 체크리스트 (OPERATION).
+   - **[`DOCUMENTATION.md`](file:///d:/Github%20IDE/k_all_round_portfolio/docs/DOCUMENTATION.md)**: 설치 가이드, 파이프라인 매핑, SOP 체크리스트 (OPERATION).
 2. **0.003초 불변 가드레일 (`test_guardrails.py`)**:
    - 5대 퀀트 팩터(MA200, 수급선, 12M 모멘텀, 52W 낙폭, 60D 변동성) 수식과 노션 정규화 스키마를 상시 보호.
 3. **종속성 중심 폴더 응집도 (Job-Centric Dependency Co-location)**:
@@ -242,7 +237,6 @@ flowchart TD
 
 [💼 일상 업무 루틴]
  ➔ 1_작업시작_동기화.bat       : 출근/작업 전 원격 최신 코드 Pull + 직전 작업 요약 + 전략 점검
- ➔ 2_Gemini_프롬프트_생성.bat  : 스마트폰/웹 Gemini 앱 1:1 상담용 프롬프트 생성 & 클립보드 복사
- ➔ 3_작업종료_동기화.bat       : 퇴근/작업 후 Git 변경 상태 점검 및 원격 원클릭 Push
+ ➔ 3_작업종료_동기화.bat       : 퇴근/작업 후 당일 수정본 문법검증 + Git Push + 모바일 GDrive 동기화
  ➔ 4_테크레이더_패치적용.bat    : AI 추천 최신 기술 패치 원클릭 적용기
 ```

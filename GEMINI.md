@@ -81,8 +81,10 @@ For 7-asset quantitative allocation models and portfolio diagnostics, refer to [
 
 1. **Twin-Pair Single Source of Truth (SSOT)**:
    - `k_all_round_portfolio` and `update_stock` are tightly coupled. Common utilities, asset allocation rules, and schema changes MUST be mirrored consistently across both repositories.
-2. **Smart Work Start Sync (`1_작업시작_동기화.bat`)**:
-   - Automatically detects environment switching (Office $\leftrightarrow$ Home), alerts uncommitted changes, briefs previous commits, and prompts periodic (7-Day / 30-Day) strategic checklists.
+2. **Smart Work Start & Finish Synchronization**:
+   - `├── 1_작업시작_동기화.bat`: Smart Work Start (Environment Detection / Summary / Periodic Strategy Checklist)
+   - `├── 3_작업종료_동기화.bat`: Smart Work Finish (Syntax Validation & Git Commit/Push & Mobile GDrive Sync)
+   - `└── 4_테크레이더_패치적용.bat`: AI Tech Radar One-Click Patch Applier
 3. **Automated Git Commit/Push Prohibition**:
    - AI agents MUST stop after code verification. Final commits and pushes MUST be manually executed by the user via `3_작업종료_동기화.bat`.
 4. **Pre-Execution Korean Terminal Command Briefing**:

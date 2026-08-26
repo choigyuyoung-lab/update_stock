@@ -15,6 +15,8 @@ import socket
 import datetime
 import subprocess
 import logging
+import shutil
+import py_compile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -264,20 +266,106 @@ def mode_start() -> None:
     print(f"{CYAN}{'='*70}{RESET}\n")
 
 
+def validate_modified_python_files(repos: List[Dict[str, Any]]) -> bool:
+    """
+    당일 수정되거나 추가된 Python 파일(.py)에 대해 문법(Syntax/Indentation) 무결성 검사를 수행합니다.
+    오류가 발견되면 즉시 False를 반환하여 Push를 차단합니다.
+    """
+    print(f"\n{CYAN}🔍 [1단계] 당일 수정된 Python 파일 문법 무결성 사전 검증...{RESET}")
+    all_valid = True
+    validated_files_count = 0
+
+    for repo in repos:
+        repo_path: Path = repo["path"]
+        _, status_out, _ = run_cmd(["git", "status", "--porcelain"], cwd=repo_path)
+        if not status_out:
+            continue
+
+        for line in status_out.splitlines():
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            parts = line_clean.split(maxsplit=1)
+            if len(parts) < 2:
+                continue
+            _, rel_file_str = parts[0], parts[1]
+            if "->" in rel_file_str:
+                rel_file_str = rel_file_str.split("->")[-1].strip()
+
+            rel_file_str = rel_file_str.strip('"\'')
+            if not rel_file_str.endswith(".py"):
+                continue
+
+            file_path = repo_path / rel_file_str
+            if not file_path.exists() or not file_path.is_file():
+                continue
+
+            try:
+                py_compile.compile(str(file_path), doraise=True)
+                validated_files_count += 1
+            except py_compile.PyCompileError as e:
+                all_valid = False
+                print(f"  {RED}❌ [문법 오류 발견] {repo['name']}/{rel_file_str}:{RESET}")
+                err_msg = getattr(e, 'msg', str(e))
+                print(f"     {YELLOW}{err_msg}{RESET}")
+            except Exception as e:
+                all_valid = False
+                print(f"  {RED}❌ [검증 실패] {repo['name']}/{rel_file_str}: {e}{RESET}")
+
+    if not all_valid:
+        print(f"\n{RED}{BOLD}⚠️ 문법 오류가 감지되어 원격 Push 및 동기화를 중단했습니다. 코드를 수정한 후 다시 실행해주세요.{RESET}\n")
+        return False
+
+    if validated_files_count > 0:
+        print(f"  {GREEN}✅ 당일 수정/추가된 Python 파일 {validated_files_count}개 문법 검증 완료 (무결성 통과){RESET}")
+    else:
+        print(f"  {CYAN}ℹ️ 당일 수정된 Python 파일이 없어 문법 검사를 건너뜁니다.{RESET}")
+    return True
+
+
+def clean_local_pycache(workspace_path: Path) -> None:
+    """워크스페이스 내 불필요한 __pycache__ 디렉토리를 정리합니다."""
+    cleaned_count = 0
+    try:
+        for p in workspace_path.rglob("__pycache__"):
+            if p.is_dir():
+                try:
+                    shutil.rmtree(p)
+                    cleaned_count += 1
+                except Exception:
+                    pass
+        if cleaned_count > 0:
+            print(f"  🧹 로컬 임시 캐시(__pycache__) {cleaned_count}개 정리 완료")
+    except Exception as e:
+        logger.debug(f"캐시 정리 중 예외 발생: {e}")
+
+
 def mode_finish() -> None:
-    """작업 종료 시 2대 저장소의 변경사항을 확인하고 원클릭 자동 커밋 & Push를 수행합니다."""
+    """
+    스마트 작업 종료 및 통합 동기화:
+    1단계: 당일 수정된 Python 파일 문법 무결성 사전 검증 (오류 시 Push 차단)
+    2단계: 2대 저장소 Git Commit & Push (GitHub 반영)
+    3단계: 최신 모바일 세션 프롬프트 생성 & Google Drive 동기화 & 클립보드 복사 (핸드폰/아이패드 점검용)
+    4단계: 로컬 임시 캐시(__pycache__) 정리
+    """
     location = get_location()
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     repos = get_all_target_repos()
     state = load_sync_state()
 
     print(f"{CYAN}{'='*70}{RESET}")
-    print(f"{CYAN}{BOLD}  🏁 [K-올라운드 & update_stock] 스마트 작업 종료/퇴근 동기화 매니저{RESET}")
+    print(f"{CYAN}{BOLD}  🏁 [K-올라운드 & update_stock] 스마트 작업 종료/퇴근 통합 동기화 매니저{RESET}")
     print(f"{CYAN}{'='*70}{RESET}")
     print(f"📍 현재 환경 : {YELLOW}{location}{RESET}")
     print(f"⏰ 실행 시각 : {GRAY}{now_str}{RESET}")
     print(f"{CYAN}{'-'*70}{RESET}")
 
+    # [1단계] 당일 수정된 Python 파일 문법 무결성 사전 검증
+    if not validate_modified_python_files(repos):
+        return
+
+    # [2단계] 2대 저장소 Git Commit & Push
+    print(f"\n{CYAN}🚀 [2단계] 2대 저장소 Git Commit & Push (GitHub 반영)...{RESET}")
     state["last_location"] = location
     state["last_sync_time"] = now_str
     save_sync_state(state)
@@ -306,8 +394,28 @@ def mode_finish() -> None:
         else:
             print(f"  {RED}❌ git push 실패: {p_err}{RESET}")
 
+    # [3단계] 최신 모바일 세션 프롬프트 생성 & Google Drive 동기화
+    print(f"\n{CYAN}📱 [3단계] 최신 모바일 세션 프롬프트 생성 & Google Drive 동기화...{RESET}")
+    prompt_tool_path = WORKSPACE_ROOT / "k_all_round_portfolio" / "tools" / "tool_generate_gemini_prompt.py"
+    if prompt_tool_path.exists():
+        _, p_out, _ = run_cmd(
+            [sys.executable, "-m", "tools.tool_generate_gemini_prompt"],
+            cwd=WORKSPACE_ROOT / "k_all_round_portfolio"
+        )
+        if p_out:
+            for line in p_out.splitlines():
+                if any(icon in line for icon in ["📁", "☁️", "📦", "📋", "🧹", "📂"]):
+                    print(f"  {line}")
+    else:
+        print(f"  {YELLOW}⚠️ 프롬프트 생성 도구를 찾을 수 없습니다: {prompt_tool_path}{RESET}")
+
+    # [4단계] 로컬 임시 캐시 정리
+    print(f"\n{CYAN}🧹 [4단계] 로컬 임시 캐시 정리...{RESET}")
+    clean_local_pycache(WORKSPACE_ROOT)
+
     print(f"\n{GREEN}{'='*70}{RESET}")
-    print(f"{GREEN}{BOLD}  🎉 모든 저장소 업로드 완료! 안심하고 이동/퇴근하세요.{RESET}")
+    print(f"{GREEN}{BOLD}  🎉 모든 저장소 Push 및 구글 드라이브(모바일/아이패드) 동기화 완료!{RESET}")
+    print(f"{CYAN}  📱 스마트폰/아이패드 Gemini 앱에서 최신 상태로 바로 상담하실 수 있습니다.{RESET}")
     print(f"{GREEN}{'='*70}{RESET}\n")
 
 
