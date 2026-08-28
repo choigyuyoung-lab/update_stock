@@ -187,8 +187,11 @@ class AIService:
 
                     if response and response.text:
                         parsed_result = YouTubeAnalysisResult.model_validate_json(response.text.strip())
-                        if not parsed_result.publish_date or parsed_result.publish_date.lower() == "null":
-                            parsed_result.publish_date = str(video_meta.get("publish_date", ""))
+                        meta_pub_date = str(video_meta.get("publish_date", "")).strip()
+                        if meta_pub_date and meta_pub_date.lower() not in ["null", "none"]:
+                            parsed_result.publish_date = meta_pub_date
+                        elif not parsed_result.publish_date or parsed_result.publish_date.lower() in ["null", "none"]:
+                            parsed_result.publish_date = meta_pub_date
                         
                         # 티커 기본 정규화 (대문자 및 6자리 zfill)
                         for item in (parsed_result.assets or []):

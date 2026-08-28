@@ -1094,6 +1094,10 @@ def get_prop_value(props: Dict[str, Any], names: List[str]) -> Any:
         elif ptype == "relation":
             return [r.get("id") for r in prop.get("relation", []) if isinstance(r, dict) and r.get("id")]
 
+        # 6-1. Created Time / Last Edited Time
+        elif ptype in ("created_time", "last_edited_time"):
+            return prop.get(ptype)
+
         # 7. Rollup (상장주식DB 전체 등 상위 DB 롤업 속성 완벽 지원)
         elif ptype == "rollup":
             rollup_obj = prop.get("rollup", {})

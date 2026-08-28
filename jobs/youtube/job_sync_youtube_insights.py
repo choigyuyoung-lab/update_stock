@@ -50,6 +50,7 @@ from core.notion_utils import (
     build_notion_client,
     get_env_var,
     get_db_id,
+    get_kst_now,
     get_kst_str,
     paginate_database,
     get_page_text,
@@ -206,6 +207,53 @@ class _YtDlpSilentLogger:
     def error(self, msg: str) -> None: pass
 
 
+def _parse_video_publish_date(
+    raw_date: Optional[str] = None,
+    timestamp: Optional[Any] = None,
+    iso_str: Optional[str] = None
+) -> Tuple[str, str]:
+    """
+    다양한 포맷(YYYYMMDD, Unix timestamp, ISO 8601 UTC)의 동영상 게시일시를
+    한국 표준시(KST) 기준 (YYYY-MM-DD, YYYY-MM-DD HH:MM) 튜플로 정밀 변환합니다.
+    """
+    tz_kst = ZoneInfo("Asia/Seoul")
+    now_kst = get_kst_now()
+
+    # 1. ISO 8601 형식 문자열 (예: RSS의 2026-08-27T14:30:00+00:00 또는 2026-08-27T14:30:00Z)
+    if iso_str and isinstance(iso_str, str):
+        try:
+            clean_iso = iso_str.strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_iso)
+            dt_kst = dt.astimezone(tz_kst)
+            return dt_kst.strftime("%Y-%m-%d"), dt_kst.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    # 2. Unix Timestamp (초 단위 또는 밀리초)
+    if timestamp is not None:
+        try:
+            ts_val = float(timestamp)
+            if ts_val > 1e11:  # 밀리초인 경우
+                ts_val /= 1000.0
+            if ts_val > 0:
+                dt_kst = datetime.fromtimestamp(ts_val, tz=tz_kst)
+                return dt_kst.strftime("%Y-%m-%d"), dt_kst.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    # 3. YYYYMMDD 또는 YYYY-MM-DD 형식 문자열
+    if raw_date and isinstance(raw_date, str):
+        s = raw_date.replace("-", "").strip()
+        if len(s) == 8 and s.isdigit():
+            date_str = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+            return date_str, f"{date_str} 00:00"
+        if len(raw_date.strip()) == 10 and raw_date.count("-") == 2:
+            return raw_date.strip(), f"{raw_date.strip()} 00:00"
+
+    today_str = now_kst.strftime("%Y-%m-%d")
+    return today_str, now_kst.strftime("%Y-%m-%d %H:%M")
+
+
 def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
     """단일 유튜브 영상 URL/ID의 메타데이터를 수집합니다."""
     vid = extract_video_id(video_input)
@@ -214,7 +262,8 @@ def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
         return None
 
     video_url = f"https://www.youtube.com/watch?v={vid}"
-    title, channel_name, description, publish_date = f"YouTube Video ({vid})", "YouTube", "", ""
+    title, channel_name, description = f"YouTube Video ({vid})", "YouTube", ""
+    publish_date, publish_time_kst = "", ""
 
     if yt_dlp:
         try:
@@ -234,19 +283,22 @@ def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
                     title = info.get("title") or title
                     channel_name = info.get("channel") or info.get("uploader") or channel_name
                     description = info.get("description") or ""
+                    
                     ud = info.get("upload_date")
-                    if ud and len(ud) == 8:
-                        publish_date = f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}"
+                    ts = info.get("timestamp") or info.get("release_timestamp")
+                    publish_date, publish_time_kst = _parse_video_publish_date(raw_date=ud, timestamp=ts)
         except Exception as e:
             logger.debug(f"yt-dlp 메타데이터 조회 생략 ({vid}): {e}")
 
-    now_kst = get_kst_str("%Y-%m-%d %H:%M")
+    if not publish_date:
+        publish_date, publish_time_kst = _parse_video_publish_date()
+
     return {
         "video_id": vid,
         "title": title,
         "url": video_url,
-        "publish_date": publish_date or now_kst[:10],
-        "publish_time_kst": now_kst,
+        "publish_date": publish_date,
+        "publish_time_kst": publish_time_kst,
         "channel_name": channel_name,
         "description": description,
     }
@@ -419,8 +471,6 @@ def fetch_videos_via_rss(channel_or_playlist_id: str, channel_name: str = "", ma
         }
 
         videos = []
-        now_kst = get_kst_str("%Y-%m-%d %H:%M")
-        now_date = now_kst[:10]
 
         for entry in root.findall("atom:entry", ns):
             vid_elem = entry.find("yt:videoId", ns)
@@ -430,7 +480,8 @@ def fetch_videos_via_rss(channel_or_playlist_id: str, channel_name: str = "", ma
 
             vid = vid_elem.text.strip() if vid_elem is not None and vid_elem.text else ""
             vtitle = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
-            pub_str = (pub_elem.text[:10] if pub_elem is not None and pub_elem.text else now_date)
+            pub_iso = pub_elem.text.strip() if pub_elem is not None and pub_elem.text else ""
+            pub_str, pub_time_kst = _parse_video_publish_date(iso_str=pub_iso)
             ch_name = author_elem.text.strip() if author_elem is not None and author_elem.text else (channel_name or "YouTube")
 
             if vid and vtitle:
@@ -439,7 +490,7 @@ def fetch_videos_via_rss(channel_or_playlist_id: str, channel_name: str = "", ma
                     "title": vtitle,
                     "url": f"https://www.youtube.com/watch?v={vid}",
                     "publish_date": pub_str,
-                    "publish_time_kst": f"{pub_str} 00:00",
+                    "publish_time_kst": pub_time_kst,
                     "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
                     "channel_name": ch_name,
                     "guide_name": channel_name or ch_name,
@@ -493,8 +544,6 @@ def fetch_recent_videos(channel_or_playlist_id: str, channel_name: str = "", max
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(target_url, download=False) or {}
-            now_kst = get_kst_str("%Y-%m-%d %H:%M")
-            now_date = now_kst[:10]
 
             for e in (info.get("entries") or []):
                 if not e:
@@ -510,15 +559,16 @@ def fetch_recent_videos(channel_or_playlist_id: str, channel_name: str = "", max
                     continue
 
                 vurl = e.get("url") if (e.get("url") or "").startswith("http") else f"https://www.youtube.com/watch?v={vid}"
-                ud = str(e.get("upload_date") or "")
-                pub_date = f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}" if len(ud) == 8 else now_date
+                ud = e.get("upload_date")
+                ts = e.get("timestamp") or e.get("release_timestamp")
+                pub_date, pub_time_kst = _parse_video_publish_date(raw_date=ud, timestamp=ts)
 
                 videos.append({
                     "video_id": vid,
                     "title": vtitle,
                     "url": vurl,
                     "publish_date": pub_date,
-                    "publish_time_kst": f"{pub_date} 00:00",
+                    "publish_time_kst": pub_time_kst,
                     "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
                     "channel_name": e.get("channel") or e.get("uploader") or channel_name or channel_or_playlist_id,
                     "guide_name": channel_name or channel_or_playlist_id,
@@ -682,8 +732,12 @@ def create_youtube_summary_notion_page(client: Any, db_id: str, analyzed: YouTub
 
     title = analyzed.summarized_title_for_notion or video_meta.get("title", "유튜브 시황 분석 리포트")
     url = video_meta.get("url", "")
-    pub_date_str = analyzed.publish_date or video_meta.get("publish_date", get_kst_str("%Y-%m-%d"))
-    pub_time_kst = video_meta.get("publish_time_kst", pub_date_str)
+    
+    # 동영상 실제 게시일(기준일자) 우선 확보
+    pub_date_str = video_meta.get("publish_date") or analyzed.publish_date or get_kst_str("%Y-%m-%d")
+    pub_time_kst = video_meta.get("publish_time_kst", f"{pub_date_str} 00:00")
+    now_kst = get_kst_str("%Y-%m-%d %H:%M")
+    today_date_str = now_kst[:10]
 
     one_line = (getattr(analyzed, "one_line_summary", "") or "").strip()
     if not one_line and analyzed.overall_summary:
@@ -707,14 +761,19 @@ def create_youtube_summary_notion_page(client: Any, db_id: str, analyzed: YouTub
     if channel_tag:
         page_props["선택"] = {"select": {"name": channel_tag}}
     if pub_date_str:
+        # Date 열: 동영상 실제 게시일 (주간 리포트 및 캘린더 조회 호환)
         page_props["Date"] = {"date": {"start": pub_date_str}}
+        # 게시일 열: 동영상 실제 게시일 (명시적 분리 열)
+        page_props["게시일"] = {"date": {"start": pub_date_str}}
+    # 분석일시 열: AI 분석 및 노션 적재가 수행된 시각
+    page_props["분석일시"] = {"date": {"start": today_date_str}}
 
     blocks: List[Dict[str, Any]] = [
         {
             "object": "block", "type": "callout",
             "callout": {
                 "icon": {"type": "emoji", "emoji": "📺"}, "color": "blue_background",
-                "rich_text": [{"type": "text", "text": {"content": f"📺 출처: {guide_title or channel_name or 'YouTube'} | 영상: {video_meta.get('title', title)} ({url})\n📅 게시일시: {pub_time_kst} (KST) | 🏷️ 시장 심리: {sentiment}\n\n📌 핵심 요약 (1줄):\n{one_line}"[:2000]}}]
+                "rich_text": [{"type": "text", "text": {"content": f"📺 출처: {guide_title or channel_name or 'YouTube'} | 영상: {video_meta.get('title', title)} ({url})\n📅 영상 게시일시: {pub_time_kst} (KST) | 🤖 AI 분석일시: {now_kst} (KST) | 🏷️ 시장 심리: {sentiment}\n\n📌 핵심 요약 (1줄):\n{one_line}"[:2000]}}]
             }
         }
     ]
@@ -748,30 +807,36 @@ def create_youtube_summary_notion_page(client: Any, db_id: str, analyzed: YouTub
             })
         blocks.append({"object": "block", "type": "table", "table": {"table_width": 4, "has_column_header": True, "has_row_header": False, "children": table_rows}})
 
-    now_kst = get_kst_str("%Y-%m-%d %H:%M")
     blocks.extend([
         {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "🧭 주간 리포트 연계 퀀트 인덱스 (Macro Signals)"}}]}},
+        {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"동영상 기준 게시일시: {pub_time_kst} (KST)"}, "annotations": {"bold": True}}]}},
         {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"시장 심리 / 방향성: {sentiment}"}, "annotations": {"bold": True}}]}},
         {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"주요 주도 섹터: {sectors_str}"}}]}},
-        {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"분석 및 동기화 일시: {now_kst} (KST)"}}]}},
+        {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"AI 분석 및 노션 동기화 일시: {now_kst} (KST)"}}]}},
     ])
 
-    try:
-        new_page = client.pages.create(parent={"database_id": db_id}, properties=page_props, children=blocks)
-        page_id = new_page.get("id")
-        logger.info(f"   ✅ [Notion 생성 성공] {title}")
-        return page_id
-    except Exception as e:
-        if "선택" in page_props and "is not a property that exists" in str(e):
-            page_props.pop("선택", None)
-            try:
-                new_page = client.pages.create(parent={"database_id": db_id}, properties=page_props, children=blocks)
-                return new_page.get("id")
-            except Exception as e2:
-                logger.error(f"   ❌ [Notion 생성 재시도 실패] {title}: {e2}")
-                return None
-        logger.error(f"   ❌ [Notion 생성 실패] {title}: {e}")
-        return None
+    # 스키마 방어 생성: 미존재 프로퍼티 자동 감지 및 순차 제거 재시도
+    removable_props = ["분석일시", "게시일", "선택"]
+    current_props = dict(page_props)
+
+    while True:
+        try:
+            new_page = client.pages.create(parent={"database_id": db_id}, properties=current_props, children=blocks)
+            page_id = new_page.get("id")
+            logger.info(f"   ✅ [Notion 생성 성공] {title} (게시일: {pub_date_str}, 분석일: {today_date_str})")
+            return page_id
+        except Exception as e:
+            err_msg = str(e)
+            dropped = False
+            for p_cand in removable_props:
+                if p_cand in current_props and ("is not a property that exists" in err_msg or p_cand in err_msg):
+                    current_props.pop(p_cand, None)
+                    dropped = True
+                    break
+            if dropped:
+                continue
+            logger.error(f"   ❌ [Notion 생성 실패] {title}: {e}")
+            return None
 
 
 def create_unorganized_stock_items(
@@ -785,7 +850,7 @@ def create_unorganized_stock_items(
     if not db_id:
         return 0
 
-    pub_date_str = analyzed.publish_date or video_meta.get("publish_date", get_kst_str("%Y-%m-%d"))
+    pub_date_str = video_meta.get("publish_date") or analyzed.publish_date or get_kst_str("%Y-%m-%d")
     count = 0
 
     for asset in (analyzed.assets or []):
@@ -816,6 +881,14 @@ def create_unorganized_stock_items(
             count += 1
             logger.info(f"      🥬 [미정리 종목 추가] {raw_ticker} ({name})")
         except Exception as e:
+            if "게시일" in props and "is not a property that exists" in str(e):
+                props.pop("게시일", None)
+                try:
+                    client.pages.create(parent={"database_id": db_id}, properties=props)
+                    count += 1
+                    continue
+                except Exception:
+                    pass
             logger.warning(f"      ⚠️ [미정리 종목 생성 실패] {raw_ticker}: {e}")
 
     return count
@@ -846,17 +919,28 @@ def prepare_video_payload_for_queue(v: Dict[str, Any], guide_page_id: Optional[s
             v["channel_name"] = r_meta["channel"]
         if r_meta.get("description"):
             v["description"] = r_meta["description"]
+        
+        # 실제 동영상 업로드일 메타데이터 갱신
+        ud = r_meta.get("upload_date")
+        ts = r_meta.get("timestamp") or r_meta.get("release_timestamp")
+        if ud or ts:
+            p_date, p_time = _parse_video_publish_date(raw_date=ud, timestamp=ts)
+            v["publish_date"] = p_date
+            v["publish_time_kst"] = p_time
 
-    # 자막이 없거나 상세 설명란이 비어있는 경우 영상 메타데이터(설명란/챕터) 자동 Fallback 확보
-    if not v.get("description"):
+    # 자막이 없거나 상세 설명란/게시일이 비어있는 경우 영상 메타데이터(설명란/챕터/업로드일) 자동 Fallback 확보
+    if not v.get("description") or not v.get("publish_date"):
         full_info = resolve_video_info(vid)
         if full_info:
-            if full_info.get("description"):
+            if full_info.get("description") and not v.get("description"):
                 v["description"] = full_info["description"]
             if full_info.get("title") and (not v.get("title") or v.get("title").startswith("YouTube Video")):
                 v["title"] = full_info["title"]
             if full_info.get("channel_name") and (not v.get("channel_name") or v.get("channel_name") == "YouTube"):
                 v["channel_name"] = full_info["channel_name"]
+            if full_info.get("publish_date") and (not v.get("publish_date") or v.get("publish_date") == get_kst_str("%Y-%m-%d")):
+                v["publish_date"] = full_info["publish_date"]
+                v["publish_time_kst"] = full_info.get("publish_time_kst", f"{full_info['publish_date']} 00:00")
 
     v["transcript"] = t_text or ""
     v["sub_source"] = sub_src or ""
