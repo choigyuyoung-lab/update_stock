@@ -17,7 +17,7 @@ import re
 import time
 import logging
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
@@ -54,6 +54,7 @@ from core.notion_utils import (
     get_kst_str,
     paginate_database,
     get_page_text,
+    get_prop_value,
 )
 from core.stock_registry import clean_ticker_key, StockRegistryGateway
 from jobs.youtube.ai_service import AIService, YouTubeAnalysisResult
@@ -1029,7 +1030,53 @@ def process_single_video_item(
 
 
 # ==============================================================================
-# 8. CLI 인자 파서 및 메인 실행부
+# 8. 노션 DB 90일(3개월) 자동 아카이빙 및 유지보수 엔진
+# ==============================================================================
+def cleanup_old_youtube_insights(client: Any, db_id: str, retention_days: int = 90) -> int:
+    """
+    [투자공부 by Youtube DB]에서 기준일자(게시일/Date)가 retention_days(기본 90일, 1개 분기)를
+    초과한 과거 시황 분석 페이지를 자동으로 아카이브(휴지통 이동)하여 노션 DB를 최적화합니다.
+    - 90일 초과 시황 데이터는 시의성을 상실하므로 노션 쿼리 속도 및 용량 최적화를 위해 정리
+    - 처리 완료 캐시(.processed_youtube_videos.json)는 보존되어 과거 영상 재수집 방지
+    """
+    if not db_id or not client or retention_days <= 0:
+        return 0
+
+    now_kst = get_kst_now()
+    cutoff_date = (now_kst - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+    print(f"\n🧹 [노션 3개월 아카이빙 점검] {retention_days}일(기준일 {cutoff_date} 이전) 초과 과거 시황 리포트 탐색 시작...")
+
+    archived_count = 0
+    try:
+        pages = list(paginate_database(client, db_id, page_size=100, retry_delay=0.1))
+        for p in pages:
+            props = p.get("properties", {})
+            page_id = p.get("id", "")
+            raw_date = get_prop_value(props, ["게시일", "기준일자", "Date", "날짜", "업데이트 일자"]) or ""
+            date_val = str(raw_date)[:10] if raw_date else ""
+            title = get_prop_value(props, ["Title", "제목", "이름"]) or "과거 영상"
+
+            if date_val and date_val < cutoff_date:
+                try:
+                    # 노션 공식 API: 페이지 아카이브(휴지통 이동)
+                    client.pages.update(page_id=page_id, archived=True)
+                    archived_count += 1
+                    logger.info(f"   🗑️ [3개월 초과 아카이빙] '{title[:30]}' (게시일: {date_val}) -> 노션 휴지통 이동")
+                except Exception as e_del:
+                    logger.warning(f"   ⚠️ 페이지 아카이브 실패 ({page_id}): {e_del}")
+
+        if archived_count > 0:
+            print(f"   ✅ [노션 정리 완료] {retention_days}일(기준일 {cutoff_date} 이전) 초과 과거 리포트 총 {archived_count}건 노션 아카이브(휴지통) 처리 완료")
+        else:
+            print(f"   ✨ {retention_days}일 초과 아카이빙 대상 과거 리포트가 없습니다 (최신 3개월 상태 유지 중).")
+    except Exception as e:
+        logger.warning(f"⚠️ 과거 유튜브 리포트 정리 중 오류: {e}")
+
+    return archived_count
+
+
+# ==============================================================================
+# 9. CLI 인자 파서 및 메인 실행부
 # ==============================================================================
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="YouTube AI Insights Auto Sync & Notion Integration")
@@ -1038,6 +1085,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-m", "--max-videos", type=int, default=3, help="채널당 수집할 최근 영상 수")
     parser.add_argument("-b", "--batch-limit", type=int, default=2, help="1회 실행 시 AI로 분석할 최대 영상 수")
     parser.add_argument("-f", "--force", action="store_true", help="기존 처리 캐시를 무시하고 강제 재분석")
+    parser.add_argument("--retention-days", type=int, default=90, help="노션 시황 리포트 보존 기간(일 단위, 기본: 90일/3개월)")
+    parser.add_argument("--skip-cleanup", action="store_true", help="90일 초과 과거 리포트 자동 아카이빙(정리) 건너뛰기")
     return parser.parse_args()
 
 
@@ -1206,6 +1255,10 @@ def main() -> None:
     print("\n" + "=" * 80)
     print(f"🎉 [동기화 완료] 총 {total_new_processed}개의 신규 유튜브 영상 AI 분석 데이터가 노션에 적재되었습니다.")
     print("=" * 80)
+
+    # 3. [유지보수] 90일(3개월) 초과 과거 시황 노션 자동 아카이빙(휴지통 이동)
+    if not args.skip_cleanup and YOUTUBE_DB_ID:
+        cleanup_old_youtube_insights(notion_client, YOUTUBE_DB_ID, retention_days=args.retention_days)
 
 
 if __name__ == "__main__":
