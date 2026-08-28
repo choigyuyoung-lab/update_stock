@@ -364,8 +364,23 @@ def mode_finish() -> None:
     if not validate_modified_python_files(repos):
         return
 
-    # [2단계] 2대 저장소 Git Commit & Push
-    print(f"\n{CYAN}🚀 [2단계] 2대 저장소 Git Commit & Push (GitHub 반영)...{RESET}")
+    # [2단계] 최신 모바일 세션 프롬프트 생성 & Google Drive 동기화 (프롬프트 파일 최신화)
+    print(f"\n{CYAN}📱 [2단계] 최신 모바일 세션 프롬프트 생성 & Google Drive 동기화...{RESET}")
+    prompt_tool_path = WORKSPACE_ROOT / "k_all_round_portfolio" / "tools" / "tool_generate_gemini_prompt.py"
+    if prompt_tool_path.exists():
+        _, p_out, _ = run_cmd(
+            [sys.executable, "-m", "tools.tool_generate_gemini_prompt"],
+            cwd=WORKSPACE_ROOT / "k_all_round_portfolio"
+        )
+        if p_out:
+            for line in p_out.splitlines():
+                if any(icon in line for icon in ["📁", "☁️", "📦", "📋", "🧹", "📂"]):
+                    print(f"  {line}")
+    else:
+        print(f"  {YELLOW}⚠️ 프롬프트 생성 도구를 찾을 수 없습니다: {prompt_tool_path}{RESET}")
+
+    # [3단계] 2대 저장소 Git Commit & Push (GitHub 반영 - 프롬프트 변경분 포함 100% 동기화)
+    print(f"\n{CYAN}🚀 [3단계] 2대 저장소 Git Commit & Push (GitHub 반영)...{RESET}")
     state["last_location"] = location
     state["last_sync_time"] = now_str
     save_sync_state(state)
@@ -393,21 +408,6 @@ def mode_finish() -> None:
             print(f"  {GREEN}🚀 {repo['name']} GitHub 원격 저장소 Push 성공!{RESET}")
         else:
             print(f"  {RED}❌ git push 실패: {p_err}{RESET}")
-
-    # [3단계] 최신 모바일 세션 프롬프트 생성 & Google Drive 동기화
-    print(f"\n{CYAN}📱 [3단계] 최신 모바일 세션 프롬프트 생성 & Google Drive 동기화...{RESET}")
-    prompt_tool_path = WORKSPACE_ROOT / "k_all_round_portfolio" / "tools" / "tool_generate_gemini_prompt.py"
-    if prompt_tool_path.exists():
-        _, p_out, _ = run_cmd(
-            [sys.executable, "-m", "tools.tool_generate_gemini_prompt"],
-            cwd=WORKSPACE_ROOT / "k_all_round_portfolio"
-        )
-        if p_out:
-            for line in p_out.splitlines():
-                if any(icon in line for icon in ["📁", "☁️", "📦", "📋", "🧹", "📂"]):
-                    print(f"  {line}")
-    else:
-        print(f"  {YELLOW}⚠️ 프롬프트 생성 도구를 찾을 수 없습니다: {prompt_tool_path}{RESET}")
 
     # [4단계] 로컬 임시 캐시 정리
     print(f"\n{CYAN}🧹 [4단계] 로컬 임시 캐시 정리...{RESET}")
