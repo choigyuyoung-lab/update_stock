@@ -114,17 +114,33 @@ def save_processed_videos(processed_ids: Set[str]) -> None:
 
 
 def load_pending_queue() -> List[Dict[str, Any]]:
-    """대기열에 등록된 미처리 동영상 목록(FIFO)을 로드합니다."""
+    """
+    모든 영속 대기열 경로(PROJECT_ROOT, LOCAL_DIR)에서 데이터를 안전하게 로드하고 지능형으로 병합합니다.
+    - 단일 빈 파일([])이 다른 경로의 정상 스크립트를 덮어쓰거나 지우지 못하도록 보호
+    - 스크립트(transcript)가 채워진 객체를 최우선으로 보존
+    """
+    merged_map: Dict[str, Dict[str, Any]] = {}
     for qp in QUEUE_PATHS:
         if qp.exists():
             try:
                 with open(qp, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if isinstance(data, list):
-                        return data
+                        for item in data:
+                            if not isinstance(item, dict):
+                                continue
+                            vid = item.get("video_id") or extract_video_id(item.get("url", ""))
+                            if not vid:
+                                continue
+                            if vid not in merged_map:
+                                merged_map[vid] = item
+                            else:
+                                # 기존 항목에 자막이 없는데 새 항목에 자막이 있는 경우 자막 버전으로 보존
+                                if not merged_map[vid].get("transcript") and item.get("transcript"):
+                                    merged_map[vid] = item
             except Exception as e:
                 logger.warning(f"⚠️ 대기열 읽기 실패 ({qp}): {e}")
-    return []
+    return list(merged_map.values())
 
 
 def _json_serial_default(obj: Any) -> Any:

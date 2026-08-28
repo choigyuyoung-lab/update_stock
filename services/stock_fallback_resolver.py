@@ -67,14 +67,10 @@ def clean_us_etf_name(name: str) -> str:
 
 
 def get_krx_desc_df() -> pd.DataFrame:
-    """FinanceDataReader KRX-DESC 데이터를 싱글톤으로 로드합니다."""
+    """KRX-DESC 실시간 외부 웹 조회를 비활성화하고 로컬 SQLite DB로 100% 대체합니다."""
     global _DF_KRX_DESC
     if _DF_KRX_DESC is None:
-        try:
-            _DF_KRX_DESC = fdr.StockListing('KRX-DESC').set_index('Code')
-        except Exception as e:
-            logger.warning(f"KRX-DESC 로드 실패: {e}")
-            _DF_KRX_DESC = pd.DataFrame()
+        _DF_KRX_DESC = pd.DataFrame()
     return _DF_KRX_DESC
 
 
@@ -387,20 +383,6 @@ def _get_name_lookup_index() -> Dict[str, Tuple[str, str]]:
                     idx[clean_kw] = (t, target_name)
     except Exception as e:
         logger.warning(f"⚠️ tbl_dictionary 색인 로드 실패: {e}")
-
-    # 3. FinanceDataReader KRX-DESC 마스터 (국내 전종목 보강)
-    try:
-        df_krx = get_krx_desc_df()
-        if not df_krx.empty:
-            for code, row in df_krx.iterrows():
-                code_str = str(code).zfill(6)
-                krx_name = str(row.get("Name", "")).strip()
-                if krx_name:
-                    clean_n = clean_name_key(krx_name)
-                    if clean_n not in idx:
-                        idx[clean_n] = (code_str, krx_name)
-    except Exception as e:
-        logger.debug(f"KRX-DESC 색인 보강 생략: {e}")
 
     _RESOLVER_NAME_INDEX = idx
     logger.info(f"✨ [공식 마스터 인덱서] {len(idx)}개 종목명/티커 인메모리 색인 활성화 완료 (하드코딩 0%)")
