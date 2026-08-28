@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 > nul
-title [K-All-Round] YouTube Insights and AI Sync
+title "[K-All-Round] YouTube Insights and AI Sync"
 cd /d "%~dp0"
 
 echo ==============================================================================

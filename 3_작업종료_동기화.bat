@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 > nul
-title [K-All-Round] 스마트 작업종료 통합 동기화 (Git Push + 모바일 GDrive 동기화)
+title "[K-All-Round] 스마트 작업종료 통합 동기화 (Git Push + 모바일 GDrive 동기화)"
 cd /d "%~dp0"
 
 if "%1"=="auto" (
