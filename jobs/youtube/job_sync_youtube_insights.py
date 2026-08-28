@@ -11,6 +11,7 @@ sync_youtube_insights.py
 3. 3중 교차 검증 게이트웨이 연동: StockRegistryGateway를 통해 상장주식 Master Relation 100% 자동 바인딩
 """
 
+import os
 import sys
 import json
 import re
