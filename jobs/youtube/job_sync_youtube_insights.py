@@ -144,6 +144,30 @@ def save_pending_queue(queue_items: List[Dict[str, Any]]) -> None:
             logger.warning(f"⚠️ 대기열 저장 실패 ({qp}): {e}")
 
 
+def sort_pending_queue_by_publish_time(queue_items: List[Dict[str, Any]], order: str = "asc") -> List[Dict[str, Any]]:
+    """
+    대기열(Queue) 내 동영상들을 한국 표준시 게시일시(publish_time_kst) 기준으로 정렬합니다.
+    - order='asc': 과거 -> 최신순 (오름차순, 시황 타임라인 순차 분석, 기본값)
+    - order='desc': 최신 -> 과거순 (내림차순, 최신 시황 우선 분석)
+    """
+    if not queue_items:
+        return []
+
+    def _get_sort_key(item: Dict[str, Any]) -> str:
+        # 1. 분 단위 정밀 KST 일시 (YYYY-MM-DD HH:MM)
+        p_time = str(item.get("publish_time_kst") or "").strip()
+        if len(p_time) >= 10:
+            return p_time
+        # 2. 일자 (YYYY-MM-DD)
+        p_date = str(item.get("publish_date") or "").strip()
+        if len(p_date) >= 10:
+            return f"{p_date} 00:00"
+        return "9999-99-99 99:99" if order.lower() == "asc" else "0000-00-00 00:00"
+
+    reverse_sort = (order.lower() == "desc")
+    return sorted(queue_items, key=_get_sort_key, reverse=reverse_sort)
+
+
 # ==============================================================================
 # 3. 채널 및 영상 식별 유틸리티 (Pure In-Memory)
 # ==============================================================================
@@ -1085,6 +1109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-m", "--max-videos", type=int, default=3, help="채널당 수집할 최근 영상 수")
     parser.add_argument("-b", "--batch-limit", type=int, default=2, help="1회 실행 시 AI로 분석할 최대 영상 수")
     parser.add_argument("-f", "--force", action="store_true", help="기존 처리 캐시를 무시하고 강제 재분석")
+    parser.add_argument("--sort-order", type=str, choices=["asc", "desc"], default="asc", help="영상 게시일시 기준 분석 정렬 순서 (asc: 과거->최신, desc: 최신->과거, 기본값: asc)")
     parser.add_argument("--retention-days", type=int, default=90, help="노션 시황 리포트 보존 기간(일 단위, 기본: 90일/3개월)")
     parser.add_argument("--skip-cleanup", action="store_true", help="90일 초과 과거 리포트 자동 아카이빙(정리) 건너뛰기")
     return parser.parse_args()
@@ -1103,8 +1128,9 @@ def main() -> None:
     gateway = StockRegistryGateway(client=notion_client)
 
     processed_ids = load_processed_videos()
-    pending_queue = load_pending_queue()
-    print(f"💾 기존 완료 캐시: {len(processed_ids)}개, 현재 대기열 미처리: {len(pending_queue)}개")
+    sort_order = getattr(args, "sort_order", "asc") or "asc"
+    pending_queue = sort_pending_queue_by_publish_time(load_pending_queue(), order=sort_order)
+    print(f"💾 기존 완료 캐시: {len(processed_ids)}개, 현재 대기열 미처리: {len(pending_queue)}개 (정렬: {sort_order})")
 
     total_new_processed = 0
 
@@ -1220,13 +1246,19 @@ def main() -> None:
                 if guide_page_id:
                     update_guide_last_scanned(notion_client, guide_page_id)
 
+        # 대기열 게시일시(KST) 기준 글로벌 정렬 적용 (기본: 과거 -> 최신순)
+        sort_order = getattr(args, "sort_order", "asc") or "asc"
+        pending_queue = sort_pending_queue_by_publish_time(pending_queue, order=sort_order)
         save_pending_queue(pending_queue)
+        
+        sort_order_desc = "과거 ➡️ 최신 (오름차순, 시황 타임라인 순)" if sort_order == "asc" else "최신 ➡️ 과거 (내림차순, 최신성 우선)"
         print("\n" + "-" * 80)
-        print(f"📊 [1단계 스크립트 확보 결과 요약]")
+        print(f"📊 [1단계 스크립트 확보 및 시계열 정렬 결과 요약]")
         print(f"   • 이번 스캔 신규 스크립트 확보: {newly_enqueued_count}개")
         print(f"   • 스크립트 미확보/제외: {skipped_no_transcript_count}개")
         print(f"   • 기존 완료/대기열 스킵: {skipped_processed_count + skipped_queued_count}개")
         print(f"   • 총 분석 대기 중인 스크립트(대기열): {len(pending_queue)}개")
+        print(f"   • 📅 정렬 기준: 게시일시(KST) {sort_order_desc}")
         print("-" * 80)
 
         # [2단계: 대기열 Dequeue & Gemini AI 분할 배치 분석]
@@ -1234,14 +1266,15 @@ def main() -> None:
         if not pending_queue:
             print("\n✨ [대기열 비어있음] 분석 대기 중인 신규 스크립트가 없습니다. 배치를 정상 종료합니다.")
         else:
-            print(f"\n🚀 [2단계: Gemini AI 초고속 구조화 분석 실행] 이번 목표: 최대 {batch_limit}개 (대기열 총 {len(pending_queue)}개 중)")
+            print(f"\n🚀 [2단계: Gemini AI 초고속 구조화 분석 실행] 이번 목표: 최대 {batch_limit}개 ({sort_order_desc}, 대기열 총 {len(pending_queue)}개 중)")
             items_to_process = pending_queue[:batch_limit]
             remaining_queue = pending_queue[batch_limit:]
             processed_in_this_run, failed_in_this_run = [], []
 
             for idx, v in enumerate(items_to_process, 1):
                 vid, vtitle = v.get("video_id", ""), v.get("title", "")
-                print(f"\n🎯 [AI 분석 {idx}/{len(items_to_process)}] '{vtitle}' (ID: {vid})")
+                pub_time = v.get("publish_time_kst") or v.get("publish_date", "미상")
+                print(f"\n🎯 [AI 분석 {idx}/{len(items_to_process)}] '{vtitle}' (게시일시: {pub_time}, ID: {vid})")
                 if process_single_video_item(v=v, notion_client=notion_client, ai_service=ai_service, gateway=gateway, processed_ids=processed_ids, guide_page_id=v.get("guide_page_id"), force=args.force):
                     total_new_processed += 1
                     processed_in_this_run.append(vid)
@@ -1249,6 +1282,8 @@ def main() -> None:
                     failed_in_this_run.append(v)
 
             new_pending_queue = remaining_queue + failed_in_this_run
+            # 잔여 대기열도 시간순 정렬 상태 유지
+            new_pending_queue = sort_pending_queue_by_publish_time(new_pending_queue, order=sort_order)
             save_pending_queue(new_pending_queue)
             print(f"\n💾 [대기열 갱신] 이번 회차 완료: {len(processed_in_this_run)}개, 다음 회차 잔여 스크립트 대기열: {len(new_pending_queue)}개")
 
