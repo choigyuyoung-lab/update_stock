@@ -142,9 +142,10 @@ class TestYouTubeProxyAndMultimodal(unittest.TestCase):
         self.assertEqual(result.assets[0].ticker, "005930")
         self.assertTrue(mock_client.models.generate_content.called)
 
+    @patch("jobs.youtube.job_sync_youtube_insights.save_processed_videos")
     @patch("jobs.youtube.job_sync_youtube_insights.extract_transcript_via_ytdlp")
     @patch("jobs.youtube.job_sync_youtube_insights.extract_transcript_via_youtube_transcript_api")
-    def test_3tier_fallback_pipeline_integration(self, mock_yta, mock_ytdlp):
+    def test_3tier_fallback_pipeline_integration(self, mock_yta, mock_ytdlp, mock_save_cache):
         """1단계 yt-dlp 실패 -> 2단계 youtube-transcript-api 실패 -> 3단계 멀티모달 연계 검증"""
         # Tier 1, Tier 2 자막 수집 모두 실패(None 반환) 시뮬레이션
         mock_ytdlp.return_value = (None, "", {})
@@ -174,6 +175,7 @@ class TestYouTubeProxyAndMultimodal(unittest.TestCase):
         self.assertTrue(success, "3단계 멀티모달 Fallback 연계로 최종 성공해야 함")
         self.assertIn("test_vid_12345", processed_ids, "처리 완료 캐시에 등록되어야 함")
         self.assertTrue(mock_ai_service.analyze_youtube_multimodal.called, "자막 부재 시 멀티모달 메서드가 호출되어야 함")
+        self.assertTrue(mock_save_cache.called, "캐시 저장 함수가 호출되어야 함")
 
     def test_notion_schema_defensive_guard(self):
         """notion_utils.py 표준 스키마 방어 로직(if prop in properties) 무결성 검증"""
