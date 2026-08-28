@@ -553,6 +553,8 @@ def fetch_recent_videos(channel_or_playlist_id: str, channel_name: str = "", max
     else:
         target_url = f"https://www.youtube.com/channel/{channel_or_playlist_id}/videos"
 
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("TAILSCALE_PROXY")
+
     ydl_opts = {
         "skip_download": True,
         "quiet": True,
@@ -564,6 +566,9 @@ def fetch_recent_videos(channel_or_playlist_id: str, channel_name: str = "", max
         "logger": _YtDlpSilentLogger(),
         "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"], "skip": ["dash", "hls"]}}
     }
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
+
 
     videos, seen_vids = [], set()
     try:
@@ -649,6 +654,8 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
         return None, "", {}
 
     url = f"https://www.youtube.com/watch?v={video_id}"
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("TAILSCALE_PROXY")
+
     ydl_opts = {
         "skip_download": True,
         "writesubtitles": True,
@@ -661,6 +668,9 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
         "logger": _YtDlpSilentLogger(),
         "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"], "skip": ["dash", "hls"]}}
     }
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
+
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1015,14 +1025,21 @@ def process_single_video_item(
         if rich_meta.get("description"):
             v["description"] = rich_meta["description"]
 
-    # 1. 자막(수동/자동생성) 전문 기반 Gemini AI 초고속 분석 (필수)
+    # 1. 자막(수동/자동생성) 전문 기반 Gemini AI 초고속 텍스트 분석 (1차)
     if transcript and len(transcript) >= 50:
-        print(f"   📜 [스크립트 전달] 확보된 스크립트 {len(transcript):,}자 ({sub_source}) -> Gemini AI 전송")
+        print(f"   📜 [스크립트 전달] 확보된 스크립트 {len(transcript):,}자 ({sub_source}) -> Gemini AI 1차 텍스트 분석")
         print(f"   🧠 [AI 추론 진행 중] 시장 심리 / 3대 시사점 / 언급 종목(티커) 구조화 분석...")
         analyzed = ai_service.analyze_youtube_transcript(transcript, v)
     else:
-        print(f"   ❌ [스크립트 미확보 건너뜀] 영상 '{vtitle}'의 실제 자막(스크립트)이 없어 분석을 건너뜁니다.")
+        # 2. 자막 부재 시 🎥 Gemini Multimodal(비디오/오디오) 3차 Fallback 분석 가동
+        print(f"   ⚠️ [텍스트 자막 부재] 자막 추출 불가 ({sub_source or 'IP 차단/무자막'}) -> 🎥 Gemini 멀티모달 3차 Fallback 분석 가동...")
+        print(f"   🧠 [AI 멀티모달 추론] YouTube 영상/오디오 및 메타데이터 종합 분석...")
+        analyzed = ai_service.analyze_youtube_multimodal(vid, v)
+
+    if not analyzed:
+        print(f"   ❌ [분석 최종 실패] 영상 '{vtitle}'의 텍스트 및 멀티모달 분석에 모두 실패하여 건너뜁니다.")
         return False
+
 
     # 마스터 DB & 온톨로지 사전 기반 티커 보정
     for asset in (analyzed.assets or []):
@@ -1200,8 +1217,12 @@ def main() -> None:
                             print(f"      📜 [스크립트 확보 성공] 총 {t_len:,}자 확보 완료! (출처: {sub_src})")
                             print(f"      📥 [대기열 등록] 분석 대기열(Queue)에 신규 등록 완료")
                         else:
-                            print(f"      ⚠️ [스크립트 미확보] 실제 스크립트(자막) 미제공/50자 미만 -> 대기열 제외")
-                            skipped_no_transcript_count += 1
+                            payload["sub_source"] = "gemini-multimodal-fallback"
+                            pending_queue.append(payload)
+                            queued_vids.add(vid)
+                            newly_enqueued_count += 1
+                            print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
+
                 if guide_page_id:
                     update_guide_last_scanned(notion_client, guide_page_id)
 
@@ -1240,8 +1261,12 @@ def main() -> None:
                             print(f"      📜 [스크립트 확보 성공] 총 {t_len:,}자 확보 완료! (출처: {sub_src})")
                             print(f"      📥 [대기열 등록] 분석 대기열(Queue)에 신규 등록 완료")
                         else:
-                            print(f"      ⚠️ [스크립트 미확보] 실제 스크립트(자막) 미제공/50자 미만 -> 대기열 제외")
-                            skipped_no_transcript_count += 1
+                            payload["sub_source"] = "gemini-multimodal-fallback"
+                            pending_queue.append(payload)
+                            queued_vids.add(vid)
+                            newly_enqueued_count += 1
+                            print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
+
 
                 if guide_page_id:
                     update_guide_last_scanned(notion_client, guide_page_id)

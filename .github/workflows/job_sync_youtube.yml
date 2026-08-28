@@ -1,17 +1,30 @@
-name: "[유튜브] 🎬 유튜브 AI 시황 인텔리전스 동기화"
+name: "[유튜브] 🎬 유튜브 AI 시황 인텔리전스 동기화 (Tailscale 스마트폰 노드 연동)"
 
 on:
   # 1. cron-job.org 외부 Webhook 트리거
   repository_dispatch:
-    types: [youtube_sync, youtube_collector, sync_youtube_insights]
+    types: [youtube_sync, youtube_collector, sync_youtube_insights, job_sync_youtube]
 
-  # 2. GitHub 웹 UI 수동 실행 트리거
+  # 2. GitHub 웹 UI 수동 실행 트리거 (파라미터 옵션 지원)
   workflow_dispatch:
+    inputs:
+      force:
+        description: "기존 처리 완료 캐시를 무시하고 강제 재분석"
+        type: boolean
+        default: false
+      batch_limit:
+        description: "1회 실행 시 AI로 분석할 최대 동영상 수"
+        type: number
+        default: 2
+      channels:
+        description: "수동 분석할 채널/영상 (@핸들 또는 URL, 미입력 시 노션 DB 자동 연동)"
+        type: string
+        default: ""
 
 jobs:
   youtube-sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -65,7 +78,7 @@ jobs:
           restore-keys: |
             yt-processed-cache-
 
-
+      # 🚀 유튜브 자동 수집, 3중 Fallback(yt-dlp -> transcript-api -> Gemini Multimodal) 및 노션 적재
       - name: Run YouTube Auto Collector & Notion Sync
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -76,4 +89,16 @@ jobs:
           UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID }}
           UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python -m jobs.youtube.job_sync_youtube_insights
+          TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ inputs.force }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --force"
+          fi
+          if [ -n "${{ inputs.batch_limit }}" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --batch-limit ${{ inputs.batch_limit }}"
+          fi
+          if [ -n "${{ inputs.channels }}" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS -c ${{ inputs.channels }}"
+          fi
+          python -m jobs.youtube.job_sync_youtube_insights $EXTRA_ARGS

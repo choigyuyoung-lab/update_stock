@@ -1,5 +1,7 @@
 {
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "python.defaultInterpreterPath": "python",
+    "python.languageServer": "Default",
+    "python.terminal.activateEnvironment": true,
     "python.terminal.activateEnvInTerminal": true,
     "python.analysis.extraPaths": [
         "${workspaceFolder}",
@@ -7,6 +9,7 @@
         "${workspaceFolder}/services"
     ],
     "python.analysis.autoSearchPaths": true,
+    "python.analysis.diagnosticMode": "workspace",
     "python.analysis.typeCheckingMode": "basic",
     "python.analysis.diagnosticSeverityOverrides": {
         "reportMissingTypeStubs": "none",

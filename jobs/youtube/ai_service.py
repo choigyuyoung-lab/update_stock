@@ -226,3 +226,119 @@ class AIService:
 
         logger.error("❌ YouTube 자막 Structured Output 분석에 최종 실패하였습니다.")
         return None
+
+    def analyze_youtube_multimodal(
+        self,
+        video_url_or_id: str,
+        video_meta: Dict[str, Any],
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        base_delay: float = DEFAULT_BASE_DELAY
+    ) -> Optional[YouTubeAnalysisResult]:
+        """
+        유튜브 텍스트 자막을 추출할 수 없는 경우(IP 차단, 자막 비활성화 등),
+        Google Gemini Multimodal API를 통해 YouTube 영상/오디오 및 메타데이터를 직접 분석하여
+        동일한 Pydantic YouTubeAnalysisResult 스키마로 구조화된 시황 인텔리전스를 반환합니다.
+        """
+        if not self.is_available():
+            logger.error("❌ Gemini API 클라이언트를 사용할 수 없습니다. GEMINI_API_KEY를 확인하세요.")
+            return None
+
+        fia_system_prompt = get_fia_youtube_system_instruction()
+
+        raw_id = video_meta.get("video_id") or video_url_or_id
+        if str(raw_id).startswith("http"):
+            video_url = str(raw_id)
+        else:
+            video_url = f"https://www.youtube.com/watch?v={raw_id}"
+
+        user_content_text = f"""[영상 기본 정보]
+- 채널명: {video_meta.get('channel_name', '')}
+- 영상 원제목: {video_meta.get('title', '')}
+- 영상 URL: {video_url}
+- 게시일자: {video_meta.get('publish_date', '')}
+
+[상세 설명란 및 메타데이터]
+{str(video_meta.get('description', '') or '')[:5000]}
+
+[멀티모달 시황 분석 지시]
+영상 원문/오디오 및 제공된 메타데이터를 종합 분석하여 시장 심리, 3대 핵심 시사점, 심층 상세 분석, 언급된 주요 종목(티커)을 Pydantic 구조화 스키마(YouTubeAnalysisResult)에 맞춰 한국어 명사형 종결어미(~함, ~임, ~필요, ~권고, ~전망)로 추출하십시오.
+"""
+
+        # 1. Gemini 멀티모달 Part 생성 시도
+        video_part = None
+        if types is not None and hasattr(types, "Part") and hasattr(types.Part, "from_uri"):
+            try:
+                video_part = types.Part.from_uri(file_uri=video_url, mime_type="video/*")
+            except Exception as e:
+                logger.debug(f"types.Part.from_uri 생성 생략: {e}")
+
+        models_to_try = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+
+        for model_name in models_to_try:
+            # 1차 멀티모달 Part 시도 -> 실패 시 텍스트 메타데이터 Fallback 시도
+            content_candidates = [
+                ([video_part, user_content_text] if video_part else [user_content_text]),
+                [user_content_text]
+            ]
+
+            for contents in content_candidates:
+                if not contents or (len(contents) == 1 and contents[0] is None):
+                    continue
+
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        config = types.GenerateContentConfig(
+                            system_instruction=fia_system_prompt,
+                            response_mime_type="application/json",
+                            response_schema=YouTubeAnalysisResult,
+                            temperature=0.0,
+                        )
+
+                        response = self.client.models.generate_content(
+                            model=model_name,
+                            contents=contents,
+                            config=config,
+                        )
+
+                        if response and response.text:
+                            parsed_result = YouTubeAnalysisResult.model_validate_json(response.text.strip())
+                            meta_pub_date = str(video_meta.get("publish_date", "")).strip()
+                            if meta_pub_date and meta_pub_date.lower() not in ["null", "none"]:
+                                parsed_result.publish_date = meta_pub_date
+                            elif not parsed_result.publish_date or parsed_result.publish_date.lower() in ["null", "none"]:
+                                parsed_result.publish_date = meta_pub_date
+
+                            # 티커 기본 정규화 (대문자 및 6자리 zfill)
+                            for item in (parsed_result.assets or []):
+                                t_clean = (item.ticker or "").strip().upper()
+                                if t_clean.isdigit() and 1 <= len(t_clean) <= 6:
+                                    item.ticker = t_clean.zfill(6)
+                                else:
+                                    item.ticker = t_clean
+
+                            logger.info(f"✅ [Gemini AI 멀티모달 Fallback] Structured Output 파싱 성공 (모델: {model_name})")
+                            return parsed_result
+
+                    except Exception as exc:
+                        err_str = str(exc)
+                        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                            logger.warning("⚠️ [Gemini AI] 쿼터 제한(429) 감지 -> 다음 모델로 전환합니다.")
+                            time.sleep(3.0)
+                            break
+                        if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str.lower():
+                            logger.warning(f"⚠️ [Gemini AI] 일시적 서비스 과부하(503) 감지 ({model_name}, 시도 {attempt}/{max_retries})")
+                            if attempt < max_retries:
+                                time.sleep(base_delay * attempt)
+                                continue
+                            else:
+                                break
+                        if "404" in err_str or "NOT_FOUND" in err_str:
+                            break
+
+                        logger.warning(f"⚠️ [Gemini AI 멀티모달] 호출 오류 ({model_name}, 시도 {attempt}/{max_retries}): {err_str}")
+                        if attempt < max_retries:
+                            time.sleep(base_delay * attempt)
+
+        logger.error("❌ YouTube 멀티모달 Structured Output 분석에 최종 실패하였습니다.")
+        return None
+
