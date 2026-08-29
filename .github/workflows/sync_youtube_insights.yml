@@ -32,11 +32,13 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # 🌟 스마트폰 무인 노드(Tailscale Exit Node for Android A23) 연동 (노드 오프라인 시 Direct 자동 Fallback)
+      # 🌟 스마트폰 무인 노드(Tailscale Exit Node for Android A23) 연동 (영구 OAuth 및 만료 방지)
       - name: "Connect Tailscale Smartphone Exit Node (Android A23)"
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true
 
