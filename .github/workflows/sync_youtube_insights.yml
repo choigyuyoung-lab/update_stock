@@ -32,18 +32,34 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # 🌟 스마트폰 무인 노드(Tailscale Exit Node for Android A23) 연동 (영구 OAuth 및 만료 방지)
-      - name: "Connect Tailscale Smartphone Exit Node (Android A23)"
+      # -------------------------------------------------------------
+      # 🌟 [Phase 1: 자막 수집 구간] 스마트폰 Exit Node 연동 (일회성 ephemeral 노드)
+      # -------------------------------------------------------------
+      - name: "Connect Tailscale Smartphone Exit Node (Ephemeral)"
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID || secrets.TAILSCALE_OAUTH_CLIENT_ID || secrets.OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET || secrets.TAILSCALE_OAUTH_SECRET || secrets.OAUTH_SECRET }}
           tags: ${{ secrets.TS_TAGS || secrets.TAILSCALE_TAGS || 'tag:ci' }}
-          args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true
+          args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true --ephemeral
 
-      # 🚀 유튜브 자동 수집, 3중 Fallback(yt-dlp -> transcript-api -> Gemini Multimodal) 및 노션 적재
-      - name: Run YouTube Auto Collector & Notion Sync
+      # 🚀 1단계: 유튜브 자막 및 메타데이터 수집만 실행 (Tailscale Exit Node 구간, 약 10~20초 소요)
+      - name: "Phase 1: Fetch YouTube Subtitles & Enqueue"
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          YOUTUBE_GUIDE_DATABASE_ID: ${{ secrets.YOUTUBE_GUIDE_DATABASE_ID }}
+        run: python -m jobs.youtube.job_sync_youtube_insights --fetch-only
+
+      # 🌟 1단계 완료 즉시 Tailscale 해제 (Tailscale 무료 시간 카운팅 중지 및 ephemeral 노드 자동 삭제)
+      - name: "Disconnect Tailscale Immediately"
+        if: always()
+        run: sudo tailscale logout || true
+
+      # -------------------------------------------------------------
+      # 🚀 [Phase 2: AI 분석 및 노션 적재 구간] GitHub 초고속 일반망 직통 (Tailscale 0초 소모)
+      # -------------------------------------------------------------
+      - name: "Phase 2: Run Gemini AI Analysis & Notion Sync"
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
@@ -53,8 +69,7 @@ jobs:
           UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID }}
           UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
-        run: python -m jobs.youtube.job_sync_youtube_insights
+        run: python -m jobs.youtube.job_sync_youtube_insights --process-only
 
       # 🌟 최신 처리 완료 캐시 및 대기열(Queue)을 GitHub 저장소에 자동 커밋 & 푸시
       - name: Commit & Push Updated Cache & Queue

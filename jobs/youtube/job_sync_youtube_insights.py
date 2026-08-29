@@ -1146,20 +1146,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sort-order", type=str, choices=["asc", "desc"], default="asc", help="영상 게시일시 기준 분석 정렬 순서 (asc: 과거->최신, desc: 최신->과거, 기본값: asc)")
     parser.add_argument("--retention-days", type=int, default=90, help="노션 시황 리포트 보존 기간(일 단위, 기본: 90일/3개월)")
     parser.add_argument("--skip-cleanup", action="store_true", help="90일 초과 과거 리포트 자동 아카이빙(정리) 건너뛰기")
+    parser.add_argument("--fetch-only", action="store_true", help="1단계: 유튜브 채널 스캔 및 자막/메타데이터 대기열(Queue) 수집만 수행 (Tailscale 연결 구간용)")
+    parser.add_argument("--process-only", action="store_true", help="2단계: 대기열(Queue) 영상 Gemini AI 분석 및 노션 적재만 수행 (일반 인터넷 직통용)")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    mode_str = ""
+    if args.fetch_only:
+        mode_str = " [Phase 1: 자막 수집 모드 (Fetch-Only)]"
+    elif args.process_only:
+        mode_str = " [Phase 2: AI 분석 및 노션 적재 모드 (Process-Only)]"
+
     print("=" * 80)
-    print("🚀 [Sync YouTube Insights] 'Youtube 주소가이드' 영속 대기열 기반 AI 시황 동기화 시작")
+    print(f"🚀 [Sync YouTube Insights]{mode_str} 'Youtube 주소가이드' 영속 대기열 기반 AI 시황 동기화 시작")
     print("=" * 80)
 
-    notion_client = build_notion_client(NOTION_TOKEN)
-    ai_service = AIService()
-
-    _get_name_lookup_index()
-    gateway = StockRegistryGateway(client=notion_client)
+    notion_client = build_notion_client(NOTION_TOKEN) if NOTION_TOKEN else None
 
     processed_ids = load_processed_videos()
     sort_order = getattr(args, "sort_order", "asc") or "asc"
@@ -1170,145 +1174,178 @@ def main() -> None:
 
     # 1. CLI 단일 영상 직접 분석
     if args.video:
-        print(f"\n🎯 [CLI 단일 영상 직접 분석] {args.video}...")
-        v_meta = resolve_video_info(args.video)
-        if not v_meta:
-            print(f"❌ 유효한 유튜브 영상을 찾을 수 없습니다: {args.video}")
-            sys.exit(1)
+        print(f"\n🎯 [CLI 단일 영상 직접 처리] {args.video}...")
+        if args.fetch_only:
+            v_meta = resolve_video_info(args.video)
+            if not v_meta:
+                print(f"❌ 유효한 유튜브 영상을 찾을 수 없습니다: {args.video}")
+                sys.exit(1)
+            payload = prepare_video_payload_for_queue(v_meta, verbose=True)
+            vid = payload.get("video_id") or extract_video_id(args.video)
+            if vid not in [x.get("video_id") for x in pending_queue]:
+                pending_queue.append(payload)
+                pending_queue = sort_pending_queue_by_publish_time(pending_queue, order=sort_order)
+                save_pending_queue(pending_queue)
+                print(f"📥 [대기열 등록] 영상(ID: {vid}) 대기열 저장 완료!")
+            else:
+                print(f"⏳ [대기열 기등록] 이미 분석 대기열에 담겨 있음")
+            print("\n✨ [Phase 1: Fetch-Only 완료] 1단계 단일 영상 자막 확보 및 대기열 저장이 완료되었습니다.")
+            return
+        else:
+            v_meta = resolve_video_info(args.video)
+            if not v_meta:
+                print(f"❌ 유효한 유튜브 영상을 찾을 수 없습니다: {args.video}")
+                sys.exit(1)
 
-        payload = prepare_video_payload_for_queue(v_meta, verbose=True)
-        if process_single_video_item(v=payload, notion_client=notion_client, ai_service=ai_service, gateway=gateway, processed_ids=processed_ids, force=args.force):
-            total_new_processed += 1
+            ai_service = AIService()
+            _get_name_lookup_index()
+            gateway = StockRegistryGateway(client=notion_client)
+
+            payload = prepare_video_payload_for_queue(v_meta, verbose=True)
+            if process_single_video_item(v=payload, notion_client=notion_client, ai_service=ai_service, gateway=gateway, processed_ids=processed_ids, force=args.force):
+                total_new_processed += 1
 
     # 2. 영속 대기열(Queue) 기반 수집 및 2-Phase 분할 배치 분석
     else:
-        print("\n📡 [1단계: 채널 스캔 및 스크립트(자막) 실시간 확보]")
-        if args.channels:
-            active_sources = [resolve_channel_target(ch_in, max_videos=args.max_videos) for ch_in in args.channels if ch_in.strip()]
-        elif YOUTUBE_GUIDE_DB_ID:
-            print(f"📖 [노션 DB 모드] 'Youtube 주소가이드' DB 연동 확인 ({YOUTUBE_GUIDE_DB_ID[:8]}...)")
-            active_sources = load_active_sources_from_notion(notion_client, YOUTUBE_GUIDE_DB_ID)
-            if not active_sources:
-                print("   ℹ️ [Youtube 주소가이드 DB] '활성화' 체크된 채널/영상이 없습니다.")
-        else:
-            logger.warning("⚠️ YOUTUBE_GUIDE_DATABASE_ID 미설정으로 CLI 인자(-c / -v)를 사용하세요.")
-            active_sources = []
-
-        queued_vids = {str(item.get("video_id", "")) for item in pending_queue if item.get("video_id")}
-        newly_enqueued_count = 0
-        skipped_processed_count = 0
-        skipped_queued_count = 0
-        skipped_no_transcript_count = 0
-
-        for src in active_sources:
-            src_name = str(src.get("name") or "")
-            src_type = str(src.get("type") or "")
-            src_url = str(src.get("url") or "")
-            src_ch_id = str(src.get("channel_id") or "")
-            src_page_id = str(src.get("page_id") or "")
-            src_max_v = int(src.get("max_videos", args.max_videos) or args.max_videos)
-            guide_page_id = src_page_id if src_page_id else None
-
-            # 단일 영상
-            if src_type == "단일영상" or (src_url and extract_video_id(src_url) and not src_ch_id):
-                vid = extract_video_id(src_url)
-                print(f"\n🎬 [단일영상] '{src_name}' 확인 중 (ID: {vid})...")
-                if not vid:
-                    continue
-                if vid in processed_ids and not args.force:
-                    print(f"   ⚡ [기존 완료] 이미 노션 DB에 분석 적재 완료된 영상 -> 스킵")
-                    skipped_processed_count += 1
-                elif vid in queued_vids:
-                    print(f"   ⏳ [대기열 기등록] 이미 분석 대기열에 담겨 있음 -> 스킵")
-                    skipped_queued_count += 1
-                else:
-                    v_meta = resolve_video_info(src_url)
-                    if v_meta:
-                        payload = prepare_video_payload_for_queue(v_meta, guide_page_id=guide_page_id, guide_name=src_name, verbose=True)
-                        t_len = len(payload.get("transcript", "") or "")
-                        sub_src = payload.get("sub_source", "yt-dlp")
-                        if t_len >= 50:
-                            pending_queue.append(payload)
-                            queued_vids.add(vid)
-                            newly_enqueued_count += 1
-                            print(f"      📜 [스크립트 확보 성공] 총 {t_len:,}자 확보 완료! (출처: {sub_src})")
-                            print(f"      📥 [대기열 등록] 분석 대기열(Queue)에 신규 등록 완료")
-                        else:
-                            payload["sub_source"] = "gemini-multimodal-fallback"
-                            pending_queue.append(payload)
-                            queued_vids.add(vid)
-                            newly_enqueued_count += 1
-                            print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
-
-                if guide_page_id:
-                    update_guide_last_scanned(notion_client, guide_page_id)
-
-            # 채널 또는 재생목록
+        # [Phase 1: 채널 스캔 및 스크립트(자막) 수집] (--process-only 가 아닐 때 실행)
+        if not args.process_only:
+            print("\n📡 [1단계: 채널 스캔 및 스크립트(자막) 실시간 확보]")
+            if args.channels:
+                active_sources = [resolve_channel_target(ch_in, max_videos=args.max_videos) for ch_in in args.channels if ch_in.strip()]
+            elif YOUTUBE_GUIDE_DB_ID and notion_client:
+                print(f"📖 [노션 DB 모드] 'Youtube 주소가이드' DB 연동 확인 ({YOUTUBE_GUIDE_DB_ID[:8]}...)")
+                active_sources = load_active_sources_from_notion(notion_client, YOUTUBE_GUIDE_DB_ID)
+                if not active_sources:
+                    print("   ℹ️ [Youtube 주소가이드 DB] '활성화' 체크된 채널/영상이 없습니다.")
             else:
-                if not src_ch_id:
-                    continue
-                is_pl = (src_type == "재생목록") or any(src_ch_id.startswith(p) for p in ["PL", "UU", "FL"])
-                print(f"\n{'📑' if is_pl else '📡'} [{'재생목록' if is_pl else '채널'}] '{src_name}' 스캔 중 (최대 {src_max_v}개)...")
-                fetched_videos = fetch_recent_videos(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl)
-                if not fetched_videos:
-                    print(f"   ℹ️ 최근 게시된 영상을 찾을 수 없습니다.")
-                    continue
+                if not YOUTUBE_GUIDE_DB_ID:
+                    logger.warning("⚠️ YOUTUBE_GUIDE_DATABASE_ID 미설정으로 CLI 인자(-c / -v)를 사용하세요.")
+                active_sources = []
 
-                for v_idx, v in enumerate(fetched_videos, 1):
-                    vid = v.get("video_id")
-                    vtitle = v.get("title", "YouTube Video")
-                    print(f"   🔍 [영상 탐색 {v_idx}/{len(fetched_videos)}] '{vtitle[:40]}' (ID: {vid})")
+            queued_vids = {str(item.get("video_id", "")) for item in pending_queue if item.get("video_id")}
+            newly_enqueued_count = 0
+            skipped_processed_count = 0
+            skipped_queued_count = 0
+            skipped_no_transcript_count = 0
 
+            for src in active_sources:
+                src_name = str(src.get("name") or "")
+                src_type = str(src.get("type") or "")
+                src_url = str(src.get("url") or "")
+                src_ch_id = str(src.get("channel_id") or "")
+                src_page_id = str(src.get("page_id") or "")
+                src_max_v = int(src.get("max_videos", args.max_videos) or args.max_videos)
+                guide_page_id = src_page_id if src_page_id else None
+
+                # 단일 영상
+                if src_type == "단일영상" or (src_url and extract_video_id(src_url) and not src_ch_id):
+                    vid = extract_video_id(src_url)
+                    print(f"\n🎬 [단일영상] '{src_name}' 확인 중 (ID: {vid})...")
                     if not vid:
                         continue
                     if vid in processed_ids and not args.force:
-                        print(f"      ⚡ [기존 완료] 이미 노션 DB에 분석 적재 완료된 영상 -> 스킵")
+                        print(f"   ⚡ [기존 완료] 이미 노션 DB에 분석 적재 완료된 영상 -> 스킵")
                         skipped_processed_count += 1
                     elif vid in queued_vids:
-                        print(f"      ⏳ [대기열 기등록] 이미 분석 대기열에 담겨 있음 -> 스킵")
+                        print(f"   ⏳ [대기열 기등록] 이미 분석 대기열에 담겨 있음 -> 스킵")
                         skipped_queued_count += 1
                     else:
-                        payload = prepare_video_payload_for_queue(v, guide_page_id=guide_page_id, guide_name=src_name, verbose=True)
-                        t_len = len(payload.get("transcript", "") or "")
-                        sub_src = payload.get("sub_source", "yt-dlp")
-                        if t_len >= 50:
-                            pending_queue.append(payload)
-                            queued_vids.add(vid)
-                            newly_enqueued_count += 1
-                            print(f"      📜 [스크립트 확보 성공] 총 {t_len:,}자 확보 완료! (출처: {sub_src})")
-                            print(f"      📥 [대기열 등록] 분석 대기열(Queue)에 신규 등록 완료")
+                        v_meta = resolve_video_info(src_url)
+                        if v_meta:
+                            payload = prepare_video_payload_for_queue(v_meta, guide_page_id=guide_page_id, guide_name=src_name, verbose=True)
+                            t_len = len(payload.get("transcript", "") or "")
+                            sub_src = payload.get("sub_source", "yt-dlp")
+                            if t_len >= 50:
+                                pending_queue.append(payload)
+                                queued_vids.add(vid)
+                                newly_enqueued_count += 1
+                                print(f"      📜 [스크립트 확보 성공] 총 {t_len:,}자 확보 완료! (출처: {sub_src})")
+                                print(f"      📥 [대기열 등록] 분석 대기열(Queue)에 신규 등록 완료")
+                            else:
+                                payload["sub_source"] = "gemini-multimodal-fallback"
+                                pending_queue.append(payload)
+                                queued_vids.add(vid)
+                                newly_enqueued_count += 1
+                                print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
+
+                    if guide_page_id and notion_client:
+                        update_guide_last_scanned(notion_client, guide_page_id)
+
+                # 채널 또는 재생목록
+                else:
+                    if not src_ch_id:
+                        continue
+                    is_pl = (src_type == "재생목록") or any(src_ch_id.startswith(p) for p in ["PL", "UU", "FL"])
+                    print(f"\n{'📑' if is_pl else '📡'} [{'재생목록' if is_pl else '채널'}] '{src_name}' 스캔 중 (최대 {src_max_v}개)...")
+                    fetched_videos = fetch_recent_videos(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl)
+                    if not fetched_videos:
+                        print(f"   ℹ️ 최근 게시된 영상을 찾을 수 없습니다.")
+                        continue
+
+                    for v_idx, v in enumerate(fetched_videos, 1):
+                        vid = v.get("video_id")
+                        vtitle = v.get("title", "YouTube Video")
+                        print(f"   🔍 [영상 탐색 {v_idx}/{len(fetched_videos)}] '{vtitle[:40]}' (ID: {vid})")
+
+                        if not vid:
+                            continue
+                        if vid in processed_ids and not args.force:
+                            print(f"      ⚡ [기존 완료] 이미 노션 DB에 분석 적재 완료된 영상 -> 스킵")
+                            skipped_processed_count += 1
+                        elif vid in queued_vids:
+                            print(f"      ⏳ [대기열 기등록] 이미 분석 대기열에 담겨 있음 -> 스킵")
+                            skipped_queued_count += 1
                         else:
-                            payload["sub_source"] = "gemini-multimodal-fallback"
-                            pending_queue.append(payload)
-                            queued_vids.add(vid)
-                            newly_enqueued_count += 1
-                            print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
+                            payload = prepare_video_payload_for_queue(v, guide_page_id=guide_page_id, guide_name=src_name, verbose=True)
+                            t_len = len(payload.get("transcript", "") or "")
+                            sub_src = payload.get("sub_source", "yt-dlp")
+                            if t_len >= 50:
+                                pending_queue.append(payload)
+                                queued_vids.add(vid)
+                                newly_enqueued_count += 1
+                                print(f"      📜 [스크립트 확보 성공] 총 {t_len:,}자 확보 완료! (출처: {sub_src})")
+                                print(f"      📥 [대기열 등록] 분석 대기열(Queue)에 신규 등록 완료")
+                            else:
+                                payload["sub_source"] = "gemini-multimodal-fallback"
+                                pending_queue.append(payload)
+                                queued_vids.add(vid)
+                                newly_enqueued_count += 1
+                                print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
 
+                    if guide_page_id and notion_client:
+                        update_guide_last_scanned(notion_client, guide_page_id)
 
-                if guide_page_id:
-                    update_guide_last_scanned(notion_client, guide_page_id)
+            # 대기열 게시일시(KST) 기준 글로벌 정렬 적용 (기본: 과거 -> 최신순)
+            pending_queue = sort_pending_queue_by_publish_time(pending_queue, order=sort_order)
+            save_pending_queue(pending_queue)
+            
+            sort_order_desc = "과거 ➡️ 최신 (오름차순, 시황 타임라인 순)" if sort_order == "asc" else "최신 ➡️ 과거 (내림차순, 최신성 우선)"
+            print("\n" + "-" * 80)
+            print(f"📊 [1단계 스크립트 확보 및 시계열 정렬 결과 요약]")
+            print(f"   • 이번 스캔 신규 스크립트 확보: {newly_enqueued_count}개")
+            print(f"   • 스크립트 미확보/제외: {skipped_no_transcript_count}개")
+            print(f"   • 기존 완료/대기열 스킵: {skipped_processed_count + skipped_queued_count}개")
+            print(f"   • 총 분석 대기 중인 스크립트(대기열): {len(pending_queue)}개")
+            print(f"   • 📅 정렬 기준: 게시일시(KST) {sort_order_desc}")
+            print("-" * 80)
 
-        # 대기열 게시일시(KST) 기준 글로벌 정렬 적용 (기본: 과거 -> 최신순)
-        sort_order = getattr(args, "sort_order", "asc") or "asc"
-        pending_queue = sort_pending_queue_by_publish_time(pending_queue, order=sort_order)
-        save_pending_queue(pending_queue)
-        
-        sort_order_desc = "과거 ➡️ 최신 (오름차순, 시황 타임라인 순)" if sort_order == "asc" else "최신 ➡️ 과거 (내림차순, 최신성 우선)"
-        print("\n" + "-" * 80)
-        print(f"📊 [1단계 스크립트 확보 및 시계열 정렬 결과 요약]")
-        print(f"   • 이번 스캔 신규 스크립트 확보: {newly_enqueued_count}개")
-        print(f"   • 스크립트 미확보/제외: {skipped_no_transcript_count}개")
-        print(f"   • 기존 완료/대기열 스킵: {skipped_processed_count + skipped_queued_count}개")
-        print(f"   • 총 분석 대기 중인 스크립트(대기열): {len(pending_queue)}개")
-        print(f"   • 📅 정렬 기준: 게시일시(KST) {sort_order_desc}")
-        print("-" * 80)
+            if args.fetch_only:
+                print("\n✨ [Phase 1: Fetch-Only 완료] 자막 수집 및 대기열 저장이 완료되었습니다.")
+                print("   ➔ Tailscale Exit Node 연결을 안전하게 종료하고, Phase 2에서 AI 분석을 진행합니다.")
+                return
 
-        # [2단계: 대기열 Dequeue & Gemini AI 분할 배치 분석]
+        # [Phase 2: 대기열 Dequeue & Gemini AI 분할 배치 분석] (--fetch-only 가 아닐 때 실행)
         batch_limit = max(args.batch_limit, 1)
+        sort_order_desc = "과거 ➡️ 최신 (오름차순, 시황 타임라인 순)" if sort_order == "asc" else "최신 ➡️ 과거 (내림차순, 최신성 우선)"
         if not pending_queue:
             print("\n✨ [대기열 비어있음] 분석 대기 중인 신규 스크립트가 없습니다. 배치를 정상 종료합니다.")
         else:
             print(f"\n🚀 [2단계: Gemini AI 초고속 구조화 분석 실행] 이번 목표: 최대 {batch_limit}개 ({sort_order_desc}, 대기열 총 {len(pending_queue)}개 중)")
+
+            ai_service = AIService()
+            _get_name_lookup_index()
+            gateway = StockRegistryGateway(client=notion_client)
+
             items_to_process = pending_queue[:batch_limit]
             remaining_queue = pending_queue[batch_limit:]
             processed_in_this_run, failed_in_this_run = [], []
@@ -1334,7 +1371,7 @@ def main() -> None:
     print("=" * 80)
 
     # 3. [유지보수] 90일(3개월) 초과 과거 시황 노션 자동 아카이빙(휴지통 이동)
-    if not args.skip_cleanup and YOUTUBE_DB_ID:
+    if not args.skip_cleanup and YOUTUBE_DB_ID and notion_client and not args.fetch_only:
         cleanup_old_youtube_insights(notion_client, YOUTUBE_DB_ID, retention_days=args.retention_days)
 
 
