@@ -165,6 +165,31 @@ def init_database() -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_fin_per ON tbl_finances(per);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_fin_pbr ON tbl_finances(pbr);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_fin_trend ON tbl_finances(trend);")
+
+        # 6. tbl_youtube_insights (유튜브 데일리 AI 시황 인사이트 캐시)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tbl_youtube_insights (
+                video_id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                channel_name TEXT,
+                video_title TEXT NOT NULL,
+                published_at TEXT NOT NULL,
+                video_url TEXT NOT NULL,
+                macro_sentiment TEXT,
+                risk_stance TEXT,
+                key_themes TEXT,
+                top_picks TEXT,
+                summary_markdown TEXT NOT NULL,
+                raw_transcript_len INTEGER,
+                notion_page_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_yt_published ON tbl_youtube_insights(published_at DESC);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_yt_channel ON tbl_youtube_insights(channel_id);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_yt_sentiment ON tbl_youtube_insights(macro_sentiment);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_yt_risk ON tbl_youtube_insights(risk_stance);")
         conn.commit()
 
         # CSV 파일이 존재하고 DB 테이블이 비어있다면 자동 복원 (GitHub Actions 및 신규 PC 100% 자가 복구)
@@ -700,3 +725,85 @@ def export_all_tables_to_csv() -> None:
             pass
 
     logger.info(f"📊 [CSV 내보내기 완료] -> {DICTIONARY_CSV_PATH}, {STOCKS_CSV_PATH}, {BENCHMARKS_CSV_PATH}, {FINANCES_CSV_PATH}, {ETF_HOLDINGS_CSV_PATH}")
+
+
+# ==============================================================================
+# 7. YouTube 시황 인사이트 CRUD 함수
+# ==============================================================================
+def upsert_youtube_insight(insight_data: Dict[str, Any]) -> bool:
+    """유튜브 AI 시황 분석 데이터를 tbl_youtube_insights에 삽입 또는 갱신합니다."""
+    ensure_data_dir()
+    now_str = datetime.now().isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO tbl_youtube_insights (
+                video_id, channel_id, channel_name, video_title,
+                published_at, video_url, macro_sentiment, risk_stance,
+                key_themes, top_picks, summary_markdown, raw_transcript_len,
+                notion_page_id, created_at, updated_at
+            ) VALUES (
+                :video_id, :channel_id, :channel_name, :video_title,
+                :published_at, :video_url, :macro_sentiment, :risk_stance,
+                :key_themes, :top_picks, :summary_markdown, :raw_transcript_len,
+                :notion_page_id, :created_at, :updated_at
+            )
+            ON CONFLICT(video_id) DO UPDATE SET
+                channel_name = excluded.channel_name,
+                video_title = excluded.video_title,
+                published_at = excluded.published_at,
+                video_url = excluded.video_url,
+                macro_sentiment = excluded.macro_sentiment,
+                risk_stance = excluded.risk_stance,
+                key_themes = excluded.key_themes,
+                top_picks = excluded.top_picks,
+                summary_markdown = excluded.summary_markdown,
+                raw_transcript_len = excluded.raw_transcript_len,
+                notion_page_id = COALESCE(excluded.notion_page_id, tbl_youtube_insights.notion_page_id),
+                updated_at = :updated_at;
+        """, {
+            "video_id": insight_data.get("video_id", ""),
+            "channel_id": insight_data.get("channel_id", ""),
+            "channel_name": insight_data.get("channel_name", ""),
+            "video_title": insight_data.get("video_title", ""),
+            "published_at": insight_data.get("published_at", now_str),
+            "video_url": insight_data.get("video_url", ""),
+            "macro_sentiment": insight_data.get("macro_sentiment", "Neutral"),
+            "risk_stance": insight_data.get("risk_stance", "Defensive"),
+            "key_themes": json.dumps(insight_data.get("key_themes", []), ensure_ascii=False) if isinstance(insight_data.get("key_themes"), list) else insight_data.get("key_themes", "[]"),
+            "top_picks": json.dumps(insight_data.get("top_picks", []), ensure_ascii=False) if isinstance(insight_data.get("top_picks"), list) else insight_data.get("top_picks", "[]"),
+            "summary_markdown": insight_data.get("summary_markdown", ""),
+            "raw_transcript_len": insight_data.get("raw_transcript_len", 0),
+            "notion_page_id": insight_data.get("notion_page_id", ""),
+            "created_at": insight_data.get("created_at", now_str),
+            "updated_at": now_str,
+        })
+        conn.commit()
+    return True
+
+
+def get_youtube_insights(limit: int = 10) -> List[Dict[str, Any]]:
+    """최신 유튜브 AI 시황 목록을 발행일 역순으로 조회합니다."""
+    ensure_data_dir()
+    if not os.path.exists(get_actual_db_path()):
+        return []
+    res: List[Dict[str, Any]] = []
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tbl_youtube_insights ORDER BY published_at DESC LIMIT ?;", (limit,))
+        for row in cursor.fetchall():
+            res.append(dict(row))
+    return res
+
+
+def get_youtube_insight_by_id(video_id: str) -> Optional[Dict[str, Any]]:
+    """특정 비디오 ID에 대한 AI 시황 레코드를 조회합니다."""
+    ensure_data_dir()
+    if not os.path.exists(get_actual_db_path()):
+        return None
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tbl_youtube_insights WHERE video_id = ?;", (video_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+

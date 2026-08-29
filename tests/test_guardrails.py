@@ -64,6 +64,29 @@ class TestGuardrails(unittest.TestCase):
         passed, errors = verify_schema_guardrails(mock_schema)
         self.assertTrue(passed, f"스키마 가드레일 실패: {errors}")
 
+    def test_modernized_architecture_guardrails(self):
+        """Pydantic v2 모델 및 SQLite 6대 테이블(tbl_youtube_insights) 가드레일 검증"""
+        from services.pydantic_models import YouTubeMarketInsight, AssetImpact
+        from core.local_db_manager import get_db_connection, init_database
+
+        init_database()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = {row[0] for row in cursor.fetchall()}
+            self.assertIn("tbl_youtube_insights", tables, "tbl_youtube_insights 테이블 누락")
+
+        # Pydantic 모델 인스턴스화 무결성 확인
+        model = YouTubeMarketInsight(
+            video_title="테스트",
+            channel_name="테스트채널",
+            macro_stance="Neutral",
+            risk_appetite="Defensive",
+            key_takeaways=["테스트 요약임"],
+            actionable_strategy="관망 필요"
+        )
+        self.assertEqual(model.macro_stance, "Neutral")
+
 
 if __name__ == "__main__":
     print("=" * 80)
