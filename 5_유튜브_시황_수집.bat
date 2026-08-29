@@ -23,6 +23,7 @@ echo.
 echo ------------------------------------------------------------------------------
 echo   [Sync] Uploading queue and cache data to GitHub...
 echo ------------------------------------------------------------------------------
+git pull --rebase origin main 2>nul
 git add .processed_youtube_videos.json .youtube_pending_queue.json jobs/youtube/.processed_youtube_videos.json jobs/youtube/.youtube_pending_queue.json data/*.csv 2>nul
 git commit -m "chore(youtube): auto-sync youtube insights queue and cache [skip ci]" 2>nul
 git push origin main 2>nul
@@ -32,4 +33,6 @@ echo ===========================================================================
 echo   YouTube Sync and GitHub Upload Completed.
 echo ==============================================================================
 echo.
-pause
+if not "%1"=="auto" (
+    pause
+)
