@@ -34,7 +34,6 @@ jobs:
 
       # 🌟 스마트폰 무인 노드(Tailscale Exit Node for Android A23) 연동 (영구 OAuth 및 만료 방지)
       - name: "Connect Tailscale Smartphone Exit Node (Android A23)"
-        if: ${{ (secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '') || (secrets.TAILSCALE_OAUTH_CLIENT_ID != '' && secrets.TAILSCALE_OAUTH_SECRET != '') }}
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
