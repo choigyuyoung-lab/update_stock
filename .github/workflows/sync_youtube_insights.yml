@@ -37,8 +37,8 @@ jobs:
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID || secrets.TAILSCALE_OAUTH_CLIENT_ID || secrets.OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET || secrets.TAILSCALE_OAUTH_SECRET || secrets.OAUTH_SECRET }}
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true
 
