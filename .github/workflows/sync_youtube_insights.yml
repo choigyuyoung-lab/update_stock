@@ -32,8 +32,8 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # 🌟 스마트폰 무인 노드(Tailscale Exit Node for Android: a23) 연동 (노드 오프라인 시 Direct 자동 Fallback)
-      - name: Connect Tailscale Smartphone Exit Node (Android: a23)
+      # 🌟 스마트폰 무인 노드(Tailscale Exit Node for Android A23) 연동 (노드 오프라인 시 Direct 자동 Fallback)
+      - name: "Connect Tailscale Smartphone Exit Node (Android A23)"
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
