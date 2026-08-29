@@ -85,14 +85,20 @@ update_stock/
 │
 ├── 📂 core/                       # 🧠 Core System Infrastructure
 │   ├── __init__.py
-│   ├── notion_utils.py            # Notion API Client, Dirty Checking, KST Converter
-│   ├── local_db_manager.py        # SQLite WAL Mode CRUD, 5-Table Manager, CSV Self-Healing
+│   ├── notion_utils.py            # Notion API Client, Dirty Checking, KST Converter, to_yfinance_symbol
+│   ├── local_db_manager.py        # SQLite WAL Mode CRUD, 6-Table Manager (tbl_youtube_insights 포함), CSV Self-Healing
 │   └── guardrails.py              # 5 Quant Factor Mathematical Invariants & Schema Guardrails
 │
 ├── 📂 services/                   # 🔌 Shared Multi-Domain Services
 │   ├── __init__.py
-│   ├── stock_fallback_resolver.py # 521 Ontology Dictionary Rules & ETF Tokenizer
+│   ├── pydantic_models.py         # Pydantic v2 Strict Structured Output Schemas & Noun Endings
+│   ├── stock_fallback_resolver.py # 1,325 Ontology Dictionary Rules & ETF Tokenizer
 │   └── prompt_manager.py          # Microsecond In-Memory Prompt Cache Loader
+│
+├── 📂 tools/                      # 🛠️ Developer & AI Agent Tools
+│   ├── mcp_server.py              # FastMCP Tool Server (<1ms Financial ETL Tools for AI Agents)
+│   ├── sync_manager.py            # Dual-Repo Sync Manager (Start/Finish)
+│   └── silent_sync.vbs            # Background Sync Trigger
 │
 ├── 📂 jobs/                       # ⚙️ Autonomous Execution Batches (Job-Centric Co-location)
 │   ├── 📂 price/                  # job_sync_price_kr.py, job_sync_price_us.py

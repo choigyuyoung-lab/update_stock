@@ -95,6 +95,37 @@ def kst_isoformat() -> str:
     return get_kst_now().isoformat()
 
 
+def to_yfinance_symbol(ticker: str) -> str:
+    """
+    Notion / KIS 티커를 Yahoo Finance 규격 심볼로 정확하게 변환합니다.
+    - 일본 도쿄 거래소: 6525-T, 6525.T -> 6525.T
+    - 유럽/아시아 거래소: ASMN-VI -> ASMN.VI, 0700-HK -> 0700.HK, SAP-DE -> SAP.DE
+    - 미국 복수 클래스주: BRK.B -> BRK-B, BF.B -> BF-B
+    - 일반 미국 티커: AAPL, NVDA, TSLA -> 그대로 유지
+    """
+    t = (ticker or "").strip().upper()
+    if not t:
+        return t
+
+    # 1. 하이픈(-) 표기된 글로벌 거래소 접미사 (-T, -VI, -DE, -PA, -HK, -KS, -KQ, -SW, -L, -AS, -TO, -V, -AX) -> 점(.)으로 변환
+    m_hyphen = re.match(r'^([A-Z0-9]+)-(T|VI|DE|PA|HK|KS|KQ|SW|L|AS|TO|V|AX)$', t)
+    if m_hyphen:
+        return f"{m_hyphen.group(1)}.{m_hyphen.group(2)}"
+
+    # 2. 이미 올바른 점(.) 표기법을 가진 글로벌 종목 (.T, .VI, .DE, .PA, .HK 등) -> 그대로 유지
+    m_dot = re.match(r'^([A-Z0-9]+)\.(T|VI|DE|PA|HK|KS|KQ|SW|L|AS|TO|V|AX)$', t)
+    if m_dot:
+        return t
+
+    # 3. 미국 주식의 클래스주 점(.) 표기 (BRK.A, BRK.B, BF.B 등) -> 하이픈(-)으로 변환
+    if "." in t:
+        parts = t.split(".")
+        if len(parts) == 2 and parts[1] in ("A", "B", "C", "PR", "WS"):
+            return f"{parts[0]}-{parts[1]}"
+
+    return t
+
+
 # ==============================================================================
 # 2-1. 한국(KRX) & 미국(NYSE) 정밀 휴장일/공휴일 판별 엔진 (exchange_calendars 기반)
 # ==============================================================================

@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 import yfinance as yf
 
-from core.notion_utils import safe_float, get_http_session
+from core.notion_utils import safe_float, get_http_session, to_yfinance_symbol
 
 logger = logging.getLogger("KISDataService")
 SESSION = get_http_session()
@@ -126,7 +126,7 @@ def fetch_kr_consensus_yfinance(ticker: str) -> Dict[str, Any]:
 # ==============================================================================
 def fetch_us_quant_yfinance(ticker: str) -> Dict[str, Any]:
     """해외 주식의 밸류에이션, 컨센서스 및 기술적 지표를 yfinance로 일괄 수집합니다."""
-    t_clean = ticker.strip().upper()
+    t_clean = to_yfinance_symbol(ticker)
     res: Dict[str, Any] = {}
     try:
         t_obj = yf.Ticker(t_clean)

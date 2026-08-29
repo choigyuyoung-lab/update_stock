@@ -50,6 +50,7 @@ from core.notion_utils import (
     batch_update_pages,
     build_dirty_payload,
     ensure_database_properties,
+    to_yfinance_symbol,
     PRICE_NUMERIC_FIELDS,
 )
 from core.local_db_manager import upsert_finances_batch, export_all_tables_to_csv
@@ -133,7 +134,7 @@ def fetch_yfinance_batch(tickers: List[str]) -> Dict[str, Dict[str, Optional[flo
     if not tickers:
         return results
 
-    ticker_map = {t.replace(".", "-"): t for t in tickers}
+    ticker_map = {to_yfinance_symbol(t): t for t in tickers}
     yf_symbols = list(ticker_map.keys())
 
     try:
@@ -181,7 +182,7 @@ def fetch_yfinance_batch(tickers: List[str]) -> Dict[str, Dict[str, Optional[flo
         logger.info(f"   ℹ️ 누락 {len(missing)}개 종목 개별 폴백 조회 중...")
         for mt in missing:
             try:
-                hist = yf.Ticker(mt.replace(".", "-")).history(period="5d")
+                hist = yf.Ticker(to_yfinance_symbol(mt)).history(period="5d")
                 if not hist.empty and len(hist) >= 1:
                     cur_p = float(hist["Close"].iloc[-1])
                     prev_p = float(hist["Close"].iloc[-2]) if len(hist) > 1 else cur_p
