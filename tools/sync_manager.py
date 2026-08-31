@@ -202,26 +202,16 @@ def sync_env_vault_backup() -> None:
             shutil.copy2(src_env, dst_env)
             env_copied += 1
 
-    # 2. 토큰 캐시 백업
-    token_sources = [
-        WORKSPACE_ROOT / "update_stock" / "data" / ".kis_token_cache.json",
-        WORKSPACE_ROOT / ".kis_token_cache.json"
-    ]
-    for ts in token_sources:
-        if ts.exists():
-            shutil.copy2(ts, backups_dir / ".kis_token_cache.json")
-            break
-
-    # 3. 3대 저장소 SSOT 동기화
+    # 2. 3대 저장소 SSOT 동기화
     sync_common_ssot_files()
 
-    # 4. Antigravity IDE 대화 기록(brain/) 자동 아카이빙 백업
+    # 3. Antigravity IDE 대화 기록(brain/) 자동 아카이빙 백업
     chat_count = backup_chat_history()
     if chat_count > 0:
         print(f"  💬 [대화기록 백업] Antigravity IDE 최근 대화 세션 {chat_count}개를 workspace-vault로 백업했습니다.")
 
     if env_copied > 0:
-        print(f"  🔐 [보안 금고 백업] .env({env_copied}건), 설정 파일, 토큰 캐시를 workspace-vault로 안전 백업했습니다.")
+        print(f"  🔐 [보안 금고 백업] .env({env_copied}건) 및 전역 설정을 workspace-vault로 안전 백업했습니다.")
 
 
 def get_antigravity_brain_dir() -> Optional[Path]:

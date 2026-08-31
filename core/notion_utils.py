@@ -880,18 +880,17 @@ def build_dirty_payload(
 # 6. 한국투자증권(KIS) API 인증 관리 (지능형 디스크 캐싱: 하루 1회 재사용 보장)
 # ==============================================================================
 def _get_token_cache_paths() -> List[str]:
-    """KIS 토큰 캐시 파일이 위치할 수 있는 모든 유효 경로 목록을 반환합니다."""
+    """KIS 토큰 캐시 파일이 위치할 수 있는 모든 유효 경로 목록을 반환합니다 (update_stock 전용)."""
     candidates = []
     env_path = os.environ.get("KIS_TOKEN_CACHE_FILE")
     if env_path:
         candidates.append(env_path)
     core_dir: Path = Path(__file__).resolve().parent
     project_root: Path = core_dir.parent
-    workspace_root: Path = project_root.parent
 
-    # 1. workspace-vault 보안 금고 백업 경로 최우선 (중앙 백업 SSOT)
-    candidates.append(str(workspace_root / "workspace-vault" / "backups" / ".kis_token_cache.json"))
-    # 2. 개별 프로젝트 data/ 또는 core 디렉토리 경로
+    # 1. GitHub Actions 및 프로젝트 루트 캐시 경로 (.kis_token_cache.json)
+    candidates.append(str(project_root / ".kis_token_cache.json"))
+    # 2. 로컬 프로젝트 data/ 및 core/ 디렉토리 경로
     candidates.append(str(project_root / "data" / ".kis_token_cache.json"))
     candidates.append(str(core_dir / ".kis_token_cache.json"))
 
@@ -904,17 +903,23 @@ def _get_token_cache_paths() -> List[str]:
 
 
 def _load_token_cache() -> Dict[str, Any]:
-    """프로젝트 루트 및 core 디렉토리에 캐시된 KIS 토큰 파일을 탐색하여 읽어옵니다."""
+    """모든 후보 경로의 KIS 토큰 캐시를 탐색하여 가장 최신(만료일이 가장 긴) 토큰으로 병합하여 읽어옵니다."""
+    merged: Dict[str, Any] = {}
     for path in _get_token_cache_paths():
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    if isinstance(data, dict) and data:
-                        return data
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            if isinstance(v, dict):
+                                curr_exp = float(v.get("expires_at", 0))
+                                prev_exp = float(merged.get(k, {}).get("expires_at", 0))
+                                if curr_exp > prev_exp:
+                                    merged[k] = v
             except Exception:
                 continue
-    return {}
+    return merged
 
 
 def _save_token_cache(cache_data: Dict[str, Any]) -> None:
