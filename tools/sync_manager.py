@@ -5,7 +5,7 @@ sync_manager.py
 1. 회사 PC <-> 집 PC 간 작업 환경 전환 감지 및 미동기화 파일 경고
 2. 직전 작업/커밋 이력 간략 요약 브리핑
 3. 주간/월간 주기별 전략 고도화 & 코드 수정 영감 체크리스트 질문 팝업
-4. 3대 저장소(update_stock & k_all_round_portfolio & workspace-vault) 원클릭 양방향 Git 동기화
+4. 2대 저장소(update_stock & k_all_round_portfolio) 원클릭 양방향 Git 동기화
 """
 
 import sys
@@ -115,8 +115,70 @@ def get_all_target_repos() -> List[Dict[str, Any]]:
     return repos
 
 
+
+def sync_common_ssot_files() -> None:
+    """
+    3대 저장소(k_all_round, update_stock, workspace-vault/configs) 간 공통 핵심 파일(GEMINI.md, AGENT.md)의
+    최신 수정 사항을 상호 비교하여 양방향 자동 전파(SSOT 무결성 일치화)합니다.
+    GitHub 웹에서 직접 수정했거나 로컬 특정 프로젝트에서 수정한 변경사항도 3개 저장소에 즉시 동기화됩니다.
+    """
+    vault_repo = WORKSPACE_ROOT / "workspace-vault"
+    if not (vault_repo / ".git").exists():
+        return
+
+    configs_dir = vault_repo / "configs"
+    configs_dir.mkdir(parents=True, exist_ok=True)
+
+    common_files = ["GEMINI.md", "AGENT.md"]
+    synced_count = 0
+
+    for fname in common_files:
+        vault_file = configs_dir / fname
+        k_file = WORKSPACE_ROOT / "k_all_round_portfolio" / fname
+        u_file = WORKSPACE_ROOT / "update_stock" / fname
+
+        candidates = [p for p in [vault_file, k_file, u_file] if p.exists()]
+        if not candidates:
+            continue
+
+        # 가장 최근에 수정된 최신 파일 탐색
+        latest_file = max(candidates, key=lambda p: p.stat().st_mtime)
+        try:
+            with open(latest_file, "r", encoding="utf-8") as f:
+                latest_content = f.read()
+
+            for target in [vault_file, k_file, u_file]:
+                needs_update = False
+                if not target.exists():
+                    needs_update = True
+                else:
+                    try:
+                        with open(target, "r", encoding="utf-8") as tf:
+                            if tf.read() != latest_content:
+                                needs_update = True
+                    except Exception:
+                        needs_update = True
+
+                if needs_update:
+                    shutil.copy2(latest_file, target)
+                    synced_count += 1
+        except Exception as e:
+            logger.debug(f"SSOT 파일 동기화 예외 ({fname}): {e}")
+
+    # pyrightconfig.json 동기화 (configs/ -> 각 프로젝트)
+    vault_pyright = configs_dir / "pyrightconfig.json"
+    if vault_pyright.exists():
+        for proj in ["k_all_round_portfolio", "update_stock"]:
+            proj_pyright = WORKSPACE_ROOT / proj / "pyrightconfig.json"
+            if not proj_pyright.exists():
+                shutil.copy2(vault_pyright, proj_pyright)
+
+    if synced_count > 0:
+        print(f"  ✨ [SSOT 자동 동기화] 공통 마스터 파일({synced_count}건)을 3대 저장소에 최신 일치화했습니다.")
+
+
 def sync_env_vault_backup() -> None:
-    """작업 종료 시 프로젝트의 .env 및 중요 토큰 캐시를 workspace-vault로 안전 백업합니다."""
+    """작업 종료 시 프로젝트의 .env, 전역 설정(configs/) 및 중요 토큰 캐시를 workspace-vault로 안전 백업합니다."""
     vault_repo = WORKSPACE_ROOT / "workspace-vault"
     if not (vault_repo / ".git").exists():
         return
@@ -124,10 +186,12 @@ def sync_env_vault_backup() -> None:
     env_vault_dir = vault_repo / "env_vault"
     backups_dir = vault_repo / "backups"
     docs_dir = vault_repo / "docs"
+    configs_dir = vault_repo / "configs"
 
     env_vault_dir.mkdir(parents=True, exist_ok=True)
     backups_dir.mkdir(parents=True, exist_ok=True)
     docs_dir.mkdir(parents=True, exist_ok=True)
+    configs_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. .env 파일 백업
     env_copied = 0
@@ -139,22 +203,168 @@ def sync_env_vault_backup() -> None:
             env_copied += 1
 
     # 2. 토큰 캐시 백업
-    token_cache = WORKSPACE_ROOT / ".kis_token_cache.json"
-    if token_cache.exists():
-        shutil.copy2(token_cache, backups_dir / ".kis_token_cache.json")
+    token_sources = [
+        WORKSPACE_ROOT / "update_stock" / "data" / ".kis_token_cache.json",
+        WORKSPACE_ROOT / ".kis_token_cache.json"
+    ]
+    for ts in token_sources:
+        if ts.exists():
+            shutil.copy2(ts, backups_dir / ".kis_token_cache.json")
+            break
+
+    # 3. 3대 저장소 SSOT 동기화
+    sync_common_ssot_files()
+
+    # 4. Antigravity IDE 대화 기록(brain/) 자동 아카이빙 백업
+    chat_count = backup_chat_history()
+    if chat_count > 0:
+        print(f"  💬 [대화기록 백업] Antigravity IDE 최근 대화 세션 {chat_count}개를 workspace-vault로 백업했습니다.")
 
     if env_copied > 0:
-        print(f"  🔐 [보안 금고 백업] .env({env_copied}건)을 workspace-vault로 안전 백업했습니다.")
+        print(f"  🔐 [보안 금고 백업] .env({env_copied}건), 설정 파일, 토큰 캐시를 workspace-vault로 안전 백업했습니다.")
+
+
+def get_antigravity_brain_dir() -> Optional[Path]:
+    """현재 운영체제에 맞는 Antigravity IDE의 로컬 brain/ 디렉토리 경로를 반환합니다."""
+    import os
+    if sys.platform == "win32":
+        user_prof = os.environ.get("USERPROFILE", "")
+        if user_prof:
+            b_path = Path(user_prof) / ".gemini" / "antigravity-ide" / "brain"
+            if b_path.exists():
+                return b_path
+    else:
+        b_path = Path.home() / ".gemini" / "antigravity-ide" / "brain"
+        if b_path.exists():
+            return b_path
+    return None
+
+
+def backup_chat_history(max_sessions: int = 30) -> int:
+    """Antigravity IDE의 대화 기록(brain/ 디렉토리)을 workspace-vault로 자동 아카이빙 백업합니다."""
+    brain_dir = get_antigravity_brain_dir()
+    if not brain_dir or not brain_dir.exists():
+        return 0
+
+    vault_repo = WORKSPACE_ROOT / "workspace-vault"
+    if not (vault_repo / ".git").exists():
+        return 0
+
+    vault_brain_dir = vault_repo / "backups" / "brain"
+    vault_chat_doc_dir = vault_repo / "backups" / "chat_history"
+    vault_brain_dir.mkdir(parents=True, exist_ok=True)
+    vault_chat_doc_dir.mkdir(parents=True, exist_ok=True)
+
+    session_dirs = [p for p in brain_dir.iterdir() if p.is_dir() and p.name != "tempmediaStorage"]
+    session_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    backed_up_count = 0
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    index_lines = [
+        "# 💬 Antigravity IDE 대화 기록 색인 목록 (Chat History Archive)\n",
+        f"> **최근 동기화 시각**: {now_str}  ",
+        f"> **보관 세션 수**: 최근 {min(len(session_dirs), max_sessions)}개 세션  \n",
+        "| 번호 | 최근 일시 | 세션 ID | 초기 질문 / 주제 요약 | 계획서 |",
+        "| :--- | :--- | :--- | :--- | :--- |"
+    ]
+
+    for idx, sdir in enumerate(session_dirs[:max_sessions], 1):
+        cid = sdir.name
+        dst_sdir = vault_brain_dir / cid
+        dst_sdir.mkdir(parents=True, exist_ok=True)
+
+        plan_src = sdir / "implementation_plan.md"
+        walk_src = sdir / "walkthrough.md"
+        trans_src = sdir / ".system_generated" / "logs" / "transcript.jsonl"
+
+        if plan_src.exists():
+            shutil.copy2(plan_src, dst_sdir / "implementation_plan.md")
+        if walk_src.exists():
+            shutil.copy2(walk_src, dst_sdir / "walkthrough.md")
+        if trans_src.exists():
+            dst_logs = dst_sdir / ".system_generated" / "logs"
+            dst_logs.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(trans_src, dst_logs / "transcript.jsonl")
+
+        first_q = "(대화 내용 없음)"
+        time_str = datetime.datetime.fromtimestamp(sdir.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        if trans_src.exists():
+            try:
+                with open(trans_src, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        data = json.loads(line)
+                        if data.get("type") == "USER_INPUT":
+                            raw_content = data.get("content", "").strip()
+                            clean_q = re.sub(r'<[^>]+>', '', raw_content).strip()
+                            clean_q = clean_q.replace("\n", " ").replace("|", "/")
+                            if clean_q:
+                                first_q = clean_q[:60] + "..." if len(clean_q) > 60 else clean_q
+                                break
+            except Exception:
+                pass
+
+        plan_link = "✅ 유" if plan_src.exists() else "-"
+        index_lines.append(f"| {idx} | {time_str} | `{cid[:8]}` | {first_q} | {plan_link} |")
+        backed_up_count += 1
+
+    index_path = vault_chat_doc_dir / "대화이력_색인.md"
+    try:
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(index_lines) + "\n")
+    except Exception:
+        pass
+
+    return backed_up_count
+
+
+def restore_chat_history() -> int:
+    """workspace-vault의 대화 기록(brain/ 디렉토리)을 현재 PC의 Antigravity 로컬 brain/ 디렉토리로 자동 복원합니다."""
+    brain_dir = get_antigravity_brain_dir()
+    if not brain_dir:
+        import os
+        if sys.platform == "win32":
+            user_prof = os.environ.get("USERPROFILE", "")
+            if user_prof:
+                brain_dir = Path(user_prof) / ".gemini" / "antigravity-ide" / "brain"
+        else:
+            brain_dir = Path.home() / ".gemini" / "antigravity-ide" / "brain"
+
+    if not brain_dir:
+        return 0
+
+    vault_repo = WORKSPACE_ROOT / "workspace-vault"
+    vault_brain_dir = vault_repo / "backups" / "brain"
+    if not vault_brain_dir.exists():
+        return 0
+
+    brain_dir.mkdir(parents=True, exist_ok=True)
+    restored_count = 0
+
+    for sdir in vault_brain_dir.iterdir():
+        if not sdir.is_dir():
+            continue
+        dst_sdir = brain_dir / sdir.name
+        if not dst_sdir.exists():
+            try:
+                shutil.copytree(sdir, dst_sdir)
+                restored_count += 1
+            except Exception:
+                pass
+
+    return restored_count
 
 
 def restore_env_from_vault() -> None:
-    """작업 시작 시 workspace-vault의 최신 .env를 각 프로젝트로 자동 동기화 복원합니다."""
+    """작업 시작 시 workspace-vault의 최신 .env, 전역 설정(configs/), 토큰 캐시 및 대화기록을 자동 동기화 복원합니다."""
     vault_repo = WORKSPACE_ROOT / "workspace-vault"
     if not (vault_repo / ".git").exists():
         return
 
     env_vault_dir = vault_repo / "env_vault"
     backups_dir = vault_repo / "backups"
+    configs_dir = vault_repo / "configs"
 
     # 1. .env 양방향 최신 복원/동기화 (USB 불필요)
     if env_vault_dir.exists():
@@ -165,11 +375,40 @@ def restore_env_from_vault() -> None:
                 shutil.copy2(src_env, dst_env)
                 print(f"  ✨ [자동 동기화] {proj_name}/.env 설정을 workspace-vault 금고와 최신 일치화했습니다.")
 
-    # 2. 토큰 캐시 복구
-    token_backup = backups_dir / ".kis_token_cache.json"
-    token_target = WORKSPACE_ROOT / ".kis_token_cache.json"
-    if token_backup.exists() and not token_target.exists():
-        shutil.copy2(token_backup, token_target)
+    # 2. 3대 저장소 SSOT 공통 파일 자동 동기화 (GEMINI.md, AGENT.md)
+    sync_common_ssot_files()
+
+    # 3. .venv 가상환경 정션 링크 점검 및 자동 연결
+    venv_src = WORKSPACE_ROOT / "update_stock" / ".venv"
+    if venv_src.exists():
+        for link_target in [WORKSPACE_ROOT / ".venv", WORKSPACE_ROOT / "k_all_round_portfolio" / ".venv", vault_repo / ".venv"]:
+            if not link_target.exists():
+                try:
+                    if sys.platform == "win32":
+                        subprocess.run(["cmd", "/c", "mklink", "/J", str(link_target), str(venv_src)], capture_output=True)
+                    else:
+                        link_target.symlink_to(venv_src)
+                except Exception:
+                    pass
+
+    # 4. .vscode IDE 환경 설정 최신 동기화 (workspace-vault/configs -> .vscode/)
+    root_vscode = WORKSPACE_ROOT / ".vscode"
+    root_vscode.mkdir(parents=True, exist_ok=True)
+    if (configs_dir / "vscode_settings.json").exists():
+        shutil.copy2(configs_dir / "vscode_settings.json", root_vscode / "settings.json")
+    if (configs_dir / "vscode_tasks.json").exists():
+        shutil.copy2(configs_dir / "vscode_tasks.json", root_vscode / "tasks.json")
+    if (configs_dir / "vscode_extensions.json").exists():
+        shutil.copy2(configs_dir / "vscode_extensions.json", root_vscode / "extensions.json")
+
+    # 5. Antigravity IDE 대화 기록(brain/) 로컬 복원
+    restored_chat = restore_chat_history()
+    if restored_chat > 0:
+        print(f"  💬 [대화기록 복원] workspace-vault에서 대화 세션 {restored_chat}개를 로컬 IDE로 복원했습니다.")
+
+
+
+
 
 
 def load_sync_state() -> Dict[str, Any]:

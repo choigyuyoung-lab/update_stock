@@ -1,15 +1,13 @@
-# 🤖 [update_stock] Market Data ETL Sub-Engine Guide (GEMINI.md)
+# 🤖 [K-All-Round Master] Unified Workspace AI Domain Master Guide (GEMINI.md)
 
 <!--
-# 🤖 [update_stock] 데이터 수집 서브 엔진 가이드 (GEMINI.md)
+# 🤖 [K-올라운드 마스터] 통합 워크스페이스 AI 도메인 마스터 가이드 (GEMINI.md)
 -->
 
-This document defines the **financial data collection/ETL architecture, 11-workflow specification, and domain rules (WHAT)** for `update_stock`.
-For 7-asset quantitative allocation models and portfolio diagnostics, refer to [`k_all_round_portfolio/GEMINI.md`](file:///d:/Github%20IDE/k_all_round_portfolio/GEMINI.md).
+This document serves as the supreme domain specification defining the **business architecture, quantitative financial formulas, Notion database schemas, and critical domain invariants (WHAT)** across `k_all_round_portfolio` (Main Private) and `update_stock` (Sub Public).
 
 <!--
-이 문서는 본 저장소(update_stock)의 금융 데이터 수집/정제 아키텍처, 11대 워크플로우 명세 및 도메인 규칙(WHAT)을 정의하는 프로젝트 명세서입니다.
-포트폴리오 분석 및 7대 자산배분 퀀트 수식은 메인 저장소인 k_all_round_portfolio/GEMINI.md를 참조하십시오.
+이 문서는 k_all_round_portfolio (메인 Private 저장소)와 update_stock (서브 Public 데이터 수집 엔진)의 비즈니스 아키텍처, 퀀트 분석 수식, 노션 DB 스키마 및 도메인 핵심 규칙(WHAT)을 정의하는 최상위 프로젝트 명세서입니다.
 -->
 
 > 📌 **Engineering Standards & Behavioral Code**: All code formatting, early returns, TDD bug fixes, absolute paths, and the 7 Git commit rules (HOW AI writes code) strictly follow [AGENT.md](file:///d:/Github%20IDE/AGENT.md).
@@ -20,71 +18,120 @@ For 7-asset quantitative allocation models and portfolio diagnostics, refer to [
 
 ---
 
-## 🏛️ 1. Repository Layer Hierarchy & 1:1 Symmetric Workflows
+## 🏛️ 1. Workspace Architecture & 3-Repository Division of Roles
 
-### 📂 Layer Hierarchy
-- `core/`: Shared Infrastructure (`notion_utils.py`, `local_db_manager.py`, `guardrails.py`)
-- `services/`: Shared Adapters across multiple domains (`stock_fallback_resolver.py`, `prompt_manager.py`)
-- `jobs/`: ⚙️ Autonomous Batches & Co-located Dependencies (Job-Centric Architecture)
-  - `price/`: `job_sync_price_kr.py`, `job_sync_price_us.py`
-  - `finance/`: `job_sync_finance_kr.py`, `job_sync_finance_us.py`, `kis_data_service.py`
-  - `master/`: `job_sync_master_kr.py`, `job_sync_master_us.py`, `kis_master_loader.py`
-  - `etf/`: `job_sync_etf_holdings.py`
-  - `macro/`: `job_sync_benchmark.py`
-  - `local_db/`: `job_sync_local_db.py`, `job_sync_unorganized_stocks.py`
-  - `youtube/`: `job_sync_youtube_insights.py`, `ai_service.py`, `system_fia_youtube.en.md`
-- `data/`: Local Permanent Cache (`stock_master.db`, 5 CSV Dumps)
-- `tools/`: `sync_manager.py`, `tool_apply_tech_radar_patch.py`
-- `tests/`: `test_guardrails.py`
+```text
+d:\Github IDE/
+│
+├── 📂 k_all_round_portfolio/            👑 [Main Private: 7-Asset Allocation BI & AI Reports]
+│   ├── .github/workflows/               # AI Weekly Portfolio Report Workflow (generate_portfolio_report.yml)
+│   ├── core/                            # config_portfolio.py, notion_utils.py (0.001s Local Cache), guardrails.py
+│   ├── services/                        # prompt_manager.py
+│   ├── jobs/                            # ⚙️ Autonomous Batches & Co-located Dependencies (Job-Centric Architecture)
+│   │   ├── quant_report/                # job_generate_portfolio_report.py, macro_service.py, ai_service.py, system_portfolio_quant.en.md, user_portfolio_template.en.md
+│   │   └── tech_radar/                  # job_sync_tech_radar.py, tech_radar_gemini.md
+│   ├── reports/                         # Weekly Asset Allocation AI Diagnostic Reports Local Permanent Backup
+│   ├── tools/                           # sync_manager.py, tool_generate_gemini_prompt.py, tool_apply_tech_radar_patch.py
+│   ├── tests/                           # test_guardrails.py, test_prompts.py
+│   ├── 1_작업시작_동기화.bat              # Smart Work Start (Environment Detection / Summary / Periodic Strategy Checklist)
+│   ├── 3_작업종료_동기화.bat              # Smart Work Finish (Syntax Validation & Git Commit/Push & Mobile GDrive Sync)
+│   └── 4_테크레이더_패치적용.bat          # AI Tech Radar One-Click Patch Applier
+│
+├── 📂 update_stock/                     ⚙️ [Sub Public: Financial Market Data ETL Hub]
+│   ├── .github/workflows/ (11 YMLs)     # Price, Finance, Master, ETF, YouTube, Unorganized, Local DB Workflows
+│   ├── core/                            # notion_utils.py, local_db_manager.py, guardrails.py
+│   ├── services/                        # stock_fallback_resolver.py, prompt_manager.py
+│   ├── jobs/                            # ⚙️ Domain-Specific Autonomous Execution Batches
+│   │   ├── price/                       # job_sync_price_kr.py, job_sync_price_us.py
+│   │   ├── finance/                     # job_sync_finance_kr.py, job_sync_finance_us.py, kis_data_service.py
+│   │   ├── master/                      # job_sync_master_kr.py, job_sync_master_us.py, kis_master_loader.py
+│   │   ├── etf/                         # job_sync_etf_holdings.py
+│   │   ├── macro/                       # job_sync_benchmark.py
+│   │   ├── local_db/                    # job_sync_local_db.py, job_sync_unorganized_stocks.py
+│   │   └── youtube/                     # job_sync_youtube_insights.py, ai_service.py, system_fia_youtube.en.md
+│   ├── data/                            # stock_master.db (5 Normalized Tables) + 5 CSV Dumps
+│   ├── tools/                           # sync_manager.py, tool_apply_tech_radar_patch.py
+│   ├── tests/                           # test_guardrails.py
+│   ├── 1_작업시작_동기화.bat              # Smart Work Start
+│   └── 3_작업종료_동기화.bat              # Smart Work Finish
+│
+└── 📂 workspace-vault/                  🔐 [Private Storage: Security Vault, Backups & Docs Hub]
+    ├── configs/                         # Global IDE & AI Master Settings (GEMINI.md, AGENT.md, pyrightconfig, .vscode)
+    ├── env_vault/                       # .env Backup & Cross-environment Synchronization (update_stock.env, k_all_round_portfolio.env)
+    ├── backups/                         # KIS Token Cache (.kis_token_cache.json) & Snapshot Backups
+    ├── docs/                            # Centralized Architecture Specs, Operation Guides & Quality Checklists
+    ├── setup_environment.py             # All-in-one Environment Installation Wizard
+    ├── link_master_db.py                # Notion Watchlist Linker & Helper Script
+    └── *.bat (0~6)                      # Full Suite of Operations & Synchronization Batch Files
+```
 
 <!--
-### 📂 계층 구조
-- core/: 공통 엔진 (notion_utils.py, local_db_manager.py, guardrails.py)
-- services/: 다중 도메인 공통 어댑터 (stock_fallback_resolver.py, prompt_manager.py)
-- jobs/: 도메인별 실행 잡 및 종속 파일 (Job-Centric Co-location)
-- data/: 로컬 영구 캐시 (stock_master.db, CSV 5종)
-- tools/: sync_manager.py, tool_apply_tech_radar_patch.py
-- tests/: test_guardrails.py
--->
-
-### 🤖 11 Symmetric Workflows & Python Execution Scripts:
-1. `sync_price_kr.yml` $\leftrightarrow$ `jobs/price/job_sync_price_kr.py`: Korean Stocks/ETFs real-time price batch
-2. `sync_price_us.yml` $\leftrightarrow$ `jobs/price/job_sync_price_us.py`: US Stocks/ETFs closing price
-3. `sync_finance_kr.yml` $\leftrightarrow$ `jobs/finance/job_sync_finance_kr.py`: Korean financial metrics & 5 quant factors
-4. `sync_finance_us.yml` $\leftrightarrow$ `jobs/finance/job_sync_finance_us.py`: US financial metrics & 5 quant factors
-5. `sync_master_kr.yml` $\leftrightarrow$ `jobs/master/job_sync_master_kr.py`: KRX listed stocks master sync
-6. `sync_master_us.yml` $\leftrightarrow$ `jobs/master/job_sync_master_us.py`: US listed stocks master sync
-7. `sync_benchmark.yml` $\leftrightarrow$ `jobs/macro/job_sync_benchmark.py`: Global benchmarks, FX, interest rates
-8. `sync_etf_holdings.yml` $\leftrightarrow$ `jobs/etf/job_sync_etf_holdings.py`: ETF portfolio constituents (PDF) incremental upsert
-9. `sync_youtube_insights.yml` $\leftrightarrow$ `jobs/youtube/job_sync_youtube_insights.py`: YouTube RSS transcripts AI analysis
-10. `sync_unorganized_stocks.yml` $\leftrightarrow$ `jobs/local_db/job_sync_unorganized_stocks.py`: Unorganized stocks FX update $\rightarrow$ master matching
-11. `sync_local_db.yml` $\leftrightarrow$ `jobs/local_db/job_sync_local_db.py`: SQLite DB (`stock_master.db`) & 5 CSV dumps compilation
-
-<!--
-### 🤖 11대 대칭 워크플로우 & 파이썬 스크립트:
-1. sync_price_kr.yml <-> jobs/price/job_sync_price_kr.py: 국내 주식/ETF 실시간 시세
-2. sync_price_us.yml <-> jobs/price/job_sync_price_us.py: 미국 주식/ETF 종가 시세
-3. sync_finance_kr.yml <-> jobs/finance/job_sync_finance_kr.py: 국내 재무비율 & 5대 퀀트팩터
-4. sync_finance_us.yml <-> jobs/finance/job_sync_finance_us.py: 미국 재무비율 & 5대 퀀트팩터
-5. sync_master_kr.yml <-> jobs/master/job_sync_master_kr.py: 국내 상장주식 마스터 DB 동기화
-6. sync_master_us.yml <-> jobs/master/job_sync_master_us.py: 미국 상장주식 마스터 DB 동기화
-7. sync_benchmark.yml <-> jobs/macro/job_sync_benchmark.py: 글로벌 벤치마크/환율/금리 동기화
-8. sync_etf_holdings.yml <-> jobs/etf/job_sync_etf_holdings.py: ETF 구성종목(PDF) 증분 Upsert 동기화
-9. sync_youtube_insights.yml <-> jobs/youtube/job_sync_youtube_insights.py: 유튜브 RSS 자막 AI 구조화 분석
-10. sync_unorganized_stocks.yml <-> jobs/local_db/job_sync_unorganized_stocks.py: 미정리 종목 환율 갱신 -> 마스터 매칭 -> 특이사항 이관
-11. sync_local_db.yml <-> jobs/local_db/job_sync_local_db.py: 통합 로컬 SQLite DB 및 CSV 5종 덤프 갱신
+## 🏛️ 1. 워크스페이스 아키텍처 및 역할 분담 (3대 저장소: Private 메인 + Public 서브 + Private 보안금고)
+- k_all_round_portfolio: 7대 자산 퀀트 분석, VaR 산출, 6대 계좌 분리 진단, Gemini AI 주간 리포트 발행
+- update_stock: 국내/미국 실시간 시세, 재무제표 밸류에이션, 전수 마스터, ETF 구성종목, 거시 지표, 유튜브 시황 수집
+- workspace-vault: 환경설정(.env) 중앙 금고, 토큰 캐시 백업, 아키텍처/가이드 통합 문서, 전체 실행 배치 스크립트 허브
 -->
 
 ---
 
-## 🚨 2. Development & Operational Domain Invariants
+## 📊 2. 5 Core Quant Factors & Mathematical Calculation Formulas
+
+1. **`200-Day Moving Average` (Number)**:
+   $$\text{MA}_{200} = \frac{1}{200}\sum_{i=0}^{199} \text{Close}_{t-i}$$
+2. **`Institutional Supply-Demand Line` (Number)**:
+   - Korean Stocks / ETFs: 60-Day Moving Average ($\text{MA}_{60}$)
+   - US Stocks / ETFs: 50-Day Moving Average ($\text{MA}_{50}$)
+3. **`12M Dual Momentum` (Number - %)**:
+   $$\text{Momentum}_{12M} = \frac{\text{Close}_t - \text{Close}_{t-252}}{\text{Close}_{t-252}} \times 100$$
+4. **`52-Week Maximum Drawdown` (Number - %)**:
+   $$\text{Drawdown}_{52W} = \frac{\text{Close}_t - \text{High}_{52W}}{\text{High}_{52W}} \times 100 \quad (\le 0\%)$$
+5. **`60-Day Annualized Volatility` (Number - %)**:
+   $$\sigma_{\text{annual}} = \text{std}(R_{t-59 \dots t}) \times \sqrt{252} \times 100$$
+6. **`Portfolio 95% 1-Week VaR (Value at Risk)` (Currency)**:
+   $$\text{VaR}_{95\%, 1W} = \text{Total Asset} \times 1.65 \times \frac{\sum (w_i \times \sigma_i)}{\sqrt{52}}$$
+7. **`Smart Value Averaging Score`**:
+   $$\text{Score} = \left( \text{Target Weight} + \max(0, -\text{Disparity} \times 2) \right) \times W_{\text{Trend}} \times W_{\text{Drawdown}}$$
+
+<!--
+## 📊 2. 5대 핵심 퀀트 팩터 & 수학적 산출 수식
+1. 200일 이동평균선: 최근 200영업일 종가 평균
+2. 수급선: 한국 60일선 / 미국 50일선
+3. 12M 듀얼 모멘텀: (현재가 - 252영업일전가격) / 252영업일전가격 * 100
+4. 52주 낙폭: (현재가 - 52주최고가) / 52주최고가 * 100 (음수 %)
+5. 60일 연환산 변동성: 60일 일일수익률 표준편차 * sqrt(252) * 100
+6. 포트폴리오 95% 1-Week VaR: 총평가자산 * 1.65 * (가중변동성합 / sqrt(52))
+7. 스마트 밸류 에버리징 점수: (목표비중 + max(0, -괴리율 * 2)) * 추세가중치 * 낙폭가중치
+-->
+
+---
+
+## 🗄️ 3. Notion Core Databases Schema & Interconnections
+
+- **Account Status DB (`tbl_account_status`)**: Total assets, cash deposits, principal, return rates, realized P&L across 6 distinct accounts (ISA, Pension Savings, IRP, CMA, etc.).
+- **Total Stock Holdings DB (`tbl_stock_holdings`)**: Unified holdings across accounts, evaluation amount, valuation P&L, portfolio weight, dividend yield.
+- **Account Holdings Mapping DB (`tbl_account_holdings`)**: Account-Stock N:M relation, purchase price per account, quantity, evaluation profit/loss.
+- **Stocks & Investment Assets DB (`tbl_stocks`)**: Real-time price, 200-day MA, 52W drawdown, 12M momentum, trend signal, valuation metrics (PER/PBR/ROE).
+- **Macro Benchmark DB (`tbl_benchmark`)**: 54 global macroeconomic indicators (Dollar Index, Yield Curve Spread, WTI Crude Oil, Gold, FX rates).
+- **Ontology Dictionary DB (`tbl_dictionary`)**: 521 theme/sector keywords mapping and global GICS categorization rules.
+
+<!--
+## 🗄️ 3. 노션(Notion) 핵심 데이터베이스 스키마 및 연동
+- 투자계좌현황 DB: 계좌별(ISA, 연금저축, IRP, CMA 등) 총자산, 예수금, 원금, 수익률, 확정손익
+- 종목별 보유현황 DB: 전 계좌 통합 종목별 평가금액, 평가손익, 포트폴리오 비중, 배당수익률
+- 계좌별 보유종목 DB: 계좌-종목 N:M 매핑, 계좌별 매수단가, 수량, 평가손익
+- 상장주식/투자주 DB: 실시간 현재가, 200일선, 52주 낙폭, 12M 모멘텀, 추세 시그널, 밸류에이션(PER/PBR/ROE)
+- 벤치마크/거시지표 DB: 54종 거시경제 지표(달러인덱스, 장단기금리차, WTI유가, 금, 환율)
+- 온톨로지 사전 DB: 521개 테마/섹터 키워드 매핑 및 GICS 분류 규칙
+-->
+
+---
+
+## 🚨 4. Project Domain Critical Invariants
 
 1. **Twin-Pair Single Source of Truth (SSOT)**:
    - `k_all_round_portfolio` and `update_stock` are tightly coupled. Common utilities, asset allocation rules, and schema changes MUST be mirrored consistently across both repositories.
-2. **Smart Work Start & Finish Synchronization**:
-   - `├── 1_작업시작_동기화.bat`: Smart Work Start (Environment Detection / Summary / Periodic Strategy Checklist)
-   - `├── 3_작업종료_동기화.bat`: Smart Work Finish (Syntax Validation & Git Commit/Push & Mobile GDrive Sync)
-   - `└── 4_테크레이더_패치적용.bat`: AI Tech Radar One-Click Patch Applier
+2. **Smart Work Start Sync (`1_작업시작_동기화.bat`)**:
+   - Automatically detects environment switching (Office $\leftrightarrow$ Home), alerts uncommitted changes, briefs previous commits, and prompts periodic (7-Day / 30-Day) strategic checklists.
 3. **Automated Git Commit/Push Prohibition**:
    - AI agents MUST stop after code verification. Final commits and pushes MUST be manually executed by the user via `3_작업종료_동기화.bat`.
 4. **Pre-Execution Korean Terminal Command Briefing**:

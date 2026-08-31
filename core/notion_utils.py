@@ -889,11 +889,11 @@ def _get_token_cache_paths() -> List[str]:
     project_root: Path = core_dir.parent
     workspace_root: Path = project_root.parent
 
-    candidates.append(str(Path.cwd() / ".kis_token_cache.json"))
-    candidates.append(str(project_root / ".kis_token_cache.json"))
+    # 1. workspace-vault 보안 금고 백업 경로 최우선 (중앙 백업 SSOT)
+    candidates.append(str(workspace_root / "workspace-vault" / "backups" / ".kis_token_cache.json"))
+    # 2. 개별 프로젝트 data/ 또는 core 디렉토리 경로
+    candidates.append(str(project_root / "data" / ".kis_token_cache.json"))
     candidates.append(str(core_dir / ".kis_token_cache.json"))
-    candidates.append(str(workspace_root / ".kis_token_cache.json"))
-    candidates.append(str(workspace_root / "k_all_round_portfolio" / ".kis_token_cache.json"))
 
     unique_paths = []
     for p in candidates:
