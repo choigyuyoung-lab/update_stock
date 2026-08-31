@@ -1,0 +1,66 @@
+[
+  {
+    "page_id": "3c6f59db-db5b-80e2-a3c2-c042ba10c793",
+    "name": "글로벌인사이트",
+    "type": "재생목록",
+    "url": "https://youtube.com/playlist?list=PLQvqXcm97CTBg0aRuRK5j63PBtWseIW6o&si=a4Tr58vtLRrlTMFI",
+    "channel_id": "PLQvqXcm97CTBg0aRuRK5j63PBtWseIW6o",
+    "max_videos": 1
+  },
+  {
+    "page_id": "3c6f59db-db5b-80af-8249-c80f57fa9e61",
+    "name": "마켓인사이트",
+    "type": "재생목록",
+    "url": "https://youtube.com/playlist?list=PLQvqXcm97CTCf_tqMOL0QpTCoMNwjCje5&si=Da1Sw6t_9JyguUw8",
+    "channel_id": "PLQvqXcm97CTCf_tqMOL0QpTCoMNwjCje5",
+    "max_videos": 1
+  },
+  {
+    "page_id": "3c6f59db-db5b-8041-84e7-ea600b859eb7",
+    "name": "월스트리트 모닝브리핑",
+    "type": "재생목록",
+    "url": "https://youtube.com/playlist?list=PLQvqXcm97CTDwiLccRHz3pnqapPBa_vuH&si=82GREu2hj1KHQi-D",
+    "channel_id": "PLQvqXcm97CTDwiLccRHz3pnqapPBa_vuH",
+    "max_videos": 1
+  },
+  {
+    "page_id": "3c6f59db-db5b-8020-955f-f5b787e2daf4",
+    "name": "오늘의 주식",
+    "type": "재생목록",
+    "url": "https://youtube.com/playlist?list=PLQvqXcm97CTDv0ZzVMvFa_HoeeS7URXHe&si=QXPpcfb42NDu4yH6",
+    "channel_id": "PLQvqXcm97CTDv0ZzVMvFa_HoeeS7URXHe",
+    "max_videos": 1
+  },
+  {
+    "page_id": "3c6f59db-db5b-80ef-aac4-dae6a064c286",
+    "name": "여의도 인사이트",
+    "type": "재생목록",
+    "url": "https://youtube.com/playlist?list=PLQvqXcm97CTBs7AX8GsFCNIwetbbcja1c&si=aoie1xXIJsPP0V3a",
+    "channel_id": "PLQvqXcm97CTBs7AX8GsFCNIwetbbcja1c",
+    "max_videos": 1
+  },
+  {
+    "page_id": "3c6f59db-db5b-8052-9241-c5ffc85d5801",
+    "name": "혁별이 주식TV",
+    "type": "채널",
+    "url": "https://youtube.com/channel/UCuV5ZoimeLhHEUYyivpRIow?si=m8HMTBST6sc3Ebx4",
+    "channel_id": "UCuV5ZoimeLhHEUYyivpRIow",
+    "max_videos": 1
+  },
+  {
+    "page_id": "3c5f59db-db5b-80bc-a0a6-d45221df4688",
+    "name": "파이널콜",
+    "type": "재생목록",
+    "url": "https://youtube.com/playlist?list=PLDF1uHJy6GtCiVzzx9Dz-tl7P0m6TsOHz&si=yyFfwAFbfxaXanLD",
+    "channel_id": "PLDF1uHJy6GtCiVzzx9Dz-tl7P0m6TsOHz",
+    "max_videos": 1
+  },
+  {
+    "page_id": "3c5f59db-db5b-8069-b6ce-ef08edbd36b6",
+    "name": "클로징벨라이브",
+    "type": "재생목록",
+    "url": "https://youtube.com/playlist?list=PLQvqXcm97CTA13yvkhQFRurvvq3iRopiY&si=v0kinkGWd_FBslAf",
+    "channel_id": "PLQvqXcm97CTA13yvkhQFRurvvq3iRopiY",
+    "max_videos": 1
+  }
+]

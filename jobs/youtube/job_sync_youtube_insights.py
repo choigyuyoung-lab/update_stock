@@ -82,11 +82,39 @@ LOCAL_DIR = Path(__file__).resolve().parent
 
 CACHE_PATHS = [PROJECT_ROOT / ".processed_youtube_videos.json", LOCAL_DIR / ".processed_youtube_videos.json"]
 QUEUE_PATHS = [PROJECT_ROOT / ".youtube_pending_queue.json", LOCAL_DIR / ".youtube_pending_queue.json"]
+GUIDE_CACHE_PATHS = [PROJECT_ROOT / ".youtube_guide_sources.json", LOCAL_DIR / ".youtube_guide_sources.json"]
 
 
 # ==============================================================================
 # 2. 캐시 및 영속 대기열(FIFO Queue) 관리자
 # ==============================================================================
+def load_cached_guide_sources() -> List[Dict[str, Any]]:
+    """로컬에 백업/캐시된 유튜브 주소가이드 활성 목록을 로드합니다."""
+    for gp in GUIDE_CACHE_PATHS:
+        if gp.exists():
+            try:
+                with open(gp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list) and data:
+                        return data
+            except Exception as e:
+                logger.warning(f"⚠️ 주소가이드 캐시 읽기 실패 ({gp}): {e}")
+    return []
+
+
+def save_guide_sources_cache(sources: List[Dict[str, Any]]) -> None:
+    """노션에서 로드된 활성화된 주소가이드 목록을 로컬 영속 캐시에 저장합니다."""
+    if not sources:
+        return
+    for gp in GUIDE_CACHE_PATHS:
+        try:
+            gp.parent.mkdir(parents=True, exist_ok=True)
+            with open(gp, "w", encoding="utf-8") as f:
+                json.dump(sources, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"⚠️ 주소가이드 캐시 저장 실패 ({gp}): {e}")
+
+
 def load_processed_videos() -> Set[str]:
     """이미 처리 완료된 유튜브 비디오 ID 집합을 로드합니다."""
     processed = set()
@@ -349,10 +377,13 @@ def resolve_video_info(video_input: str) -> Optional[Dict[str, Any]]:
 # ==============================================================================
 # 4. [Youtube 주소가이드] 노션 DB 연동 관리자
 # ==============================================================================
-def load_active_sources_from_notion(client: Any, guide_db_id: str) -> List[Dict[str, Any]]:
-    """노션 [Youtube 주소가이드 DB]에서 활성화된 채널/재생목록/영상을 로드합니다."""
+def load_active_sources_from_notion(client: Any, guide_db_id: str, use_cache_fallback: bool = True) -> List[Dict[str, Any]]:
+    """노션 [Youtube 주소가이드 DB]에서 활성화된 채널/재생목록/영상을 로드합니다.
+    DNS 또는 네트워크 장애 시 로컬 백업 캐시(.youtube_guide_sources.json)로 자동 폴백합니다."""
     if not guide_db_id:
         logger.warning("⚠️ YOUTUBE_GUIDE_DATABASE_ID가 설정되지 않았습니다.")
+        if use_cache_fallback:
+            return load_cached_guide_sources()
         return []
 
     sources = []
@@ -393,9 +424,46 @@ def load_active_sources_from_notion(client: Any, guide_db_id: str) -> List[Dict[
                 "channel_id": target_id,
                 "max_videos": max_videos,
             })
+
+        if sources:
+            save_guide_sources_cache(sources)
+            logger.info(f"   💾 [주소가이드 캐시 갱신] 활성화 채널/영상 {len(sources)}개 캐시 저장 완료")
+        elif use_cache_fallback:
+            cached = load_cached_guide_sources()
+            if cached:
+                logger.warning(f"⚠️ [Youtube 주소가이드 DB] 활성화 항목이 0건으로 반환됨 -> 기존 로컬 캐시({len(cached)}개) 유지")
+                return cached
+
     except Exception as e:
         logger.error(f"❌ [Youtube 주소가이드 DB] 로드 중 오류: {e}")
+        if use_cache_fallback:
+            cached = load_cached_guide_sources()
+            if cached:
+                print(f"   🛡️ [네트워크/DNS 장애 대응] 로컬 캐시된 주소가이드({len(cached)}개)로 복구하여 스캔을 계속 진행합니다.")
+                return cached
     return sources
+
+
+def prefetch_guide_sources_to_cache(notion_client: Any, guide_db_id: str) -> bool:
+    """일반망 상태에서 노션 [Youtube 주소가이드 DB]의 활성 채널 목록을 미리 가져와 로컬 캐시에 저장합니다."""
+    print("=" * 80)
+    print("📥 [Step 1: 주소가이드 사전 동기화] 노션 DB에서 활성화된 유튜브 채널/영상 목록 선제 수집")
+    print("=" * 80)
+    if not notion_client or not guide_db_id:
+        print("❌ 노션 토큰(NOTION_TOKEN) 또는 YOUTUBE_GUIDE_DATABASE_ID가 설정되지 않았습니다.")
+        return False
+
+    sources = load_active_sources_from_notion(notion_client, guide_db_id, use_cache_fallback=False)
+    if sources:
+        save_guide_sources_cache(sources)
+        print(f"\n✅ [주소가이드 캐시 동기화 완료] 총 {len(sources)}개 활성 채널/영상이 성공적으로 캐싱되었습니다.")
+        for idx, s in enumerate(sources, 1):
+            print(f"   {idx}. [{s.get('type')}] {s.get('name')} (ID: {s.get('channel_id')}, 최대 {s.get('max_videos')}개)")
+        print("-" * 80)
+        return True
+    else:
+        print("⚠️ 노션에서 활성화된 채널/영상을 찾지 못했거나 로드하지 못했습니다.")
+        return False
 
 
 def update_guide_last_scanned(client: Any, page_id: str) -> None:
@@ -1097,6 +1165,8 @@ def process_single_video_item(
     target_guide_page_id = guide_page_id or v.get("guide_page_id")
     if target_guide_page_id:
         append_video_history_to_guide_page(client=notion_client, page_id=target_guide_page_id, video_meta=v, analyzed=analyzed, study_page_id=page_id)
+        if notion_client:
+            update_guide_last_scanned(notion_client, target_guide_page_id)
 
     if page_id:
         processed_ids.add(vid)
@@ -1167,6 +1237,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sort-order", type=str, choices=["asc", "desc"], default="asc", help="영상 게시일시 기준 분석 정렬 순서 (asc: 과거->최신, desc: 최신->과거, 기본값: asc)")
     parser.add_argument("--retention-days", type=int, default=90, help="노션 시황 리포트 보존 기간(일 단위, 기본: 90일/3개월)")
     parser.add_argument("--skip-cleanup", action="store_true", help="90일 초과 과거 리포트 자동 아카이빙(정리) 건너뛰기")
+    parser.add_argument("--prefetch-sources", action="store_true", help="Step 1: 일반망에서 노션 주소가이드 목록을 선제 수집하여 로컬 캐시(.youtube_guide_sources.json)에 저장")
     parser.add_argument("--fetch-only", action="store_true", help="1단계: 유튜브 채널 스캔 및 자막/메타데이터 대기열(Queue) 수집만 수행 (Tailscale 연결 구간용)")
     parser.add_argument("--process-only", action="store_true", help="2단계: 대기열(Queue) 영상 Gemini AI 분석 및 노션 적재만 수행 (일반 인터넷 직통용)")
     return parser.parse_args()
@@ -1175,16 +1246,23 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     mode_str = ""
-    if args.fetch_only:
-        mode_str = " [Phase 1: 자막 수집 모드 (Fetch-Only)]"
+    if getattr(args, "prefetch_sources", False):
+        mode_str = " [Step 1: 주소가이드 사전 동기화 모드 (Prefetch-Only)]"
+    elif args.fetch_only:
+        mode_str = " [Step 2: 자막 수집 모드 (Fetch-Only)]"
     elif args.process_only:
-        mode_str = " [Phase 2: AI 분석 및 노션 적재 모드 (Process-Only)]"
+        mode_str = " [Step 3: AI 분석 및 노션 적재 모드 (Process-Only)]"
 
     print("=" * 80)
     print(f"🚀 [Sync YouTube Insights]{mode_str} 'Youtube 주소가이드' 영속 대기열 기반 AI 시황 동기화 시작")
     print("=" * 80)
 
     notion_client = build_notion_client(NOTION_TOKEN) if NOTION_TOKEN else None
+
+    # Step 1 단독 실행: 노션 주소가이드 선제 수집 후 종료
+    if getattr(args, "prefetch_sources", False):
+        success = prefetch_guide_sources_to_cache(notion_client, YOUTUBE_GUIDE_DB_ID)
+        sys.exit(0 if success else 1)
 
     processed_ids = load_processed_videos()
     sort_order = getattr(args, "sort_order", "asc") or "asc"
@@ -1233,15 +1311,21 @@ def main() -> None:
             print("\n📡 [1단계: 채널 스캔 및 스크립트(자막) 실시간 확보]")
             if args.channels:
                 active_sources = [resolve_channel_target(ch_in, max_videos=args.max_videos) for ch_in in args.channels if ch_in.strip()]
-            elif YOUTUBE_GUIDE_DB_ID and notion_client:
-                print(f"📖 [노션 DB 모드] 'Youtube 주소가이드' DB 연동 확인 ({YOUTUBE_GUIDE_DB_ID[:8]}...)")
-                active_sources = load_active_sources_from_notion(notion_client, YOUTUBE_GUIDE_DB_ID)
-                if not active_sources:
-                    print("   ℹ️ [Youtube 주소가이드 DB] '활성화' 체크된 채널/영상이 없습니다.")
             else:
-                if not YOUTUBE_GUIDE_DB_ID:
-                    logger.warning("⚠️ YOUTUBE_GUIDE_DATABASE_ID 미설정으로 CLI 인자(-c / -v)를 사용하세요.")
-                active_sources = []
+                # 1) 로컬 주소가이드 캐시 우선 탐색 (Tailscale 환경에서 Notion DNS 호출 0회 보장)
+                cached_sources = load_cached_guide_sources()
+                if cached_sources:
+                    print(f"📖 [로컬 주소가이드 모드] 사전 동기화된 가이드 목록 ({len(cached_sources)}개 항목) 기반 스캔 시작")
+                    active_sources = cached_sources
+                elif YOUTUBE_GUIDE_DB_ID and notion_client:
+                    print(f"📖 [노션 DB 모드] 'Youtube 주소가이드' DB 연동 확인 ({YOUTUBE_GUIDE_DB_ID[:8]}...)")
+                    active_sources = load_active_sources_from_notion(notion_client, YOUTUBE_GUIDE_DB_ID)
+                    if not active_sources:
+                        print("   ℹ️ [Youtube 주소가이드 DB] '활성화' 체크된 채널/영상이 없습니다.")
+                else:
+                    if not YOUTUBE_GUIDE_DB_ID:
+                        logger.warning("⚠️ YOUTUBE_GUIDE_DATABASE_ID 미설정으로 CLI 인자(-c / -v)를 사용하세요.")
+                    active_sources = []
 
             queued_vids = {str(item.get("video_id", "")) for item in pending_queue if item.get("video_id")}
             newly_enqueued_count = 0
@@ -1289,7 +1373,7 @@ def main() -> None:
                                 newly_enqueued_count += 1
                                 print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
 
-                    if guide_page_id and notion_client:
+                    if guide_page_id and notion_client and not args.fetch_only:
                         update_guide_last_scanned(notion_client, guide_page_id)
 
                 # 채널 또는 재생목록
@@ -1333,7 +1417,7 @@ def main() -> None:
                                 newly_enqueued_count += 1
                                 print(f"      ⚠️ [자막 미확보 감지] 텍스트 자막 미제공/50자 미만 -> 🎥 Gemini 멀티모달 Fallback 대기열 등록 완료")
 
-                    if guide_page_id and notion_client:
+                    if guide_page_id and notion_client and not args.fetch_only:
                         update_guide_last_scanned(notion_client, guide_page_id)
 
             # 대기열 게시일시(KST) 기준 글로벌 정렬 적용 (기본: 과거 -> 최신순)

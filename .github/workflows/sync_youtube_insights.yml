@@ -33,9 +33,18 @@ jobs:
         run: pip install -r requirements.txt
 
       # -------------------------------------------------------------
-      # 🌟 [Phase 1: 자막 수집 구간] 스마트폰 Exit Node 연동 (일회성 ephemeral 노드)
+      # 🌟 [Step 1: 주소가이드 사전 수집] Tailscale 연결 전 초고속 일반망에서 노션 DB 로드 & 캐싱
       # -------------------------------------------------------------
-      - name: "Connect Tailscale Smartphone Exit Node (Ephemeral)"
+      - name: "Step 1: Fetch YouTube Guide from Notion (Normal Internet)"
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          YOUTUBE_GUIDE_DATABASE_ID: ${{ secrets.YOUTUBE_GUIDE_DATABASE_ID }}
+        run: python -m jobs.youtube.job_sync_youtube_insights --prefetch-sources
+
+      # -------------------------------------------------------------
+      # 🌟 [Step 2: 자막 수집 구간] 스마트폰 Exit Node 연동 (일회성 ephemeral 노드)
+      # -------------------------------------------------------------
+      - name: "Step 2: Connect Tailscale Smartphone Exit Node (Ephemeral)"
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
@@ -44,22 +53,19 @@ jobs:
           tags: ${{ secrets.TS_TAGS || secrets.TAILSCALE_TAGS || 'tag:ci' }}
           args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true
 
-      # 🚀 1단계: 유튜브 자막 및 메타데이터 수집만 실행 (Tailscale Exit Node 구간, 약 10~20초 소요)
-      - name: "Phase 1: Fetch YouTube Subtitles & Enqueue"
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          YOUTUBE_GUIDE_DATABASE_ID: ${{ secrets.YOUTUBE_GUIDE_DATABASE_ID }}
+      # 🚀 2단계: 유튜브 자막 및 메타데이터 수집만 실행 (Tailscale Exit Node 구간, 노션 호출 0회)
+      - name: "Step 3: Fetch YouTube Subtitles & Enqueue"
         run: python -m jobs.youtube.job_sync_youtube_insights --fetch-only
 
-      # 🌟 1단계 완료 즉시 Tailscale 해제 (Tailscale 무료 시간 카운팅 중지 및 ephemeral 노드 자동 삭제)
-      - name: "Disconnect Tailscale Immediately"
+      # 🌟 자막 수집 완료 즉시 Tailscale 해제 (Tailscale 무료 시간 카운팅 중지 및 ephemeral 노드 자동 삭제)
+      - name: "Step 4: Disconnect Tailscale Immediately"
         if: always()
         run: sudo tailscale logout || true
 
       # -------------------------------------------------------------
-      # 🚀 [Phase 2: AI 분석 및 노션 적재 구간] GitHub 초고속 일반망 직통 (Tailscale 0초 소모)
+      # 🚀 [Step 3: AI 분석 및 노션 적재 구간] GitHub 초고속 일반망 직통 (Tailscale 0초 소모)
       # -------------------------------------------------------------
-      - name: "Phase 2: Run Gemini AI Analysis & Notion Sync"
+      - name: "Step 5: Run Gemini AI Analysis & Notion Sync"
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
@@ -71,9 +77,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python -m jobs.youtube.job_sync_youtube_insights --process-only
 
-      # 🌟 최신 처리 완료 캐시 및 대기열(Queue)을 GitHub 저장소에 자동 커밋 & 푸시
+      # 🌟 최신 처리 완료 캐시, 대기열(Queue) 및 주소가이드 캐시를 GitHub 저장소에 자동 커밋 & 푸시
       - name: Commit & Push Updated Cache & Queue
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore(youtube): auto-sync youtube insights queue and cache [skip ci]"
-          file_pattern: ".processed_youtube_videos.json .youtube_pending_queue.json jobs/youtube/.processed_youtube_videos.json jobs/youtube/.youtube_pending_queue.json"
+          file_pattern: ".processed_youtube_videos.json .youtube_pending_queue.json .youtube_guide_sources.json jobs/youtube/.processed_youtube_videos.json jobs/youtube/.youtube_pending_queue.json jobs/youtube/.youtube_guide_sources.json"
