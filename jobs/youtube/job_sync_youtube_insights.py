@@ -72,7 +72,7 @@ load_dotenv()
 # ==============================================================================
 # 1. 환경 설정 및 영속 캐시/대기열 경로
 # ==============================================================================
-NOTION_TOKEN = get_env_var("NOTION_TOKEN")
+NOTION_TOKEN = get_env_var("NOTION_TOKEN", required=False)
 YOUTUBE_DB_ID = get_db_id("YOUTUBE_DATABASE_ID", ["YOUTUBE_DB_ID"], required=False)
 YOUTUBE_GUIDE_DB_ID = get_db_id("YOUTUBE_GUIDE_DATABASE_ID", ["YOUTUBE_GUIDE_DB_ID"], required=False)
 UNORGANIZED_DB_ID = get_db_id("UNORGANIZED_DATABASE_ID", ["UNORGANIZED_DB_ID"], required=False)
