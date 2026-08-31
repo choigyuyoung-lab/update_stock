@@ -1,4 +1,5 @@
 .idea/
+.venv
 .venv/
 .venv311/
 .env
