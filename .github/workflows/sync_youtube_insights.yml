@@ -42,7 +42,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID || secrets.TAILSCALE_OAUTH_CLIENT_ID || secrets.OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET || secrets.TAILSCALE_OAUTH_SECRET || secrets.OAUTH_SECRET }}
           tags: ${{ secrets.TS_TAGS || secrets.TAILSCALE_TAGS || 'tag:ci' }}
-          args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true --ephemeral
+          args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true
 
       # 🚀 1단계: 유튜브 자막 및 메타데이터 수집만 실행 (Tailscale Exit Node 구간, 약 10~20초 소요)
       - name: "Phase 1: Fetch YouTube Subtitles & Enqueue"
