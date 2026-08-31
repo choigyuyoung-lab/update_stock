@@ -5,7 +5,7 @@ sync_manager.py
 1. 회사 PC <-> 집 PC 간 작업 환경 전환 감지 및 미동기화 파일 경고
 2. 직전 작업/커밋 이력 간략 요약 브리핑
 3. 주간/월간 주기별 전략 고도화 & 코드 수정 영감 체크리스트 질문 팝업
-4. 2대 저장소(update_stock & k_all_round_portfolio) 원클릭 양방향 Git 동기화
+4. 3대 저장소(update_stock & k_all_round_portfolio & workspace-vault) 원클릭 양방향 Git 동기화
 """
 
 import sys
@@ -41,7 +41,7 @@ RESET = "\033[0m"
 
 TOOLS_DIR: Path = Path(__file__).resolve().parent
 PROJECT_ROOT: Path = TOOLS_DIR.parent if TOOLS_DIR.name == "tools" else TOOLS_DIR
-WORKSPACE_ROOT: Path = PROJECT_ROOT.parent if PROJECT_ROOT.name in ["update_stock", "k_all_round_portfolio"] else PROJECT_ROOT
+WORKSPACE_ROOT: Path = PROJECT_ROOT.parent if PROJECT_ROOT.name in ["update_stock", "k_all_round_portfolio", "workspace-vault"] else PROJECT_ROOT
 STATE_FILE: Path = WORKSPACE_ROOT / "update_stock" / "data" / ".sync_state.json"
 
 
@@ -71,11 +71,36 @@ def get_location() -> str:
         return "🏠 개인 환경"
 
 
+def ensure_workspace_vault_cloned() -> None:
+    """회사 PC나 신규 PC에 workspace-vault 저장소가 없는 경우 자동으로 GitHub에서 Clone합니다."""
+    vault_path: Path = WORKSPACE_ROOT / "workspace-vault"
+    if not (vault_path / ".git").exists():
+        print(f"\n{CYAN}📦 [신규 저장소 감지] workspace-vault 저장소가 로컬에 없습니다. GitHub에서 자동 Clone 진행...{RESET}")
+        clone_url = "https://github.com/choigyuyoung-lab/workspace-vault.git"
+        code, stdout, stderr = run_cmd(["git", "clone", clone_url], cwd=WORKSPACE_ROOT)
+        if code == 0:
+            print(f"  {GREEN}✅ workspace-vault 자동 클론 성공!{RESET}")
+            # .venv 정션 링크 자동 연결
+            venv_src = WORKSPACE_ROOT / "update_stock" / ".venv"
+            venv_dst = vault_path / ".venv"
+            if venv_src.exists() and not venv_dst.exists():
+                try:
+                    if sys.platform == "win32":
+                        subprocess.run(["cmd", "/c", "mklink", "/J", str(venv_dst), str(venv_src)], capture_output=True)
+                except Exception:
+                    pass
+        else:
+            print(f"  {RED}❌ workspace-vault 클론 실패: {stderr}{RESET}")
+
+
 def get_all_target_repos() -> List[Dict[str, Any]]:
-    """update_stock 및 k_all_round_portfolio 2대 저장소 경로를 정확히 탐색합니다."""
+    """update_stock, k_all_round_portfolio, workspace-vault 3대 저장소 경로를 정확히 탐색합니다."""
+    ensure_workspace_vault_cloned()
+
     target_defs = [
         ("update_stock", "update_stock (금융 데이터 허브)"),
-        ("k_all_round_portfolio", "k_all_round_portfolio (자산배분 & AI 리포트)")
+        ("k_all_round_portfolio", "k_all_round_portfolio (자산배분 & AI 리포트)"),
+        ("workspace-vault", "workspace-vault (보안 설정·백업·문서 금고)")
     ]
 
     repos: List[Dict[str, Any]] = []
@@ -88,6 +113,63 @@ def get_all_target_repos() -> List[Dict[str, Any]]:
         repos.append({"name": PROJECT_ROOT.name, "path": PROJECT_ROOT})
 
     return repos
+
+
+def sync_env_vault_backup() -> None:
+    """작업 종료 시 프로젝트의 .env 및 중요 토큰 캐시를 workspace-vault로 안전 백업합니다."""
+    vault_repo = WORKSPACE_ROOT / "workspace-vault"
+    if not (vault_repo / ".git").exists():
+        return
+
+    env_vault_dir = vault_repo / "env_vault"
+    backups_dir = vault_repo / "backups"
+    docs_dir = vault_repo / "docs"
+
+    env_vault_dir.mkdir(parents=True, exist_ok=True)
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. .env 파일 백업
+    env_copied = 0
+    for proj_name in ["update_stock", "k_all_round_portfolio"]:
+        src_env = WORKSPACE_ROOT / proj_name / ".env"
+        dst_env = env_vault_dir / f"{proj_name}.env"
+        if src_env.exists():
+            shutil.copy2(src_env, dst_env)
+            env_copied += 1
+
+    # 2. 토큰 캐시 백업
+    token_cache = WORKSPACE_ROOT / ".kis_token_cache.json"
+    if token_cache.exists():
+        shutil.copy2(token_cache, backups_dir / ".kis_token_cache.json")
+
+    if env_copied > 0:
+        print(f"  🔐 [보안 금고 백업] .env({env_copied}건)을 workspace-vault로 안전 백업했습니다.")
+
+
+def restore_env_from_vault() -> None:
+    """작업 시작 시 workspace-vault의 최신 .env를 각 프로젝트로 자동 동기화 복원합니다."""
+    vault_repo = WORKSPACE_ROOT / "workspace-vault"
+    if not (vault_repo / ".git").exists():
+        return
+
+    env_vault_dir = vault_repo / "env_vault"
+    backups_dir = vault_repo / "backups"
+
+    # 1. .env 양방향 최신 복원/동기화 (USB 불필요)
+    if env_vault_dir.exists():
+        for proj_name in ["update_stock", "k_all_round_portfolio"]:
+            dst_env = WORKSPACE_ROOT / proj_name / ".env"
+            src_env = env_vault_dir / f"{proj_name}.env"
+            if src_env.exists():
+                shutil.copy2(src_env, dst_env)
+                print(f"  ✨ [자동 동기화] {proj_name}/.env 설정을 workspace-vault 금고와 최신 일치화했습니다.")
+
+    # 2. 토큰 캐시 복구
+    token_backup = backups_dir / ".kis_token_cache.json"
+    token_target = WORKSPACE_ROOT / ".kis_token_cache.json"
+    if token_backup.exists() and not token_target.exists():
+        shutil.copy2(token_backup, token_target)
 
 
 def load_sync_state() -> Dict[str, Any]:
@@ -208,7 +290,7 @@ def mode_start() -> None:
 
     print(f"{CYAN}{'-'*70}{RESET}")
 
-    # 1. 2대 저장소 상태 점검 & Pull
+    # 1. 3대 저장소 상태 점검 & Pull
     for idx, repo in enumerate(repos, 1):
         print(f"\n{GREEN}▶ [{idx}/{len(repos)}] {repo['name']}{RESET}")
 
@@ -229,9 +311,15 @@ def mode_start() -> None:
         else:
             print(f"  {RED}❌ git pull 실패: {stderr}{RESET}")
 
-        # .env 존재 점검
-        if not (repo["path"] / ".env").exists():
-            print(f"  {RED}⚠️ [경고] .env 파일이 없습니다! API 키/토큰을 확인해주세요.{RESET}")
+    # 보안 금고에서 .env 누락 시 자동 복구 점검
+    restore_env_from_vault()
+
+    for repo in repos:
+        # .env 존재 점검 (notion.Sync 제외)
+        if repo["name"].startswith("update_stock") or repo["name"].startswith("k_all_round"):
+            if not (repo["path"] / ".env").exists():
+                print(f"  {RED}⚠️ [경고] {repo['name']}에 .env 파일이 없습니다! API 키/토큰을 확인해주세요.{RESET}")
+
 
     # 2. 직전 작업 이력 요약 브리핑
     for repo in repos:
@@ -249,7 +337,7 @@ def mode_start() -> None:
                 for name, domain_link, summary in tool_matches[:3]:
                     clean_summary = summary.split(".")[0] if "." in summary else summary[:60]
                     print(f"  💡 {BOLD}{name}{RESET} ({domain_link.split('/')[0].strip()}): {GRAY}{clean_summary}{RESET}")
-                print(f"  👉 {YELLOW}원클릭 패치 실행: 4_테크레이더_패치적용.bat (또는 python -m tools.tool_apply_tech_radar_patch){RESET}")
+                print(f"  👉 {YELLOW}원클릭 패치 실행: 6_테크레이더_패치적용.bat (또는 python -m tools.tool_apply_tech_radar_patch){RESET}")
         except Exception as e:
             print(f"  ⚠️ 테크 레이더 브리핑 읽기 오류 ({radar_report_path}): {e}")
 
@@ -379,8 +467,9 @@ def mode_finish() -> None:
     else:
         print(f"  {YELLOW}⚠️ 프롬프트 생성 도구를 찾을 수 없습니다: {prompt_tool_path}{RESET}")
 
-    # [3단계] 2대 저장소 Git Commit & Push (GitHub 반영 - 프롬프트 변경분 포함 100% 동기화)
-    print(f"\n{CYAN}🚀 [3단계] 2대 저장소 Git Commit & Push (GitHub 반영)...{RESET}")
+    # [3단계] 보안 금고 백업 및 3대 저장소 Git Commit & Push (GitHub 반영)
+    print(f"\n{CYAN}🚀 [3단계] 보안 금고 백업 및 3대 저장소 Git Commit & Push (GitHub 반영)...{RESET}")
+    sync_env_vault_backup()
     state["last_location"] = location
     state["last_sync_time"] = now_str
     save_sync_state(state)
