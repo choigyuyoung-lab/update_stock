@@ -1,0 +1,71 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "🚀 [1] 작업 시작 동기화 (Git Pull)",
+            "type": "shell",
+            "windows": {
+                "command": "${workspaceFolder}/../workspace-vault/1_작업시작_동기화.bat"
+            },
+            "linux": {
+                "command": "bash ${workspaceFolder}/../workspace-vault/scripts_linux/1_작업시작_동기화.sh"
+            },
+            "osx": {
+                "command": "bash ${workspaceFolder}/../workspace-vault/scripts_linux/1_작업시작_동기화.sh"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true
+            }
+        },
+        {
+            "label": "🏁 [2] 작업 종료 동기화 (Git Commit & Push)",
+            "type": "shell",
+            "windows": {
+                "command": "${workspaceFolder}/../workspace-vault/2_작업종료_동기화.bat"
+            },
+            "linux": {
+                "command": "bash ${workspaceFolder}/../workspace-vault/scripts_linux/2_작업종료_동기화.sh"
+            },
+            "osx": {
+                "command": "bash ${workspaceFolder}/../workspace-vault/scripts_linux/2_작업종료_동기화.sh"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true
+            }
+        },
+        {
+            "label": "📊 [3] 전체 퀀트데이터 배치 실행",
+            "type": "shell",
+            "windows": {
+                "command": "${workspaceFolder}/../workspace-vault/3_전체_퀀트데이터_배치실행.bat"
+            },
+            "linux": {
+                "command": "bash ${workspaceFolder}/../workspace-vault/scripts_linux/3_전체_퀀트데이터_배치실행.sh"
+            },
+            "osx": {
+                "command": "bash ${workspaceFolder}/../workspace-vault/scripts_linux/3_전체_퀀트데이터_배치실행.sh"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true
+            }
+        }
+    ]
+}
