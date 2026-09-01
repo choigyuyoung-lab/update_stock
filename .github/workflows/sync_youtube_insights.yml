@@ -48,6 +48,7 @@ jobs:
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY || secrets.TS_AUTHKEY }}
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID || secrets.TAILSCALE_OAUTH_CLIENT_ID || secrets.OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET || secrets.TAILSCALE_OAUTH_SECRET || secrets.OAUTH_SECRET }}
           tags: ${{ secrets.TS_TAGS || secrets.TAILSCALE_TAGS || 'tag:ci' }}
