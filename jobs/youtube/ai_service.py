@@ -49,7 +49,7 @@ logging.getLogger("google_genai").setLevel(logging.ERROR)
 logging.getLogger("google.genai").setLevel(logging.ERROR)
 
 DEFAULT_MAX_RETRIES = 2
-DEFAULT_BASE_DELAY = 3.0
+DEFAULT_BASE_DELAY = 1.0
 
 
 # ==============================================================================

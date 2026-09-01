@@ -33,43 +33,10 @@ jobs:
         run: pip install -r requirements.txt
 
       # -------------------------------------------------------------
-      # 🌟 [Step 1: 주소가이드 사전 수집] Tailscale 연결 전 초고속 일반망에서 노션 DB 로드 & 캐싱
+      # 🚀 [Step 1: 대기열 AI 분석 및 노션 적재] 일반 인터넷망 직통 (Tailscale 연결 0초 소모)
+      # 1. 스크립트 저장된 동영상 분석 먼저. 분석이 모두 끝나면 제미나이 API 종료
       # -------------------------------------------------------------
-      - name: "Step 1: Fetch YouTube Guide from Notion (Normal Internet)"
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          YOUTUBE_GUIDE_DATABASE_ID: ${{ secrets.YOUTUBE_GUIDE_DATABASE_ID || secrets.YOUTUBE_GUIDE_DB_ID }}
-        run: python -m jobs.youtube.job_sync_youtube_insights --prefetch-sources
-
-      # -------------------------------------------------------------
-      # 🌟 [Step 2: 스마트폰 Exit Node 연결] 일회성 ephemeral 노드 연동
-      # -------------------------------------------------------------
-      - name: "Step 2: Connect Tailscale Smartphone Exit Node (Ephemeral)"
-        uses: tailscale/github-action@v3
-        continue-on-error: true
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID || secrets.TAILSCALE_OAUTH_CLIENT_ID || secrets.OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET || secrets.TAILSCALE_OAUTH_SECRET || secrets.OAUTH_SECRET }}
-          tags: ${{ secrets.TS_TAGS || secrets.TAILSCALE_TAGS || 'tag:ci' }}
-          args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true
-
-      # -------------------------------------------------------------
-      # 🚀 [Step 3: 자막 수집 구간] 유튜브 자막 및 메타데이터 수집만 실행 (Tailscale Exit Node 구간, 노션 호출 0회)
-      # -------------------------------------------------------------
-      - name: "Step 3: Fetch YouTube Subtitles & Enqueue"
-        run: python -m jobs.youtube.job_sync_youtube_insights --fetch-only
-
-      # -------------------------------------------------------------
-      # 🌟 [Step 4: Tailscale 즉시 해제] Tailscale 무료 시간 소모 방지 및 ephemeral 노드 자동 삭제
-      # -------------------------------------------------------------
-      - name: "Step 4: Disconnect Tailscale Immediately"
-        if: always()
-        run: sudo tailscale logout || true
-
-      # -------------------------------------------------------------
-      # 🚀 [Step 5: AI 분석 및 노션 적재 구간] GitHub 초고속 일반망 직통 (Tailscale 0초 소모)
-      # -------------------------------------------------------------
-      - name: "Step 5: Run Gemini AI Analysis & Notion Sync"
+      - name: "Step 1: Process Pending Queue (Gemini AI & Notion)"
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
@@ -79,10 +46,50 @@ jobs:
           UNORGANIZED_DATABASE_ID: ${{ secrets.UNORGANIZED_DATABASE_ID || secrets.UNORGANIZED_DB_ID }}
           UNIFIED_NOTES_DATABASE_ID: ${{ secrets.UNIFIED_NOTES_DATABASE_ID || secrets.UNIFIED_NOTES_DB_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GOOGLE_API_KEY }}
-        run: python -m jobs.youtube.job_sync_youtube_insights --process-only
+        run: python -m jobs.youtube.job_sync_youtube_insights --process-queue-only
 
       # -------------------------------------------------------------
-      # 🌟 [Step 6: 캐시/대기열 자동 커밋] 최신 처리 완료 캐시, 대기열(Queue) 및 주소가이드 캐시를 GitHub 저장소에 자동 커밋 & 푸시
+      # 📡 [Step 2: 신규 영상 초고속 탐지] 일반 초고속 인터넷망에서 YouTube RSS 피드 0.3초 병렬 스캔
+      # 2. 유튜브 목록에서 새로운 동영상이 있는지 여부 파악 -> 신규 동영상 있는 채널에서 주소 확보
+      # -------------------------------------------------------------
+      - name: "Step 2: Detect New Videos via Fast RSS (Normal Internet)"
+        id: detect_step
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          YOUTUBE_GUIDE_DATABASE_ID: ${{ secrets.YOUTUBE_GUIDE_DATABASE_ID || secrets.YOUTUBE_GUIDE_DB_ID }}
+        run: python -m jobs.youtube.job_sync_youtube_insights --detect-new-videos
+
+      # -------------------------------------------------------------
+      # 🌟 [Step 3: 스마트폰 Exit Node 연결] 신규 영상이 1개 이상 있을 때만 조건부 연결 (없으면 0초 스킵!)
+      # 3. Tailscale 접속
+      # -------------------------------------------------------------
+      - name: "Step 3: Connect Tailscale Smartphone Exit Node (Conditional)"
+        if: steps.detect_step.outputs.has_new == 'true'
+        uses: tailscale/github-action@v3
+        continue-on-error: true
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID || secrets.TAILSCALE_OAUTH_CLIENT_ID || secrets.OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET || secrets.TAILSCALE_OAUTH_SECRET || secrets.OAUTH_SECRET }}
+          tags: ${{ secrets.TS_TAGS || secrets.TAILSCALE_TAGS || 'tag:ci' }}
+          args: --exit-node=${{ secrets.TAILSCALE_EXIT_NODE || secrets.HOME_EXIT_NODE_IP || '100.97.245.94' }} --exit-node-allow-lan-access=false --accept-routes=true
+
+      # -------------------------------------------------------------
+      # 📥 [Step 4: yt-dlp 전용 자막 수집] 신규 영상에 대해서만 자막 추출 -> 대기열 등록 & 정렬
+      # 4. yt-dlp만 사용해서 자막 수집, 안되면 pass / 5. 수집된 자막 대기열에 집어넣고 정렬
+      # -------------------------------------------------------------
+      - name: "Step 4: Fetch Subtitles via yt-dlp for New Videos"
+        if: steps.detect_step.outputs.has_new == 'true'
+        run: python -m jobs.youtube.job_sync_youtube_insights --fetch-target-videos
+
+      # -------------------------------------------------------------
+      # 🌟 [Step 5: Tailscale 즉시 해제] Exit Node 사용 완료 후 즉시 연결 해제
+      # -------------------------------------------------------------
+      - name: "Step 5: Disconnect Tailscale Immediately"
+        if: always() && steps.detect_step.outputs.has_new == 'true'
+        run: sudo tailscale logout || true
+
+      # -------------------------------------------------------------
+      # 🌟 [Step 6: 캐시/대기열 자동 커밋] 갱신된 캐시, 대기열 및 주소가이드 캐시 Git 자동 커밋 & 푸시
       # -------------------------------------------------------------
       - name: Commit & Push Updated Cache & Queue
         if: always()
