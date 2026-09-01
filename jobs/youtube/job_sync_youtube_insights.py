@@ -18,6 +18,7 @@ import re
 import time
 import logging
 import argparse
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -90,6 +91,45 @@ DETECTED_CACHE_PATHS = [PROJECT_ROOT / ".new_youtube_videos_detected.json", LOCA
 # ==============================================================================
 # 2. 캐시 및 영속 대기열(FIFO Queue) 관리자
 # ==============================================================================
+def _safe_json_loads_with_conflict_healing(text: str) -> Any:
+    """Git 충돌 마커(<<<<<<<, =======, >>>>>>>)가 포함된 손상된 JSON 텍스트를 스스로 정제하고 안전하게 파싱합니다."""
+    if not text or not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # 1. 충돌 마커 라인 제거
+    cleaned = re.sub(r'<<<<<<<[^\n]*\n', '', text)
+    cleaned = re.sub(r'=======[^\n]*\n', '', cleaned)
+    cleaned = re.sub(r'>>>>>>>[^\n]*\n', '', cleaned)
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    # 2. 정규식 기반 개별 JSON 객체 추출 안전 복구
+    chunks = re.split(r'\n\s*\},?\s*\n\s*\{\n', cleaned)
+    items = []
+    for c in chunks:
+        c = c.strip()
+        if not c.startswith('{'):
+            c = '{' + c
+        if not c.endswith('}'):
+            c = c + '}'
+        c = re.sub(r'^\{\s*\[\s*\{', '{', c)
+        c = re.sub(r'\}\s*\]\s*\}$', '}', c)
+        try:
+            obj = json.loads(c)
+            if isinstance(obj, dict):
+                items.append(obj)
+        except Exception:
+            pass
+
+    return items if items else None
+
+
 def save_detected_new_videos(videos: List[Dict[str, Any]]) -> None:
     """새롭게 감지된 미수집 동영상 목록을 임시 캐시 파일에 저장합니다."""
     for dp in DETECTED_CACHE_PATHS:
@@ -107,12 +147,14 @@ def load_detected_new_videos() -> List[Dict[str, Any]]:
         if dp.exists():
             try:
                 with open(dp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return data
+                    content = f.read()
+                data = _safe_json_loads_with_conflict_healing(content)
+                if isinstance(data, list):
+                    return data
             except Exception:
                 pass
     return []
+
 
 def load_cached_guide_sources() -> List[Dict[str, Any]]:
     """로컬에 백업/캐시된 유튜브 주소가이드 활성 목록을 로드합니다."""
@@ -120,9 +162,10 @@ def load_cached_guide_sources() -> List[Dict[str, Any]]:
         if gp.exists():
             try:
                 with open(gp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list) and data:
-                        return data
+                    content = f.read()
+                data = _safe_json_loads_with_conflict_healing(content)
+                if isinstance(data, list) and data:
+                    return data
             except Exception as e:
                 logger.warning(f"⚠️ 주소가이드 캐시 읽기 실패 ({gp}): {e}")
     return []
@@ -148,7 +191,9 @@ def load_processed_videos() -> Set[str]:
         if cp.exists():
             try:
                 with open(cp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    content = f.read()
+                data = _safe_json_loads_with_conflict_healing(content)
+                if data:
                     processed.update(data if isinstance(data, list) else data.keys())
             except Exception as e:
                 logger.warning(f"⚠️ 캐시 읽기 실패 ({cp}): {e}")
@@ -172,26 +217,28 @@ def load_pending_queue() -> List[Dict[str, Any]]:
     모든 영속 대기열 경로(PROJECT_ROOT, LOCAL_DIR)에서 데이터를 안전하게 로드하고 지능형으로 병합합니다.
     - 단일 빈 파일([])이 다른 경로의 정상 스크립트를 덮어쓰거나 지우지 못하도록 보호
     - 스크립트(transcript)가 채워진 객체를 최우선으로 보존
+    - Git 충돌 마커 자동 복구 내장
     """
     merged_map: Dict[str, Dict[str, Any]] = {}
     for qp in QUEUE_PATHS:
         if qp.exists():
             try:
                 with open(qp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        for item in data:
-                            if not isinstance(item, dict):
-                                continue
-                            vid = item.get("video_id") or extract_video_id(item.get("url", ""))
-                            if not vid:
-                                continue
-                            if vid not in merged_map:
+                    content = f.read()
+                data = _safe_json_loads_with_conflict_healing(content)
+                if isinstance(data, list):
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        vid = item.get("video_id") or extract_video_id(item.get("url", ""))
+                        if not vid:
+                            continue
+                        if vid not in merged_map:
+                            merged_map[vid] = item
+                        else:
+                            # 기존 항목에 자막이 없는데 새 항목에 자막이 있는 경우 자막 버전으로 보존
+                            if not merged_map[vid].get("transcript") and item.get("transcript"):
                                 merged_map[vid] = item
-                            else:
-                                # 기존 항목에 자막이 없는데 새 항목에 자막이 있는 경우 자막 버전으로 보존
-                                if not merged_map[vid].get("transcript") and item.get("transcript"):
-                                    merged_map[vid] = item
             except Exception as e:
                 logger.warning(f"⚠️ 대기열 읽기 실패 ({qp}): {e}")
     return list(merged_map.values())
@@ -812,11 +859,8 @@ def format_snippets_to_text(items: List[Any]) -> str:
     return " ".join(formatted_chunks).strip()
 
 
-def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dict[str, Any]]:
-    """
-    [4. yt-dlp만 사용해서 자막 수집, 안되면 pass]
-    타임아웃 10초 설정으로 신속하게 자막 및 메타데이터를 추출합니다.
-    """
+def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str, Dict[str, Any]]:
+    """yt-dlp 라이브러리를 통해 1회 다이렉트 자막 추출을 수행합니다."""
     if not yt_dlp:
         return None, "", {}
 
@@ -827,14 +871,16 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": ["ko", "ko-KR", "ko-orig", "en", "en-US", "auto"],
+        "subtitleslangs": ["ko", "ko-KR", "ko-orig", "en", "en-US"],
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
         "nocheckcertificate": True,
-        "socket_timeout": 10,
+        "socket_timeout": 6,
+        "retries": 0,
+        "fragment_retries": 0,
         "logger": _YtDlpSilentLogger(),
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"], "skip": ["dash", "hls"]}}
+        "extractor_args": {"youtube": {"player_client": ["android"], "skip": ["dash", "hls"]}}
     }
     if proxy_url:
         ydl_opts["proxy"] = proxy_url
@@ -862,7 +908,7 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
                     sub_url = next((f.get("url") for f in cand_subs if f.get("ext") in ["srv3", "vtt", "ttml"]), cand_subs[0].get("url"))
 
                 if sub_url:
-                    res = requests.get(sub_url, timeout=10)
+                    res = requests.get(sub_url, timeout=6)
                     if res.status_code == 200:
                         if "json3" in sub_url or res.headers.get("content-type", "").startswith("application/json"):
                             try:
@@ -886,6 +932,23 @@ def extract_transcript_via_ytdlp(video_id: str) -> Tuple[Optional[str], str, Dic
     except Exception as e:
         logger.debug(f"yt-dlp 자막 추출 pass ({video_id}): {e}")
         return None, "", {}
+
+
+def extract_transcript_via_ytdlp(video_id: str, timeout_sec: int = 12) -> Tuple[Optional[str], str, Dict[str, Any]]:
+    """
+    [4. yt-dlp만 사용해서 자막 수집, 안되면 pass]
+    ThreadPoolExecutor 기반 엄격한 12초 하드 타임아웃을 적용하여 프로세스 멈춤(Hang)을 원천 차단합니다.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_extract_transcript_ytdlp_raw, video_id)
+        try:
+            return future.result(timeout=timeout_sec)
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"      ⏱️ [yt-dlp 타임아웃 {timeout_sec}초 초과] 영상(ID: {video_id}) -> 즉시 Pass")
+            return None, "", {}
+        except Exception as e:
+            logger.debug(f"      ⚠️ [yt-dlp 예외] 영상(ID: {video_id}): {e} -> 즉시 Pass")
+            return None, "", {}
 
 
 def extract_transcript_via_youtube_transcript_api(video_id: str) -> Tuple[Optional[str], str]:
@@ -1361,10 +1424,11 @@ def process_pending_queue_pipeline(
     return total_new_processed
 
 
-def fetch_subtitles_for_targets(target_video_ids: Optional[List[str]] = None, sort_order: str = "asc") -> int:
+def fetch_subtitles_for_targets(target_video_ids: Optional[List[str]] = None, sort_order: str = "asc", max_fetch_count: int = 4) -> int:
     """
     [3. Tailscale 접속 -> 4. yt-dlp만 사용해서 자막 수집, 안되면 pass -> 5. 수집된 자막 대기열에 집어넣고 정렬]
     신규 동영상들에 대해서만 Tailscale 환경에서 yt-dlp로 다이렉트 자막 수집을 수행합니다.
+    (1회 최대 max_fetch_count개 수집하여 멈춤 및 긴 소요 시간 방지)
     """
     print("=" * 80)
     print("📥 [자막 수집 단계: yt-dlp 전용] 스마트폰 Tailscale Exit Node 경유 자막 추출")
@@ -1385,10 +1449,17 @@ def fetch_subtitles_for_targets(target_video_ids: Optional[List[str]] = None, so
     pending_queue = load_pending_queue()
     existing_q_vids = {item.get("video_id") for item in pending_queue if item.get("video_id")}
 
-    print(f"🎯 수집 대상: 총 {len(target_vids)}개 영상")
+    # 대기열에 없는 신규 타겟만 추출
+    filtered_vids = [vid for vid in target_vids if vid not in existing_q_vids]
+    if max_fetch_count and len(filtered_vids) > max_fetch_count:
+        print(f"🎯 수집 대상: 총 {len(filtered_vids)}개 중 이번 회차 최대 {max_fetch_count}개 우선 수집")
+        filtered_vids = filtered_vids[:max_fetch_count]
+    else:
+        print(f"🎯 수집 대상: 총 {len(filtered_vids)}개 영상")
+
     success_count = 0
 
-    for idx, vid in enumerate(target_vids, 1):
+    for idx, vid in enumerate(filtered_vids, 1):
         if vid in existing_q_vids:
             print(f"   [{idx}/{len(target_vids)}] ⏳ (ID: {vid}) 이미 대기열에 존재함 -> 스킵")
             continue
