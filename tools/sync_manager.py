@@ -721,7 +721,15 @@ def mode_finish() -> None:
             else:
                 print(f"  {YELLOW}커밋 건너뜀 (변경 없음){RESET}")
 
+        # 원격 저장소에 백그라운드 액션(유튜브/시세 봇 등) 커밋이 있을 수 있으므로 rebase pull 선행
+        run_cmd(["git", "pull", "--rebase", "origin", "main"], cwd=repo["path"])
+
         p_code, _, p_err = run_cmd(["git", "push", "origin", "main"], cwd=repo["path"])
+        if p_code != 0:
+            # 푸시 실패 시 1회 더 rebase pull 후 재시도
+            run_cmd(["git", "pull", "--rebase", "origin", "main"], cwd=repo["path"])
+            p_code, _, p_err = run_cmd(["git", "push", "origin", "main"], cwd=repo["path"])
+
         if p_code == 0:
             print(f"  {GREEN}🚀 {repo['name']} GitHub 원격 저장소 Push 성공!{RESET}")
         else:
