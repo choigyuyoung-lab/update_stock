@@ -2211,7 +2211,9 @@ def get_local_master_db_path() -> Optional[str]:
     candidates: List[Path] = [
         project_root / "data" / "stock_master.db",
         workspace_root / "update_stock" / "data" / "stock_master.db",
+        workspace_root / "Portfolio" / "update_stock" / "data" / "stock_master.db",
         core_dir / "data" / "stock_master.db",
+        Path("d:/Github IDE/Portfolio/update_stock/data/stock_master.db"),
         Path("d:/Github IDE/update_stock/data/stock_master.db"),
     ]
     for p in candidates:
