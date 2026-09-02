@@ -48,8 +48,8 @@ logging.getLogger("google").setLevel(logging.ERROR)
 logging.getLogger("google_genai").setLevel(logging.ERROR)
 logging.getLogger("google.genai").setLevel(logging.ERROR)
 
-DEFAULT_MAX_RETRIES = 2
-DEFAULT_BASE_DELAY = 1.0
+DEFAULT_MAX_RETRIES = 1
+DEFAULT_BASE_DELAY = 0.5
 
 
 # ==============================================================================
@@ -207,22 +207,19 @@ class AIService:
                 except Exception as exc:
                     err_str = str(exc)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        logger.warning("⚠️ [Gemini AI] 쿼터 제한(429) 감지 -> 다음 모델로 전환합니다.")
-                        time.sleep(3.0)
+                        logger.warning(f"⚠️ [Gemini AI] 쿼터 제한(429) 감지 ({model_name}) -> 다음 대체 모델로 0.5초 내 즉시 전환")
+                        time.sleep(0.5)
                         break
                     if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str.lower():
-                        logger.warning(f"⚠️ [Gemini AI] 일시적 서비스 과부하(503) 감지 ({model_name}, 시도 {attempt}/{max_retries})")
-                        if attempt < max_retries:
-                            time.sleep(base_delay * attempt)
-                            continue
-                        else:
-                            break
+                        logger.warning(f"⚠️ [Gemini AI] 일시적 서비스 과부하(503) 감지 ({model_name}) -> 다음 대체 모델로 0.5초 내 즉시 전환")
+                        time.sleep(0.5)
+                        break
                     if "404" in err_str or "NOT_FOUND" in err_str:
                         break
 
-                    logger.warning(f"⚠️ [Gemini AI] 호출 오류 ({model_name}, 시도 {attempt}/{max_retries}): {err_str}")
-                    if attempt < max_retries:
-                        time.sleep(base_delay * attempt)
+                    logger.warning(f"⚠️ [Gemini AI] 호출 오류 ({model_name}): {err_str}")
+                    time.sleep(0.5)
+                    break
 
         logger.error("❌ YouTube 자막 Structured Output 분석에 최종 실패하였습니다.")
         return None
