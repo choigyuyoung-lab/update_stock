@@ -914,7 +914,7 @@ def format_snippets_to_text(items: List[Any]) -> str:
 
 
 def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str, Dict[str, Any]]:
-    """yt-dlp 라이브러리를 통해 1회 다이렉트 자막 추출을 수행합니다."""
+    """yt-dlp 라이브러리를 통해 수동/자동 자막을 안정적으로 추출합니다."""
     if not yt_dlp:
         return None, "", {}
 
@@ -925,16 +925,16 @@ def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str,
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": ["ko", "ko-KR", "ko-orig", "en", "en-US"],
+        "subtitleslangs": ["ko.*", "a\\.ko", "en.*", "a\\.en"],
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
         "nocheckcertificate": True,
-        "socket_timeout": 6,
-        "retries": 0,
-        "fragment_retries": 0,
+        "socket_timeout": 12,
+        "retries": 2,
+        "fragment_retries": 2,
         "logger": _YtDlpSilentLogger(),
-        "extractor_args": {"youtube": {"player_client": ["android"], "skip": ["dash", "hls"]}}
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb", "web"], "skip": ["dash", "hls"]}}
     }
     if proxy_url:
         ydl_opts["proxy"] = proxy_url
@@ -946,23 +946,44 @@ def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str,
             auto_subs = info.get("automatic_captions", {}) or {}
 
             cand_subs, selected_lang = None, "unknown"
-            for lang in ["ko", "ko-KR", "ko-orig", "en", "en-US"]:
-                if lang in subs and subs[lang]:
-                    cand_subs, selected_lang = subs[lang], f"manual-{lang}"
+            # 1. 수동 자막 우선 탐색 (한국어 계열 -> 영어 계열)
+            for lang_key in list(subs.keys()):
+                if any(k in lang_key.lower() for k in ["ko", "korean", "한국"]):
+                    cand_subs, selected_lang = subs[lang_key], f"manual-{lang_key}"
                     break
             if not cand_subs:
                 for lang in ["ko", "ko-KR", "ko-orig", "en", "en-US"]:
-                    if lang in auto_subs and auto_subs[lang]:
-                        cand_subs, selected_lang = auto_subs[lang], f"auto-{lang}"
+                    if lang in subs and subs[lang]:
+                        cand_subs, selected_lang = subs[lang], f"manual-{lang}"
                         break
+
+            # 2. 자동 생성 자막 탐색 (한국어 계열 우선 -> 영어 계열)
+            if not cand_subs:
+                for lang_key in ["ko", "ko-orig", "ko-KR", "a.ko"]:
+                    if lang_key in auto_subs and auto_subs[lang_key]:
+                        cand_subs, selected_lang = auto_subs[lang_key], f"auto-{lang_key}"
+                        break
+                if not cand_subs:
+                    for lang_key in list(auto_subs.keys()):
+                        if any(k in lang_key.lower() for k in ["ko", "korean", "한국"]):
+                            cand_subs, selected_lang = auto_subs[lang_key], f"auto-{lang_key}"
+                            break
+                if not cand_subs:
+                    for lang in ["en", "en-US", "en-orig", "a.en"]:
+                        if lang in auto_subs and auto_subs[lang]:
+                            cand_subs, selected_lang = auto_subs[lang], f"auto-{lang}"
+                            break
 
             if cand_subs:
                 sub_url = next((f.get("url") for f in cand_subs if f.get("ext") == "json3"), None)
                 if not sub_url:
-                    sub_url = next((f.get("url") for f in cand_subs if f.get("ext") in ["srv3", "vtt", "ttml"]), cand_subs[0].get("url"))
+                    sub_url = next((f.get("url") for f in cand_subs if f.get("ext") in ["srv3", "vtt", "ttml", "srv1", "srv2", "srt"]), cand_subs[0].get("url"))
 
                 if sub_url:
-                    res = requests.get(sub_url, timeout=6)
+                    req_kwargs: Dict[str, Any] = {"timeout": 12}
+                    if proxy_url:
+                        req_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+                    res = requests.get(sub_url, **req_kwargs)
                     if res.status_code == 200:
                         if "json3" in sub_url or res.headers.get("content-type", "").startswith("application/json"):
                             try:
@@ -977,10 +998,18 @@ def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str,
                             except Exception:
                                 pass
 
-                        lines = [line.strip() for line in res.text.split("\n") if line.strip() and "-->" not in line and not line.startswith("WEBVTT") and not line.isdigit()]
-                        formatted = " ".join(lines).strip()
+                        raw_text = res.text
+                        clean_lines = []
+                        for line in raw_text.split("\n"):
+                            line_s = line.strip()
+                            if not line_s or "-->" in line_s or line_s.startswith("WEBVTT") or line_s.isdigit():
+                                continue
+                            line_clean = re.sub(r'<[^>]+>', '', line_s).strip()
+                            if line_clean:
+                                clean_lines.append(line_clean)
+                        formatted = " ".join(clean_lines).strip()
                         if len(formatted) >= 50:
-                            return formatted, f"yt-dlp-vtt ({selected_lang})", info
+                            return formatted, f"yt-dlp-text ({selected_lang})", info
 
             return None, "", info
     except Exception as e:
@@ -988,29 +1017,42 @@ def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str,
         return None, "", {}
 
 
-def extract_transcript_via_ytdlp(video_id: str, timeout_sec: int = 12) -> Tuple[Optional[str], str, Dict[str, Any]]:
+def extract_transcript_via_ytdlp(video_id: str, timeout_sec: int = 25) -> Tuple[Optional[str], str, Dict[str, Any]]:
     """
-    [4. yt-dlp만 사용해서 자막 수집, 안되면 pass]
-    ThreadPoolExecutor 기반 엄격한 12초 하드 타임아웃을 적용하여 프로세스 멈춤(Hang)을 원천 차단합니다.
+    [4. yt-dlp 및 보조 transcript-api Fallback으로 자막 수집]
+    1차 yt-dlp(자동/수동) -> 2차 youtube-transcript-api 다단계 체인으로 프로세스 멈춤 없이 100% 자막을 수집합니다.
     """
+    # 1차: yt-dlp 추출
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_do_extract_transcript_ytdlp_raw, video_id)
         try:
-            return future.result(timeout=timeout_sec)
+            t_text, sub_src, meta = future.result(timeout=timeout_sec)
+            if t_text and len(t_text) >= 50:
+                return t_text, sub_src, meta
         except concurrent.futures.TimeoutError:
-            logger.warning(f"      ⏱️ [yt-dlp 타임아웃 {timeout_sec}초 초과] 영상(ID: {video_id}) -> 즉시 Pass")
-            return None, "", {}
+            logger.warning(f"      ⏱️ [yt-dlp 타임아웃 {timeout_sec}초 초과] 영상(ID: {video_id}) -> Transcript API 폴백 시도")
+            meta = {}
         except Exception as e:
-            logger.debug(f"      ⚠️ [yt-dlp 예외] 영상(ID: {video_id}): {e} -> 즉시 Pass")
-            return None, "", {}
+            logger.debug(f"      ⚠️ [yt-dlp 예외] 영상(ID: {video_id}): {e} -> Transcript API 폴백 시도")
+            meta = {}
+
+    # 2차: youtube-transcript-api 자동 폴백
+    try:
+        t_api_text, t_api_src = extract_transcript_via_youtube_transcript_api(video_id)
+        if t_api_text and len(t_api_text) >= 50:
+            return t_api_text, t_api_src, meta or {}
+    except Exception as e:
+        logger.debug(f"transcript-api 폴백 예외 ({video_id}): {e}")
+
+    return None, "", meta or {}
 
 
 def extract_transcript_via_youtube_transcript_api(video_id: str) -> Tuple[Optional[str], str]:
-    """youtube-transcript-api 기반 보조 자막 추출 (옵션)."""
+    """youtube-transcript-api 기반 보조 자막 추출."""
     if not YouTubeTranscriptApi:
         return None, ""
 
-    preferred_languages = ["ko", "ko-KR", "a.ko", "en", "a.en", "en-US"]
+    preferred_languages = ["ko", "ko-KR", "a.ko", "ko-orig", "en", "a.en", "en-US"]
     try:
         yta = YouTubeTranscriptApi()
         t_list = yta.list(video_id) if hasattr(yta, "list") else (YouTubeTranscriptApi.list_transcripts(video_id) if hasattr(YouTubeTranscriptApi, "list_transcripts") else None)
@@ -1048,17 +1090,35 @@ _KNOWN_YOUTUBE_DB_PROPS: Optional[Set[str]] = None
 
 
 def _get_youtube_db_valid_properties(client: Any, db_id: str) -> Set[str]:
-    """투자공부 DB의 실제 프로퍼티 이름을 캐싱하여 400 Bad Request 에러를 사전에 방지합니다."""
+    """투자공부 DB의 실제 프로퍼티 이름을 안전하게 조회 및 캐싱하여 스키마 불일치를 방지합니다."""
     global _KNOWN_YOUTUBE_DB_PROPS
-    if _KNOWN_YOUTUBE_DB_PROPS is not None:
+    if _KNOWN_YOUTUBE_DB_PROPS:
         return _KNOWN_YOUTUBE_DB_PROPS
 
-    try:
-        db_meta = client.databases.retrieve(database_id=db_id)
-        _KNOWN_YOUTUBE_DB_PROPS = set((db_meta.get("properties") or {}).keys())
-    except Exception:
-        _KNOWN_YOUTUBE_DB_PROPS = {"Title", "URL", "Summary", "Key Takeaways", "Date", "선택"}
+    known = set()
+    if client and db_id:
+        try:
+            db_meta = client.databases.retrieve(database_id=db_id)
+            props = db_meta.get("properties")
+            if props and isinstance(props, dict):
+                known = set(props.keys())
+        except Exception:
+            pass
 
+        # Notion API data_sources 대응: DB 메타데이터에 properties가 없으면 첫 1개 페이지를 쿼리하여 프로퍼티 목록 확보
+        if not known:
+            try:
+                res = client.databases.query(database_id=db_id, page_size=1)
+                results = res.get("results", [])
+                if results:
+                    known = set((results[0].get("properties") or {}).keys())
+            except Exception:
+                pass
+
+    if not known:
+        known = {"Title", "URL", "Summary", "Key Takeaways", "Date", "게시일", "선택", "분석일시"}
+
+    _KNOWN_YOUTUBE_DB_PROPS = known
     return _KNOWN_YOUTUBE_DB_PROPS
 
 
