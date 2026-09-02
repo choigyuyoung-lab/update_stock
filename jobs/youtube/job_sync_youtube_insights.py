@@ -1614,22 +1614,26 @@ def main() -> None:
     print(f"🚀 [Sync YouTube Insights] 통합 하이브리드 파이프라인 시작")
     print("=" * 80)
 
-    # 1) 대기열에 남은 스크립트 먼저 분석
-    process_pending_queue_pipeline(
-        notion_client=notion_client,
-        batch_limit=args.batch_limit,
-        sort_order=sort_order,
-        force=args.force,
-        retention_days=args.retention_days,
-        skip_cleanup=args.skip_cleanup,
-    )
+    # 1) 대기열에 남은 스크립트 먼저 분석 (AI 오류가 발생해도 신규 수집을 절대 차단하지 않음)
+    try:
+        process_pending_queue_pipeline(
+            notion_client=notion_client,
+            batch_limit=args.batch_limit,
+            sort_order=sort_order,
+            force=args.force,
+            retention_days=args.retention_days,
+            skip_cleanup=args.skip_cleanup,
+        )
+    except Exception as e:
+        logger.error(f"⚠️ [Step 1: AI 분석 일시 오류] 대기열 처리 중 예외 발생 (수집 파이프라인으로 계속 진행): {e}")
 
-    # 2) 신규 동영상 탐지
-    new_videos = detect_new_videos_pipeline(notion_client=notion_client)
-
-    # 3) 신규 영상이 있다면 자막 수집
-    if new_videos:
-        fetch_subtitles_for_targets(sort_order=sort_order)
+    # 2) 신규 동영상 탐지 및 자막 수집 (AI 분석 성공/실패와 무관하게 100% 독립 실행)
+    try:
+        new_videos = detect_new_videos_pipeline(notion_client=notion_client)
+        if new_videos:
+            fetch_subtitles_for_targets(sort_order=sort_order)
+    except Exception as e:
+        logger.error(f"⚠️ [Step 2~3: 신규 영상 및 자막 수집 오류]: {e}")
 
     print("\n" + "=" * 80)
     print("🎉 [동기화 완료] 유튜브 AI 시황 동기화 파이프라인이 정상 종료되었습니다.")

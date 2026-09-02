@@ -37,6 +37,7 @@ jobs:
       # 1. 스크립트 저장된 동영상 분석 먼저. 분석이 모두 끝나면 제미나이 API 종료
       # -------------------------------------------------------------
       - name: "Step 1: Process Pending Queue (Gemini AI & Notion)"
+        continue-on-error: true
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
