@@ -98,22 +98,25 @@ class DynamicGeminiModelManager:
             all_models = list(self.client.models.list())
             discovered = []
 
-            EXCLUDE_PATTERNS = ["image", "tts", "lyria", "nano-banana", "deep-research", "embedding"]
+            EXCLUDE_PATTERNS = [
+                "image", "tts", "lyria", "nano", "deep-research", "embedding",
+                "pro", "omni", "customtools"
+            ]
 
             for m in all_models:
                 m_name = getattr(m, "name", "") or str(m)
                 clean_name = m_name.replace("models/", "").strip()
                 clean_lower = clean_name.lower()
                 
-                # 이미지/음성/임베딩 전용 모델 배제
+                # 무겁거나 저쿼터/특수 전용 모델 배제
                 if any(pat in clean_lower for pat in EXCLUDE_PATTERNS):
                     continue
 
                 # 지원 액션 검증
                 actions = getattr(m, "supported_actions", []) or getattr(m, "supported_generation_methods", [])
                 
-                # 텍스트 생성이 가능한 Flash/Lite/Pro 모델만 선별
-                if ("flash" in clean_lower or "pro" in clean_lower) and (not actions or "generateContent" in actions):
+                # 텍스트 생성이 가능한 Flash/Lite 모델만 선별
+                if "flash" in clean_lower and (not actions or "generateContent" in actions):
                     discovered.append(clean_name)
 
             if discovered:
@@ -155,9 +158,9 @@ class DynamicGeminiModelManager:
             self.blacklist.add(model_name)
             logger.error(f"❌ [Gemini Router] [{model_name}] 404 미지원 모델 감지 -> 블랙리스트 등록 (영구 제외)")
         elif "503" in err_upper or "UNAVAILABLE" in err_upper:
-            # 503은 일시적 과부하이므로 5초 쿨다운
-            self.cooldown_tracker[model_name] = now + 5.0
-            logger.warning(f"⚠️ [Gemini Router] [{model_name}] 503 일시적 과부하 감지 -> 5초 쿨다운 등록")
+            # 503은 일시적 과부하이므로 10초 쿨다운
+            self.cooldown_tracker[model_name] = now + 10.0
+            logger.warning(f"⚠️ [Gemini Router] [{model_name}] 503 일시적 과부하 감지 -> 10초 쿨다운 등록")
 
 
 # ==============================================================================
@@ -205,8 +208,8 @@ class GeminiSafeExecutor:
         response_schema: Type[BaseModel],
         max_input_chars: int = 45000,
         temperature: float = 0.0,
-        max_retries_per_model: int = 1,
-        base_delay: float = 1.0,
+        max_retries_per_model: int = 2,
+        base_delay: float = 2.0,
     ) -> Optional[BaseModel]:
         """
         Pydantic 스키마(Structured Outputs)를 강제하여 구조화된 데이터를 안전하게 반환합니다.
@@ -249,21 +252,24 @@ class GeminiSafeExecutor:
                     err_str = str(exc)
                     self.router.record_failure(model_name, err_str)
 
-                    # 503은 지수 백오프 재시도
-                    if "503" in err_str or "UNAVAILABLE" in err_str:
+                    # 503은 같은 모델에서 지수 백오프 대기 후 재시도
+                    if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str.lower():
                         if attempt < max_retries_per_model:
                             delay = base_delay * (2 ** (attempt - 1))
+                            logger.warning(f"⚠️ [Gemini Router] [{model_name}] 503 과부하 감지 -> {delay:.1f}초 대기 후 재시도 ({attempt}/{max_retries_per_model})")
                             time.sleep(delay)
                             continue
-                        break
+                        else:
+                            time.sleep(1.5)
+                            break
 
-                    # 429 또는 404는 즉시 다음 순위 모델로 전환
+                    # 429 또는 404는 즉시 다음 순위 모델로 전환 (1.0초 대기)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "404" in err_str or "NOT_FOUND" in err_str:
-                        time.sleep(0.5)
+                        time.sleep(1.0)
                         break
 
                     logger.warning(f"⚠️ [Gemini Router] 호출 오류 ({model_name}): {err_str}")
-                    time.sleep(0.5)
+                    time.sleep(1.0)
                     break
 
         logger.error("❌ 모든 가용 모델 풀에서 Structured Output 생성에 최종 실패하였습니다.")
