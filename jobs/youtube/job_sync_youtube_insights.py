@@ -913,6 +913,36 @@ def format_snippets_to_text(items: List[Any]) -> str:
     return " ".join(formatted_chunks).strip()
 
 
+def _parse_yt_subtitle_content(res_text: str, sub_url: str, selected_lang: str, info: Dict[str, Any]) -> Tuple[Optional[str], str, Dict[str, Any]]:
+    """yt-dlp로 가져온 자막 응답(json3/vtt/srv1 등)을 파싱하여 포맷된 텍스트를 반환합니다."""
+    if "json3" in sub_url or res_text.strip().startswith("{"):
+        try:
+            import json as _json
+            data = _json.loads(res_text)
+            snippets = [
+                {"text": "".join([s.get("utf8", "") for s in ev.get("segs", []) if "utf8" in s]).strip(), "start": ev.get("tStartMs", 0) / 1000.0}
+                for ev in data.get("events", [])
+            ]
+            formatted = format_snippets_to_text([s for s in snippets if s["text"] and s["text"] != "\n"])
+            if len(formatted) >= 50:
+                return formatted, f"yt-dlp ({selected_lang})", info
+        except Exception:
+            pass
+
+    clean_lines = []
+    for line in res_text.split("\n"):
+        line_s = line.strip()
+        if not line_s or "-->" in line_s or line_s.startswith("WEBVTT") or line_s.isdigit():
+            continue
+        line_clean = re.sub(r'<[^>]+>', '', line_s).strip()
+        if line_clean:
+            clean_lines.append(line_clean)
+    formatted = " ".join(clean_lines).strip()
+    if len(formatted) >= 50:
+        return formatted, f"yt-dlp-text ({selected_lang})", info
+    return None, "", info
+
+
 def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str, Dict[str, Any]]:
     """yt-dlp 라이브러리를 통해 수동/자동 자막을 안정적으로 추출합니다."""
     if not yt_dlp:
@@ -921,7 +951,7 @@ def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str,
     url = f"https://www.youtube.com/watch?v={video_id}"
     proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("TAILSCALE_PROXY")
 
-    ydl_opts = {
+    ydl_opts: Dict[str, Any] = {
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
@@ -980,36 +1010,21 @@ def _do_extract_transcript_ytdlp_raw(video_id: str) -> Tuple[Optional[str], str,
                     sub_url = next((f.get("url") for f in cand_subs if f.get("ext") in ["srv3", "vtt", "ttml", "srv1", "srv2", "srt"]), cand_subs[0].get("url"))
 
                 if sub_url:
-                    req_kwargs: Dict[str, Any] = {"timeout": 12}
+                    req_kwargs: Dict[str, Any] = {
+                        "timeout": 12,
+                        "headers": {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+                            "Referer": f"https://www.youtube.com/watch?v={video_id}",
+                        }
+                    }
                     if proxy_url:
                         req_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
                     res = requests.get(sub_url, **req_kwargs)
                     if res.status_code == 200:
-                        if "json3" in sub_url or res.headers.get("content-type", "").startswith("application/json"):
-                            try:
-                                data = res.json()
-                                snippets = [
-                                    {"text": "".join([s.get("utf8", "") for s in ev.get("segs", []) if "utf8" in s]).strip(), "start": ev.get("tStartMs", 0) / 1000.0}
-                                    for ev in data.get("events", [])
-                                ]
-                                formatted = format_snippets_to_text([s for s in snippets if s["text"] and s["text"] != "\n"])
-                                if len(formatted) >= 50:
-                                    return formatted, f"yt-dlp ({selected_lang})", info
-                            except Exception:
-                                pass
-
-                        raw_text = res.text
-                        clean_lines = []
-                        for line in raw_text.split("\n"):
-                            line_s = line.strip()
-                            if not line_s or "-->" in line_s or line_s.startswith("WEBVTT") or line_s.isdigit():
-                                continue
-                            line_clean = re.sub(r'<[^>]+>', '', line_s).strip()
-                            if line_clean:
-                                clean_lines.append(line_clean)
-                        formatted = " ".join(clean_lines).strip()
-                        if len(formatted) >= 50:
-                            return formatted, f"yt-dlp-text ({selected_lang})", info
+                        result, src, _ = _parse_yt_subtitle_content(res.text, sub_url, selected_lang, info)
+                        if result:
+                            return result, src, info
 
             return None, "", info
     except Exception as e:
@@ -1054,8 +1069,17 @@ def extract_transcript_via_youtube_transcript_api(video_id: str) -> Tuple[Option
 
     preferred_languages = ["ko", "ko-KR", "a.ko", "ko-orig", "en", "a.en", "en-US"]
     try:
-        yta = YouTubeTranscriptApi()
-        t_list = yta.list(video_id) if hasattr(yta, "list") else (YouTubeTranscriptApi.list_transcripts(video_id) if hasattr(YouTubeTranscriptApi, "list_transcripts") else None)
+        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("TAILSCALE_PROXY")
+        try:
+            from youtube_transcript_api.proxies import GenericProxyConfig
+            proxy_config = GenericProxyConfig(http_url=proxy_url, https_url=proxy_url) if proxy_url else None
+            yta = YouTubeTranscriptApi(proxy_config=proxy_config)
+        except Exception:
+            yta = YouTubeTranscriptApi()
+
+        t_list = yta.list(video_id) if hasattr(yta, "list") else (
+            YouTubeTranscriptApi.list_transcripts(video_id) if hasattr(YouTubeTranscriptApi, "list_transcripts") else None
+        )
         if t_list:
             target = None
             try:
@@ -1068,7 +1092,8 @@ def extract_transcript_via_youtube_transcript_api(video_id: str) -> Tuple[Option
                         target = t
                         break
             if target:
-                items = getattr(target.fetch(), "snippets", target.fetch())
+                fetched = target.fetch()
+                items = getattr(fetched, "snippets", fetched)
                 text = format_snippets_to_text(items)
                 lang_code = getattr(target, "language_code", "unknown")
                 if len(text) >= 50:

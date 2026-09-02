@@ -36,4 +36,6 @@ dataSources.local.xml
 # 외부 참조 레포지토리
 open-trading-api/
 
-
+# YouTube 쿠키 파일 (보안 정보 - 절대 커밋 금지)
+cookies.txt
+*.txt.cookies
