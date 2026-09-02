@@ -37,6 +37,12 @@ except ImportError:
     genai = None
     types = None
 
+# 프로젝트 루트 디렉토리를 sys.path에 등록하여 core 모듈 접근 보장
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.gemini_router import GeminiSafeExecutor, DynamicGeminiModelManager
 from services.prompt_manager import get_fia_youtube_system_instruction
 
 import warnings
@@ -106,7 +112,7 @@ class YouTubeAnalysisResult(BaseModel):
 # 2. Google GenAI 클라이언트 및 서비스 클래스
 # ==============================================================================
 class AIService:
-    """Google GenAI SDK 기반 AI 서비스 클라이언트 (Structured Outputs 지원)"""
+    """공통 스마트 라우터(GeminiSafeExecutor) 기반 AI 서비스 클라이언트 (Structured Outputs 지원)"""
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = (
@@ -115,30 +121,11 @@ class AIService:
             or os.environ.get("GOOGLE_API_KEY")
             or ""
         ).strip()
-        self.client: Any = None
-        self._init_client()
-
-    def _init_client(self) -> None:
-        """google-genai 클라이언트를 초기화합니다."""
-        if not self.api_key:
-            logger.warning("⚠️ GEMINI_API_KEY가 설정되지 않았습니다.")
-            return
-
-        if genai is None or types is None:
-            logger.error("❌ 'google-genai' 패키지가 설치되지 않았습니다. pip install google-genai 를 실행하세요.")
-            self.client = None
-            return
-
-        try:
-            self.client = genai.Client(api_key=self.api_key)
-            logger.info("✅ Google GenAI 클라이언트 초기화 완료")
-        except Exception as e:
-            logger.error(f"❌ Google GenAI 클라이언트 초기화 실패: {e}")
-            self.client = None
+        self.executor = GeminiSafeExecutor(api_key=self.api_key)
 
     def is_available(self) -> bool:
-        """API 키 및 클라이언트 사용 가능 여부를 확인합니다."""
-        return bool(self.api_key and self.client is not None)
+        """API 키 및 실행 엔진 사용 가능 여부를 확인합니다."""
+        return self.executor.is_available()
 
     def analyze_youtube_transcript(
         self,
@@ -149,7 +136,8 @@ class AIService:
     ) -> Optional[YouTubeAnalysisResult]:
         """
         유튜브 자막 텍스트와 메타데이터를 입력받아
-        Pydantic YouTubeAnalysisResult 스키마를 강제한 Structured Outputs로 정밀 분석합니다.
+        공통 스마트 라우터를 통해 Pydantic YouTubeAnalysisResult 스키마를 강제한 Structured Outputs로 정밀 분석합니다.
+        (TPM 250K 방어를 위한 45,000자 자동 다이어트 및 Lite 500회 우선 라우팅)
         """
         if not self.is_available():
             logger.error("❌ Gemini API 클라이언트를 사용할 수 없습니다. GEMINI_API_KEY를 확인하세요.")
@@ -157,69 +145,46 @@ class AIService:
 
         fia_system_prompt = get_fia_youtube_system_instruction()
 
+        # TPM 250K 한도 초과 방지를 위한 45,000자 안전 슬라이싱
+        safe_transcript = transcript_text[:45000] if transcript_text else ""
+
         user_content = f"""[영상 기본 정보]
 - 채널명: {video_meta.get('channel_name', '')}
 - 영상 원제목: {video_meta.get('title', '')}
 - 영상 URL: {video_meta.get('url', '')}
 - 게시일자: {video_meta.get('publish_date', '')}
 
-[자막 스크립트 전문 (전체 스캔)]
-{transcript_text[:250000]}
+[자막 스크립트 전문 (핵심 구간 분석)]
+{safe_transcript}
 """
 
-        models_to_try = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+        parsed_result = self.executor.safe_generate_structured(
+            contents=user_content,
+            system_instruction=fia_system_prompt,
+            response_schema=YouTubeAnalysisResult,
+            max_input_chars=45000,
+            temperature=0.0,
+            max_retries_per_model=max_retries,
+            base_delay=base_delay,
+        )
 
-        for model_name in models_to_try:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    config = types.GenerateContentConfig(
-                        system_instruction=fia_system_prompt,
-                        response_mime_type="application/json",
-                        response_schema=YouTubeAnalysisResult,
-                        temperature=0.0,
-                    )
+        if parsed_result and isinstance(parsed_result, YouTubeAnalysisResult):
+            meta_pub_date = str(video_meta.get("publish_date", "")).strip()
+            if meta_pub_date and meta_pub_date.lower() not in ["null", "none"]:
+                parsed_result.publish_date = meta_pub_date
+            elif not parsed_result.publish_date or parsed_result.publish_date.lower() in ["null", "none"]:
+                parsed_result.publish_date = meta_pub_date
 
-                    response = self.client.models.generate_content(
-                        model=model_name,
-                        contents=user_content,
-                        config=config,
-                    )
+            # 티커 기본 정규화 (대문자 및 6자리 zfill)
+            for item in (parsed_result.assets or []):
+                t_clean = (item.ticker or "").strip().upper()
+                if t_clean.isdigit() and 1 <= len(t_clean) <= 6:
+                    item.ticker = t_clean.zfill(6)
+                else:
+                    item.ticker = t_clean
 
-                    if response and response.text:
-                        parsed_result = YouTubeAnalysisResult.model_validate_json(response.text.strip())
-                        meta_pub_date = str(video_meta.get("publish_date", "")).strip()
-                        if meta_pub_date and meta_pub_date.lower() not in ["null", "none"]:
-                            parsed_result.publish_date = meta_pub_date
-                        elif not parsed_result.publish_date or parsed_result.publish_date.lower() in ["null", "none"]:
-                            parsed_result.publish_date = meta_pub_date
-                        
-                        # 티커 기본 정규화 (대문자 및 6자리 zfill)
-                        for item in (parsed_result.assets or []):
-                            t_clean = (item.ticker or "").strip().upper()
-                            if t_clean.isdigit() and 1 <= len(t_clean) <= 6:
-                                item.ticker = t_clean.zfill(6)
-                            else:
-                                item.ticker = t_clean
-
-                        logger.info(f"✅ [Gemini AI] Structured Output 파싱 성공 (모델: {model_name})")
-                        return parsed_result
-
-                except Exception as exc:
-                    err_str = str(exc)
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        logger.warning(f"⚠️ [Gemini AI] 쿼터 제한(429) 감지 ({model_name}) -> 다음 대체 모델로 0.5초 내 즉시 전환")
-                        time.sleep(0.5)
-                        break
-                    if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str.lower():
-                        logger.warning(f"⚠️ [Gemini AI] 일시적 서비스 과부하(503) 감지 ({model_name}) -> 다음 대체 모델로 0.5초 내 즉시 전환")
-                        time.sleep(0.5)
-                        break
-                    if "404" in err_str or "NOT_FOUND" in err_str:
-                        break
-
-                    logger.warning(f"⚠️ [Gemini AI] 호출 오류 ({model_name}): {err_str}")
-                    time.sleep(0.5)
-                    break
+            logger.info("✅ [Gemini AI] Structured Output 파싱 및 정규화 완료")
+            return parsed_result
 
         logger.error("❌ YouTube 자막 Structured Output 분석에 최종 실패하였습니다.")
         return None
@@ -233,7 +198,7 @@ class AIService:
     ) -> Optional[YouTubeAnalysisResult]:
         """
         유튜브 텍스트 자막을 추출할 수 없는 경우(IP 차단, 자막 비활성화 등),
-        Google Gemini Multimodal API를 통해 YouTube 영상/오디오 및 메타데이터를 직접 분석하여
+        Google Gemini Multimodal API 및 메타데이터를 직접 분석하여
         동일한 Pydantic YouTubeAnalysisResult 스키마로 구조화된 시황 인텔리전스를 반환합니다.
         """
         if not self.is_available():
@@ -261,80 +226,33 @@ class AIService:
 영상 원문/오디오 및 제공된 메타데이터를 종합 분석하여 시장 심리, 3대 핵심 시사점, 심층 상세 분석, 언급된 주요 종목(티커)을 Pydantic 구조화 스키마(YouTubeAnalysisResult)에 맞춰 한국어 명사형 종결어미(~함, ~임, ~필요, ~권고, ~전망)로 추출하십시오.
 """
 
-        # 1. Gemini 멀티모달 Part 생성 시도
-        video_part = None
-        if types is not None and hasattr(types, "Part") and hasattr(types.Part, "from_uri"):
-            try:
-                video_part = types.Part.from_uri(file_uri=video_url, mime_type="video/*")
-            except Exception as e:
-                logger.debug(f"types.Part.from_uri 생성 생략: {e}")
+        parsed_result = self.executor.safe_generate_structured(
+            contents=user_content_text,
+            system_instruction=fia_system_prompt,
+            response_schema=YouTubeAnalysisResult,
+            max_input_chars=45000,
+            temperature=0.0,
+            max_retries_per_model=max_retries,
+            base_delay=base_delay,
+        )
 
-        models_to_try = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+        if parsed_result and isinstance(parsed_result, YouTubeAnalysisResult):
+            meta_pub_date = str(video_meta.get("publish_date", "")).strip()
+            if meta_pub_date and meta_pub_date.lower() not in ["null", "none"]:
+                parsed_result.publish_date = meta_pub_date
+            elif not parsed_result.publish_date or parsed_result.publish_date.lower() in ["null", "none"]:
+                parsed_result.publish_date = meta_pub_date
 
-        for model_name in models_to_try:
-            # 1차 멀티모달 Part 시도 -> 실패 시 텍스트 메타데이터 Fallback 시도
-            content_candidates = [
-                ([video_part, user_content_text] if video_part else [user_content_text]),
-                [user_content_text]
-            ]
+            # 티커 기본 정규화 (대문자 및 6자리 zfill)
+            for item in (parsed_result.assets or []):
+                t_clean = (item.ticker or "").strip().upper()
+                if t_clean.isdigit() and 1 <= len(t_clean) <= 6:
+                    item.ticker = t_clean.zfill(6)
+                else:
+                    item.ticker = t_clean
 
-            for contents in content_candidates:
-                if not contents or (len(contents) == 1 and contents[0] is None):
-                    continue
-
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        config = types.GenerateContentConfig(
-                            system_instruction=fia_system_prompt,
-                            response_mime_type="application/json",
-                            response_schema=YouTubeAnalysisResult,
-                            temperature=0.0,
-                        )
-
-                        response = self.client.models.generate_content(
-                            model=model_name,
-                            contents=contents,
-                            config=config,
-                        )
-
-                        if response and response.text:
-                            parsed_result = YouTubeAnalysisResult.model_validate_json(response.text.strip())
-                            meta_pub_date = str(video_meta.get("publish_date", "")).strip()
-                            if meta_pub_date and meta_pub_date.lower() not in ["null", "none"]:
-                                parsed_result.publish_date = meta_pub_date
-                            elif not parsed_result.publish_date or parsed_result.publish_date.lower() in ["null", "none"]:
-                                parsed_result.publish_date = meta_pub_date
-
-                            # 티커 기본 정규화 (대문자 및 6자리 zfill)
-                            for item in (parsed_result.assets or []):
-                                t_clean = (item.ticker or "").strip().upper()
-                                if t_clean.isdigit() and 1 <= len(t_clean) <= 6:
-                                    item.ticker = t_clean.zfill(6)
-                                else:
-                                    item.ticker = t_clean
-
-                            logger.info(f"✅ [Gemini AI 멀티모달 Fallback] Structured Output 파싱 성공 (모델: {model_name})")
-                            return parsed_result
-
-                    except Exception as exc:
-                        err_str = str(exc)
-                        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                            logger.warning("⚠️ [Gemini AI] 쿼터 제한(429) 감지 -> 다음 모델로 전환합니다.")
-                            time.sleep(3.0)
-                            break
-                        if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str.lower():
-                            logger.warning(f"⚠️ [Gemini AI] 일시적 서비스 과부하(503) 감지 ({model_name}, 시도 {attempt}/{max_retries})")
-                            if attempt < max_retries:
-                                time.sleep(base_delay * attempt)
-                                continue
-                            else:
-                                break
-                        if "404" in err_str or "NOT_FOUND" in err_str:
-                            break
-
-                        logger.warning(f"⚠️ [Gemini AI 멀티모달] 호출 오류 ({model_name}, 시도 {attempt}/{max_retries}): {err_str}")
-                        if attempt < max_retries:
-                            time.sleep(base_delay * attempt)
+            logger.info("✅ [Gemini AI 멀티모달 Fallback] Structured Output 파싱 성공")
+            return parsed_result
 
         logger.error("❌ YouTube 멀티모달 Structured Output 분석에 최종 실패하였습니다.")
         return None
