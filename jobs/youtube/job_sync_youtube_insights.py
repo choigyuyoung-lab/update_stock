@@ -621,74 +621,128 @@ def append_video_history_to_guide_page(
 # ==============================================================================
 # 5. 유튜브 최신 영상 및 자막 추출 엔진 (고속 RSS 병렬 스캔 + yt-dlp 자막 엔진)
 # ==============================================================================
-def fetch_videos_via_rss(channel_or_playlist_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False) -> List[Dict[str, Any]]:
-    """YouTube 공식 RSS 피드를 통해 외부 의존성 없이 최신 영상 목록을 초고속 수집합니다."""
-    clean_id = (channel_or_playlist_id or "").strip()
-    if not clean_id:
+def fetch_videos_via_ytdlp_flat(target_url: str, channel_name: str = "", max_videos: int = 5) -> List[Dict[str, Any]]:
+    """YouTube XML RSS가 404/500으로 차단될 때 yt-dlp flat-playlist 방식으로 신규 영상을 100% 확실하게 수집합니다."""
+    if not target_url:
         return []
 
+    clean_target = target_url.strip()
+    if ("/channel/" in clean_target or "/@" in clean_target) and "playlist?list=" not in clean_target:
+        clean_base = clean_target.split("?")[0].rstrip("/")
+        if not clean_base.endswith("/videos"):
+            clean_target = clean_base + "/videos"
+
+    try:
+        ydl_opts = {
+            'extract_flat': 'in_playlist',
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+            'playlist_end': max_videos * 2,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_target, download=False)
+            entries = info.get('entries', []) if info else []
+            videos = []
+            for entry in entries:
+                if not entry:
+                    continue
+                v_id = entry.get('id') or entry.get('url') or ""
+                v_title = entry.get('title', '')
+                # 11자리 정규 Video ID만 추출 (채널 탭명 배제)
+                if not v_id or not v_title or len(v_id) != 11 or re.search(r'[^A-Za-z0-9_-]', v_id):
+                    continue
+                pub_date, pub_time_kst = _parse_video_publish_date(
+                    raw_date=entry.get('upload_date'),
+                    timestamp=entry.get('timestamp')
+                )
+                videos.append({
+                    "video_id": v_id,
+                    "title": v_title,
+                    "url": f"https://www.youtube.com/watch?v={v_id}",
+                    "publish_date": pub_date,
+                    "publish_time_kst": pub_time_kst,
+                    "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
+                    "channel_name": channel_name or entry.get('uploader') or "YouTube",
+                    "guide_name": channel_name or entry.get('uploader') or "YouTube",
+                })
+                if len(videos) >= max_videos:
+                    break
+            return videos
+    except Exception as e:
+        logger.debug(f"yt-dlp flat 메타데이터 수집 실패 ({clean_target}): {e}")
+        return []
+
+
+def fetch_videos_via_rss(channel_or_playlist_id: str, channel_name: str = "", max_videos: int = 5, is_playlist: bool = False, fallback_url: str = "") -> List[Dict[str, Any]]:
+    """YouTube 공식 RSS 피드를 통해 초고속 수집하고, RSS가 차단(404/500)되면 yt-dlp flat 메타데이터로 자동 폴백합니다."""
+    clean_id = (channel_or_playlist_id or "").strip()
+    if not clean_id and not fallback_url:
+        return []
+
+    videos = []
     is_pl = is_playlist or any(clean_id.startswith(p) for p in ["PL", "UU", "FL", "RD", "OLAK5uy_"])
     if is_pl:
         rss_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={clean_id}"
     elif clean_id.startswith("UC"):
         rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={clean_id}"
     else:
-        # URL 또는 @핸들 형태 시 channel_id 정제 시도
         extracted = extract_channel_id(clean_id)
         if extracted.startswith("UC"):
             rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={extracted}"
         else:
-            return []
+            rss_url = ""
 
-    try:
-        res = requests.get(rss_url, timeout=5)
-        if res.status_code != 200:
-            return []
+    if rss_url:
+        try:
+            res = requests.get(rss_url, timeout=5)
+            if res.status_code == 200 and res.text:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(res.text)
+                ns = {
+                    "atom": "http://www.w3.org/2005/Atom",
+                    "yt": "http://www.youtube.com/xml/schemas/2015",
+                    "media": "http://search.yahoo.com/mrss/"
+                }
 
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(res.text)
-        ns = {
-            "atom": "http://www.w3.org/2005/Atom",
-            "yt": "http://www.youtube.com/xml/schemas/2015",
-            "media": "http://search.yahoo.com/mrss/"
-        }
+                for entry in root.findall("atom:entry", ns):
+                    vid_elem = entry.find("yt:videoId", ns)
+                    title_elem = entry.find("atom:title", ns)
+                    pub_elem = entry.find("atom:published", ns)
+                    author_elem = entry.find("atom:author/atom:name", ns)
 
-        videos = []
+                    vid = vid_elem.text.strip() if vid_elem is not None and vid_elem.text else ""
+                    vtitle = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
+                    pub_iso = pub_elem.text.strip() if pub_elem is not None and pub_elem.text else ""
+                    pub_str, pub_time_kst = _parse_video_publish_date(iso_str=pub_iso)
+                    ch_name = author_elem.text.strip() if author_elem is not None and author_elem.text else (channel_name or "YouTube")
 
-        for entry in root.findall("atom:entry", ns):
-            vid_elem = entry.find("yt:videoId", ns)
-            title_elem = entry.find("atom:title", ns)
-            pub_elem = entry.find("atom:published", ns)
-            author_elem = entry.find("atom:author/atom:name", ns)
+                    if vid and vtitle:
+                        videos.append({
+                            "video_id": vid,
+                            "title": vtitle,
+                            "url": f"https://www.youtube.com/watch?v={vid}",
+                            "publish_date": pub_str,
+                            "publish_time_kst": pub_time_kst,
+                            "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
+                            "channel_name": ch_name,
+                            "guide_name": channel_name or ch_name,
+                        })
+                        if len(videos) >= max_videos:
+                            break
+        except Exception as e:
+            logger.debug(f"RSS 피드 파싱 실패 ({clean_id}): {e}")
 
-            vid = vid_elem.text.strip() if vid_elem is not None and vid_elem.text else ""
-            vtitle = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
-            pub_iso = pub_elem.text.strip() if pub_elem is not None and pub_elem.text else ""
-            pub_str, pub_time_kst = _parse_video_publish_date(iso_str=pub_iso)
-            ch_name = author_elem.text.strip() if author_elem is not None and author_elem.text else (channel_name or "YouTube")
+    # RSS가 404/500 또는 차단되어 0건인 경우 yt-dlp 메타데이터로 폴백
+    if not videos:
+        target_url = fallback_url or (f"https://www.youtube.com/playlist?list={clean_id}" if is_pl else f"https://www.youtube.com/channel/{clean_id}")
+        videos = fetch_videos_via_ytdlp_flat(target_url, channel_name=channel_name, max_videos=max_videos)
 
-            if vid and vtitle:
-                videos.append({
-                    "video_id": vid,
-                    "title": vtitle,
-                    "url": f"https://www.youtube.com/watch?v={vid}",
-                    "publish_date": pub_str,
-                    "publish_time_kst": pub_time_kst,
-                    "publish_dt": datetime.now(ZoneInfo("Asia/Seoul")),
-                    "channel_name": ch_name,
-                    "guide_name": channel_name or ch_name,
-                })
-                if len(videos) >= max_videos:
-                    break
-
-        return videos
-    except Exception as e:
-        logger.debug(f"RSS 피드 수집 실패 ({clean_id}): {e}")
-        return []
+    return videos
 
 
 def fetch_all_active_sources_via_rss_parallel(sources: List[Dict[str, Any]], max_workers: int = 8) -> List[Dict[str, Any]]:
-    """모든 활성 채널/재생목록의 RSS 피드를 멀티스레드 병렬(0.3초)로 초고속 수집합니다."""
+    """모든 활성 채널/재생목록의 피드를 멀티스레드 병렬로 초고속 수집합니다."""
     all_videos = []
     if not sources:
         return all_videos
@@ -716,11 +770,11 @@ def fetch_all_active_sources_via_rss_parallel(sources: List[Dict[str, Any]], max
                 }]
             return []
 
-        if not src_ch_id:
+        if not src_ch_id and not src_url:
             return []
 
         is_pl = (src_type == "재생목록") or any(src_ch_id.startswith(p) for p in ["PL", "UU", "FL"])
-        videos = fetch_videos_via_rss(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl)
+        videos = fetch_videos_via_rss(src_ch_id, channel_name=src_name, max_videos=src_max_v, is_playlist=is_pl, fallback_url=src_url)
         for v in videos:
             v["guide_page_id"] = guide_page_id
             v["guide_name"] = src_name
@@ -735,7 +789,7 @@ def fetch_all_active_sources_via_rss_parallel(sources: List[Dict[str, Any]], max
                 if res:
                     all_videos.extend(res)
             except Exception as e:
-                logger.debug(f"RSS 병렬 수집 중 예외: {e}")
+                logger.debug(f"병렬 수집 중 예외: {e}")
 
     return all_videos
 
