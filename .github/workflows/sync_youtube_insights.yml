@@ -68,9 +68,9 @@ jobs:
         if: steps.detect_step.outputs.has_new == 'true'
         continue-on-error: true
         env:
-          PPTP_SERVER: ${{ secrets.PPTP_SERVER }}
-          PPTP_USER: ${{ secrets.PPTP_USERNAME }}
-          PPTP_PASS: ${{ secrets.PPTP_PASSWORD }}
+          PPTP_SERVER: ${{ secrets.PPTP_SERVER || secrets.PPTP_HOST || secrets.PPTP_SERVER_IP || secrets.IPTIME_DDNS || secrets.PPTP_ADDRESS }}
+          PPTP_USER: ${{ secrets.PPTP_USERNAME || secrets.PPTP_USER }}
+          PPTP_PASS: ${{ secrets.PPTP_PASSWORD || secrets.PPTP_PASS }}
         run: |
           if [ -z "$PPTP_SERVER" ] || [ -z "$PPTP_USER" ] || [ -z "$PPTP_PASS" ]; then
             echo "⚠️ [PPTP 미설정] PPTP Secrets 누락 -> 2순위 Tailscale로 폴백합니다."
