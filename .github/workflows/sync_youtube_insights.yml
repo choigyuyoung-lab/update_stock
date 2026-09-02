@@ -61,70 +61,11 @@ jobs:
         run: python -m jobs.youtube.job_sync_youtube_insights --detect-new-videos
 
       # -------------------------------------------------------------
-      # 🛡️ [Step 3-1: 공유기 PPTP VPN 연결 (1순위)] 신규 영상 존재 시 iptime 공유기 VPN 우선 연결
+      # 🛡️ [Step 3: 스마트폰 Tailscale Exit Node 연결] 신규 영상 존재 시 Tailscale 우회망 연결
       # -------------------------------------------------------------
-      - name: "Step 3-1: Connect PPTP VPN (1st Priority: Router)"
-        id: pptp_step
-        if: steps.detect_step.outputs.has_new == 'true'
-        continue-on-error: true
-        env:
-          PPTP_SERVER: ${{ secrets.PPTP_SERVER || secrets.PPTP_HOST || secrets.PPTP_SERVER_IP || secrets.IPTIME_DDNS || secrets.PPTP_ADDRESS }}
-          PPTP_USER: ${{ secrets.PPTP_USERNAME || secrets.PPTP_USER }}
-          PPTP_PASS: ${{ secrets.PPTP_PASSWORD || secrets.PPTP_PASS }}
-        run: |
-          if [ -z "$PPTP_SERVER" ] || [ -z "$PPTP_USER" ] || [ -z "$PPTP_PASS" ]; then
-            echo "⚠️ [PPTP 미설정] PPTP Secrets 누락 -> 2순위 Tailscale로 폴백합니다."
-            echo "pptp_connected=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "🚀 [1순위: 공유기 PPTP] iptime PPTP VPN 연결 시도 ($PPTP_SERVER)..."
-          sudo apt-get update -qq && sudo apt-get install -y -qq pptp-linux ppp
-
-          # 1. PPTP 도메인 -> IP 변환
-          PPTP_SERVER_IP=$(getent hosts "$PPTP_SERVER" | awk '{ print $1 }' | head -n 1)
-          if [ -z "$PPTP_SERVER_IP" ]; then
-            PPTP_SERVER_IP="$PPTP_SERVER"
-          fi
-          echo "🌐 PPTP Server IP: $PPTP_SERVER_IP"
-
-          # 2. 터널 라우팅 유지용 Host Route 등록 (기존 Default GW 고정)
-          DEF_GW=$(ip route show default | awk '/default/ {print $3}' | head -n 1)
-          DEF_IF=$(ip route show default | awk '/default/ {print $5}' | head -n 1)
-          sudo ip route add "$PPTP_SERVER_IP" via "$DEF_GW" dev "$DEF_IF" || true
-
-          # 3. PPTP 터널 생성 및 시작
-          sudo pptpsetup --create pptp_vpn --server "$PPTP_SERVER" --username "$PPTP_USER" --password "$PPTP_PASS" --encrypt --start
-
-          # 4. ppp0 인터페이스 생성 대기 (최대 10초)
-          PPTP_UP=false
-          for i in {1..10}; do
-            if ip addr show dev ppp0 2>/dev/null | grep -q "inet"; then
-              echo "✅ ppp0 터널 인터페이스 활성화 완료 (${i}초 소요)"
-              PPTP_UP=true
-              break
-            fi
-            sleep 1
-          done
-
-          if [ "$PPTP_UP" = "true" ]; then
-            # 5. Default Route를 ppp0로 교체하여 모든 트래픽 우회
-            sudo ip route replace default dev ppp0
-            VPN_IP=$(curl -s --max-time 4 https://api.ipify.org || echo "확인불가")
-            echo "🎉 [1순위 연결 성공] 공유기 PPTP VPN 우회 IP: $VPN_IP"
-            echo "pptp_connected=true" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ [1순위 연결 실패] PPTP 인터페이스 미생성 -> 2순위 Tailscale로 폴백합니다."
-            echo "pptp_connected=false" >> $GITHUB_OUTPUT
-          fi
-
-      # -------------------------------------------------------------
-      # 🌟 [Step 3-2: 스마트폰 Tailscale Exit Node 연결 (2순위 폴백)]
-      # PPTP 연결 실패 시에만 스마트폰 Tailscale을 백업망으로 연결
-      # -------------------------------------------------------------
-      - name: "Step 3-2: Connect Tailscale Smartphone Exit Node (2nd Priority Fallback)"
+      - name: "Step 3: Connect Tailscale Smartphone Exit Node"
         id: tailscale_step
-        if: steps.detect_step.outputs.has_new == 'true' && steps.pptp_step.outputs.pptp_connected != 'true'
+        if: steps.detect_step.outputs.has_new == 'true'
         uses: tailscale/github-action@v3
         continue-on-error: true
         with:
@@ -142,13 +83,12 @@ jobs:
         run: python -m jobs.youtube.job_sync_youtube_insights --fetch-target-videos
 
       # -------------------------------------------------------------
-      # 🌟 [Step 5: VPN 즉시 해제 (Cleanup)] 작업 완료 후 PPTP & Tailscale 모두 안전 해제
+      # 🌟 [Step 5: Tailscale VPN 즉시 해제 (Cleanup)] 작업 완료 후 안전 해제
       # -------------------------------------------------------------
-      - name: "Step 5: Disconnect All VPNs Immediately"
+      - name: "Step 5: Disconnect Tailscale VPN Immediately"
         if: always() && steps.detect_step.outputs.has_new == 'true'
         run: |
-          echo "🧹 [VPN 리소스 정리]"
-          sudo poff pptp_vpn 2>/dev/null || true
+          echo "🧹 [Tailscale 리소스 정리]"
           sudo tailscale logout 2>/dev/null || true
 
       # -------------------------------------------------------------

@@ -869,7 +869,7 @@ def detect_new_videos_pipeline(notion_client: Any = None) -> List[Dict[str, Any]
     if new_videos:
         for idx, nv in enumerate(new_videos, 1):
             print(f"     {idx}. [{nv.get('guide_name')}] {nv.get('title')[:45]} (ID: {nv.get('video_id')}, KST: {nv.get('publish_time_kst')})")
-        print("\n   ➔ 우회망(1순위: 공유기 PPTP, 2순위: Tailscale)을 연결하여 자막을 수집합니다.")
+        print("\n   ➔ 우회망(Tailscale Exit Node)을 연결하여 자막을 수집합니다.")
     else:
         print("   ✨ 새로운 동영상이 없습니다 -> VPN 연결을 생략합니다 (0초 소모).")
     print("-" * 80)
@@ -1570,7 +1570,7 @@ def fetch_subtitles_for_targets(target_video_ids: Optional[List[str]] = None, so
     (1회 최대 max_fetch_count개 수집하여 멈춤 및 긴 소요 시간 방지)
     """
     print("=" * 80)
-    print("📥 [자막 수집 단계: yt-dlp 전용] 우회망(1순위: 공유기 PPTP, 2순위: Tailscale) 경유 자막 추출")
+    print("📥 [자막 수집 단계: yt-dlp 전용] 우회망(Tailscale Exit Node) 경유 자막 추출")
     print("=" * 80)
 
     detected_videos = load_detected_new_videos()
